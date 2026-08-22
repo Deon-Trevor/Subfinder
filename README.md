@@ -1,10 +1,11 @@
 # Subfinder
 
-Subfinder is a passive subdomain enumeration service. Twelve source adapters
-build a local index from the certificate transparency logs, registry zone data,
-and public crawls. A lookup reads that index and returns every hostname on file
-for one apex, oldest known first, with first-seen dates where the source provides
-them. Nothing is fetched from an upstream source while the caller waits.
+Subfinder is a passive subdomain enumeration service. Source adapters build a
+local index from certificate transparency logs, registry zone data, public
+crawls, and optional account-backed services. A lookup reads that index and
+returns every hostname on file for one apex, oldest known first, with first-seen
+dates where the source provides them. Nothing is fetched from an upstream source
+while the caller waits.
 
 Queries are reads against a local SQLite index. `GET /v1/search` and `POST /mcp`
 never probe the requested apex or the hostnames they return.
@@ -105,9 +106,16 @@ the suite rather than quietly draining callers.
 
 ## Ingestion
 
-Bulk adapters: `gov` (CISA), `ee`/`se`/`nu` (AXFR `zonedata.iis.se` / `zone.internet.ee`), `ch`/`li` gated by `CTLOGS_ENABLE_CH_LI=1` (TSIG `zonedata.switch.ch`), `root` (IANA), `chaos` (public JSONL), `hagezi` (host lists), `commoncrawl` (CDX).
+Bulk adapters: `gov` (CISA), `ee`/`se`/`nu` (AXFR
+`zonedata.iis.se` / `zone.internet.ee`), `ch`/`li` gated by
+`CTLOGS_ENABLE_CH_LI=1` (TSIG `zonedata.switch.ch`), `root` (IANA), `chaos`
+(public JSONL), `hagezi` (host lists), `commoncrawl` (CDX), and `czds`
+(approved registry zones).
 
-CT discovery: `chrome_ct` (`gstatic` log_list), `apple_ct` (`valid.apple.com`), `direct_ct` (`ct/v1/get-entries` / `get-sth`), `geomys` (archive JSONL, `gzip` aware).
+CT discovery: `chrome_ct` (`gstatic` log list), `apple_ct`
+(`valid.apple.com`), `direct_ct` (`ct/v1/get-entries` / `get-sth`), and
+`static_ct` (C2SP data tiles). Censys, ProjectDiscovery Chaos, and urlscan are
+separate account-backed enrichment jobs.
 
 Static CT monitoring prefixes use the C2SP data-tile reader. Configure them as
 a comma-separated list in `CTLOGS_STATIC_CT_URLS`. Docker Compose includes the
@@ -128,6 +136,59 @@ or ETag is a no-op.
 python -m ctlogs.ingest.backfill --db data/ctlogs.sqlite3 \
   --job hagezi=/data/hagezi.txt \
   --job chaos=https://example.invalid/chaos.jsonl
+```
+
+The maintained IANA root and CISA `.gov` artifacts can be run together:
+
+```bash
+python -m ctlogs.ingest.backfill --db data/ctlogs.sqlite3 --defaults
+```
+
+Historical RFC 6962 replay has a separate cursor and batch budget, so it does
+not move or compete with the live tail cursor:
+
+```bash
+python -m ctlogs.ingest.history --db data/ctlogs.sqlite3 \
+  --log-url https://ct.example/log --max-batches-per-log 8
+```
+
+Account-backed sources are explicit per-apex jobs. Put their credentials in an
+untracked `.env` file using `.env.example`, then export them into the job
+environment. Each invocation has its own request budget.
+
+```bash
+python -m ctlogs.ingest.enrich --db data/ctlogs.sqlite3 \
+  --source censys --apex example.com --max-requests 10
+python -m ctlogs.ingest.enrich --db data/ctlogs.sqlite3 \
+  --source chaos-api --apex example.com --max-requests 10
+python -m ctlogs.ingest.enrich --db data/ctlogs.sqlite3 \
+  --source urlscan --apex example.com --max-requests 10
+```
+
+With Docker Compose, run the same modules through the dormant `jobs` service.
+Provider secrets are available to that short-lived container, not to the
+public API service.
+
+```bash
+docker compose run --rm jobs -m ctlogs.ingest.enrich --db /data/ctlogs.sqlite3 \
+  --source censys --apex example.com --max-requests 10
+```
+
+Approved ICANN CZDS zones can be downloaded and indexed without using the web
+portal. The default cap is 25 zones per run. Use `--tld` to select a subset.
+
+```bash
+python -m ctlogs.ingest.czds --db data/ctlogs.sqlite3 \
+  --output data/czds --max-zones 25
+```
+
+Preview and remove only the known provenance-free development fixtures. An
+SQLite backup is mandatory for the modifying command.
+
+```bash
+python -m ctlogs.maintenance --db data/ctlogs.sqlite3
+python -m ctlogs.maintenance --db data/ctlogs.sqlite3 --apply \
+  --backup data/backups/ctlogs-before-fixture-cleanup.sqlite3
 ```
 
 See [SOURCES.md](SOURCES.md) for the full default no-credential catalog and optional account-backed sources.
