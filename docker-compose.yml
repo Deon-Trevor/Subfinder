@@ -11,7 +11,7 @@ services:
       CTLOGS_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,[::1]:*"
       CTLOGS_ALLOWED_ORIGINS: "http://127.0.0.1:*,http://localhost:*"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/v1/search?apex=example.com"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 10s
       timeout: 3s
       retries: 3

@@ -20,6 +20,6 @@ RUN mkdir -p /data && chmod 777 /data
 EXPOSE 8000
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:8000/v1/search?apex=example.com" > /dev/null || exit 1
+  CMD curl -fsS "http://127.0.0.1:8000/health" > /dev/null || exit 1
 
 CMD ["uvicorn", "ctlogs.app:app", "--host", "0.0.0.0", "--port", "8000"]

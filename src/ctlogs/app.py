@@ -152,6 +152,10 @@ def create_app(
     app.state.database = database
     app.state.mcp = mcp
 
+    @app.get("/health")
+    async def health() -> PlainTextResponse:
+        return PlainTextResponse("ok")
+
     @app.get("/v1/search")
     async def search_api(
         request: Request,
