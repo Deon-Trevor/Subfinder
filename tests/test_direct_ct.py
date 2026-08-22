@@ -170,6 +170,40 @@ def test_poll_and_store_persists_leaf_names_and_timestamp(
     ]
 
 
+def test_poll_and_store_skips_one_unparseable_certificate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database(tmp_path / "ct.sqlite3")
+    database.initialize()
+    client = DirectCTClient(database)
+    entries = [
+        {"case": "malformed"},
+        {"dns_names": ["kept.example.com"]},
+    ]
+
+    monkeypatch.setattr(
+        client,
+        "get_entries",
+        lambda _log_url, _start, _end: entries,
+    )
+    original_extract = client._extract_hostnames
+
+    def extract(entry: dict[str, Any]) -> list[str]:
+        if entry.get("case") == "malformed":
+            raise ValueError("invalid certificate ASN.1")
+        return original_extract(entry)
+
+    monkeypatch.setattr(client, "_extract_hostnames", extract)
+
+    result = client.poll_and_store("https://log.example", 10, 11)
+
+    assert result == PollResult(entry_count=2, hostname_count=1)
+    assert [row.subdomain for row in database.search("example.com")] == [
+        "kept.example.com"
+    ]
+
+
 def test_fixture_dns_names_path_lowercases_and_normalizes_wildcards(
     tmp_path: Path,
 ) -> None:
