@@ -187,25 +187,39 @@ def run_czds(
     *,
     tlds: set[str] | None = None,
     max_zones: int = 25,
+    refresh: bool = False,
 ) -> tuple[int, int]:
-    links = [
-        link
-        for link in client.approved_links()
-        if tlds is None or _zone_from_link(link) in tlds
-    ]
+    links = sorted(
+        (
+            link
+            for link in client.approved_links()
+            if tlds is None or _zone_from_link(link) in tlds
+        ),
+        key=_zone_from_link,
+    )
     zone_count = 0
     hostname_count = 0
-    for link in links[:max_zones]:
+    attempt_count = 0
+    for link in links:
         zone = _zone_from_link(link)
         state_key = f"czds-download:{zone}"
         state = database.get_ingest_state(state_key)
+        if state and not refresh:
+            continue
+        if attempt_count >= max_zones:
+            break
+        attempt_count += 1
         path = output_directory / f"{zone}.zone.gz"
         started_at = datetime.now(UTC).isoformat()
         started = time.monotonic()
-        result = client.download(
-            link,
-            path,
-            if_modified_since=state.get("etag") if state else None,
+        result = (
+            (path.stat().st_size, None)
+            if path.exists() and state is None
+            else client.download(
+                link,
+                path,
+                if_modified_since=state.get("etag") if state else None,
+            )
         )
         if result is None:
             continue
@@ -239,6 +253,7 @@ def main() -> None:
     parser.add_argument("--tld", action="append")
     parser.add_argument("--max-zones", type=int, default=25)
     parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args()
     if args.max_zones < 1 or args.timeout < 1:
         parser.error("max-zones and timeout must be positive")
@@ -255,6 +270,7 @@ def main() -> None:
         Path(args.output),
         tlds={item.lower().lstrip(".") for item in args.tld} if args.tld else None,
         max_zones=args.max_zones,
+        refresh=args.refresh,
     )
     print(f"czds: zones={zones} hostnames={hostnames}")
 

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from ctlogs.database import Database
-from ctlogs.ingest.czds import AUTH_URL, LINKS_URL, CzdsClient, import_zone
+from ctlogs.ingest.czds import AUTH_URL, LINKS_URL, CzdsClient, import_zone, run_czds
 
 
 class Response:
@@ -68,3 +68,51 @@ def test_import_zone_keeps_delegated_domains_only(tmp_path: Path) -> None:
         "beta.example"
     ]
 
+
+def test_capped_runs_advance_past_completed_zones(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "czds.sqlite3")
+    database.initialize()
+    downloads: list[str] = []
+
+    class Client:
+        def approved_links(self) -> list[str]:
+            return [
+                "https://czds-api.icann.org/czds/downloads/beta.zone",
+                "https://czds-api.icann.org/czds/downloads/alpha.zone",
+            ]
+
+        def download(self, url: str, destination: Path, **_kwargs):
+            downloads.append(url)
+            return 10, "Fri, 22 Aug 2026 00:00:00 GMT"
+
+    monkeypatch.setattr("ctlogs.ingest.czds.import_zone", lambda *_args: 1)
+
+    assert run_czds(database, Client(), tmp_path, max_zones=1) == (1, 1)  # type: ignore[arg-type]
+    assert run_czds(database, Client(), tmp_path, max_zones=1) == (1, 1)  # type: ignore[arg-type]
+    assert [url.rsplit("/", 1)[-1] for url in downloads] == [
+        "alpha.zone",
+        "beta.zone",
+    ]
+
+
+def test_completed_local_download_resumes_without_fetching(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "czds.sqlite3")
+    database.initialize()
+    (tmp_path / "alpha.zone.gz").write_bytes(b"complete archive")
+
+    class Client:
+        def approved_links(self) -> list[str]:
+            return ["https://czds-api.icann.org/czds/downloads/alpha.zone"]
+
+        def download(self, *_args, **_kwargs):
+            raise AssertionError("completed local archive was downloaded again")
+
+    monkeypatch.setattr("ctlogs.ingest.czds.import_zone", lambda *_args: 1)
+
+    assert run_czds(database, Client(), tmp_path, max_zones=1) == (1, 1)  # type: ignore[arg-type]

@@ -25,15 +25,14 @@ services:
     image: ctlogs:latest
     profiles: ["jobs"]
     entrypoint: ["python"]
+    healthcheck:
+      disable: true
     volumes:
       - ctlogs-data:/data
-    environment:
-      CENSYS_PERSONAL_ACCESS_TOKEN: "${CENSYS_PERSONAL_ACCESS_TOKEN:-}"
-      CENSYS_ORGANIZATION_ID: "${CENSYS_ORGANIZATION_ID:-}"
-      PDCP_API_KEY: "${PDCP_API_KEY:-}"
-      URLSCAN_API_KEY: "${URLSCAN_API_KEY:-}"
-      CZDS_USERNAME: "${CZDS_USERNAME:-}"
-      CZDS_PASSWORD: "${CZDS_PASSWORD:-}"
+    env_file:
+      - path: .env.providers
+        required: false
+        format: raw
 
 volumes:
   ctlogs-data:
