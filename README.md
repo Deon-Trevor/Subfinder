@@ -1,12 +1,10 @@
 # Subfinder
 
-Subfinder is the global `crt` source used by
-[`subfaster`](https://github.com/melvinsh/subfaster). It keeps a local index of
-the hostnames published in the certificate transparency logs and answers an
-apex lookup as one indexed read against that copy rather than a live crawl.
-Subfaster runs its other six fast per-apex sources in the client and merges
-their results with this API, so this backend never repeats those request-time
-lookups.
+Subfinder is a passive subdomain enumeration service. Twelve ingest adapters
+build a local index from the certificate transparency logs, registry zone data,
+and public crawls. A lookup reads that index and returns every hostname on file
+for one apex, oldest first, each with the date it first appeared. Nothing is
+fetched while the caller waits.
 
 Queries are reads against a local SQLite index. `GET /v1/search` and `POST /mcp`
 never probe the requested apex or the hostnames they return.
