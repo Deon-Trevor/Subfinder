@@ -416,7 +416,7 @@ button { cursor: pointer; }
 .quota.is-spent { color: var(--rose); }
 .quota.is-spent .quota-track { background: var(--rose-quiet); box-shadow: inset 0 0 0 1px var(--rose); }
 
-/* ── the stance panel: why this index never probes ───────────────── */
+/* ── source panel: where the names come from ─────────────────────── */
 .stance {
   border: 1px solid var(--rule);
   border-radius: var(--radius-lg);
@@ -461,9 +461,9 @@ button { cursor: pointer; }
 .stance-value.is-never { color: var(--rose); }
 .stance-value.is-quiet { color: var(--ink-3); }
 
-/* The one row that is this service, marked so the split reads at a glance. */
-.stance-row.is-self .stance-label { color: var(--sage); font-weight: 600; }
-.stance-row.is-self { background: var(--sage-quiet); margin-inline: -1.25rem; padding-inline: 1.25rem; }
+/* The family the index leans on hardest, lit so the table has a lead row. */
+.stance-row.is-primary .stance-label { color: var(--sage); font-weight: 600; }
+.stance-row.is-primary { background: var(--sage-quiet); margin-inline: -1.25rem; padding-inline: 1.25rem; }
 
 .stance-note {
   margin-top: .9rem;
@@ -519,7 +519,7 @@ button { cursor: pointer; }
 
 .wire-note.is-gain { color: var(--sage); }
 
-/* ── wiring it into a subfaster run ──────────────────────────────── */
+/* ── using the API directly ──────────────────────────────────────── */
 .wireup { padding-block: 1rem 3.5rem; }
 
 .wireup-grid {

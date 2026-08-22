@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Subfinder</title>
-<meta name="description" content="Passive subdomain enumeration from a local index of every hostname the certificate transparency logs have published. One indexed read per apex. Never probes the apex you look up.">
+<meta name="description" content="Passive subdomain enumeration. One apex in, every hostname on file out, read from a local index built from certificate transparency logs, registry zone data, and public crawls. Never probes the apex you look up.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%230C100E%22/><g fill=%22%237FC29B%22><rect x=%227%22 y=%229%22 width=%2218%22 height=%223.4%22 rx=%221.7%22/><rect x=%227%22 y=%2214.9%22 width=%2213%22 height=%223.4%22 rx=%221.7%22/><rect x=%227%22 y=%2220.8%22 width=%228%22 height=%223.4%22 rx=%221.7%22/></g></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -38,8 +38,8 @@
     <div class="hero-grid">
       <div>
         <p class="eyebrow">Passive subdomain enumeration</p>
-        <h1 class="hero-title">Certificate transparency, <em>already read</em>.</h1>
-        <p class="hero-lede">A local index of every hostname the certificate transparency logs have published. Give it an apex and the names come back oldest first, each one carrying the date it first appeared.</p>
+        <h1 class="hero-title">Subdomains, <em>already found</em>.</h1>
+        <p class="hero-lede">A local index built from the certificate transparency logs, registry zone data, and public crawls. Give it an apex and the names come back oldest first, each one carrying the date it first appeared. Nothing is fetched while you wait.</p>
 
         <form class="search" id="search-form" autocomplete="off">
           <div class="search-row">
@@ -64,36 +64,32 @@
       </div>
 
       <aside class="stance">
-        <p class="eyebrow">Where this sits in a run</p>
-        <p class="stance-intro">Subfaster asks seven keyless sources at once. It queries six of them itself, once per apex. The seventh is this service.</p>
+        <p class="eyebrow">Where the names come from</p>
+        <p class="stance-intro">Twelve adapters feed the index, in three families.</p>
         <div class="stance-list">
-          <div class="stance-row is-self">
+          <div class="stance-row is-primary">
             <span class="stance-label mono">certificate transparency</span>
-            <span class="stance-value">this service</span>
+            <span class="stance-value">5 readers</span>
           </div>
           <div class="stance-row">
-            <span class="stance-label mono">thc</span>
-            <span class="stance-value is-quiet">in the client</span>
+            <span class="stance-label mono">registry zone data</span>
+            <span class="stance-value">4 sources</span>
           </div>
           <div class="stance-row">
-            <span class="stance-label mono">submd</span>
-            <span class="stance-value is-quiet">in the client</span>
+            <span class="stance-label mono">crawls and host lists</span>
+            <span class="stance-value">3 imports</span>
           </div>
           <div class="stance-row">
-            <span class="stance-label mono">shodanct</span>
-            <span class="stance-value is-quiet">in the client</span>
+            <span class="stance-label mono">fields kept per name</span>
+            <span class="stance-value">3</span>
           </div>
           <div class="stance-row">
-            <span class="stance-label mono">rapiddns</span>
-            <span class="stance-value is-quiet">in the client</span>
+            <span class="stance-label mono">certificate bodies kept</span>
+            <span class="stance-value is-never">none</span>
           </div>
           <div class="stance-row">
-            <span class="stance-label mono">hackertarget</span>
-            <span class="stance-value is-quiet">in the client</span>
-          </div>
-          <div class="stance-row">
-            <span class="stance-label mono">sitedossier</span>
-            <span class="stance-value is-quiet">in the client</span>
+            <span class="stance-label mono">active probing</span>
+            <span class="stance-value is-never">never</span>
           </div>
         </div>
         <p class="stance-note">Nothing here probes the apex you type or resolves a name it hands back. The domain you look up never learns you looked.</p>
@@ -153,11 +149,13 @@
   <section class="wireup wrap">
     <div class="wireup-grid">
       <div>
-        <p class="eyebrow">Using it from subfaster</p>
-        <h2 class="wireup-title">One call instead of a crawl.</h2>
-        <p>Point subfaster's certificate transparency source at this host. That half of a run stops being the slow half, and this backend never repeats the six per-apex lookups the client is already making.</p>
-        <pre class="wireup-code mono"><code>subfaster -d example.com
-subfaster -dL domains.txt -o out.txt</code></pre>
+        <p class="eyebrow">Using it</p>
+        <h2 class="wireup-title">One call, no key.</h2>
+        <p>One apex in, hostnames out, from a shell or from anything that speaks HTTP. There is no key to request and no account to make. An apex with nothing on file answers 200 with an empty body, so a miss is cheap to handle.</p>
+        <pre class="wireup-code mono"><code>curl -s "$SUBFINDER/v1/search?apex=example.com"
+
+curl -s "$SUBFINDER/v1/search?apex=example.com&amp;format=json&amp;dates=1" \
+  | jq -r '.[] | "\(.first_seen // "undated")\t\(.sub)"'</code></pre>
       </div>
       <div>
         <p class="eyebrow">What the index is built from</p>
@@ -196,7 +194,7 @@ subfaster -dL domains.txt -o out.txt</code></pre>
   <div class="wrap">
     <footer class="footer">
       <span>Subfinder</span>
-      <span>certificate transparency, indexed</span>
+      <span>passive, no probes</span>
       <span class="topbar-spacer"></span>
       <span>Sync_Pundit</span>
     </footer>
