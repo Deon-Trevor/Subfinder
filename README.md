@@ -153,8 +153,9 @@ python -m ctlogs.ingest.history --db data/ctlogs.sqlite3 \
 ```
 
 Account-backed sources are explicit per-apex jobs. Put their credentials in an
-untracked `.env` file using `.env.example`, then export them into the job
-environment. Each invocation has its own request budget.
+untracked `.env.providers` file using `.env.example`. Each invocation has its
+own request budget. The different filename matters because Compose otherwise
+interpolates dollar signs while automatically loading `.env`.
 
 ```bash
 python -m ctlogs.ingest.enrich --db data/ctlogs.sqlite3 \
@@ -176,6 +177,8 @@ docker compose run --rm jobs -m ctlogs.ingest.enrich --db /data/ctlogs.sqlite3 \
 
 Approved ICANN CZDS zones can be downloaded and indexed without using the web
 portal. The default cap is 25 zones per run. Use `--tld` to select a subset.
+Completed zones are skipped on later capped runs. Use `--refresh` to make
+conditional requests for zones that already have download state.
 
 ```bash
 python -m ctlogs.ingest.czds --db data/ctlogs.sqlite3 \
