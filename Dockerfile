@@ -22,9 +22,9 @@ COPY web ./web
 # Ensure data dir exists and is writable (DB lives here)
 RUN mkdir -p /data && chmod 777 /data
 
-EXPOSE 8000
+EXPOSE 8200
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:8000/health" > /dev/null || exit 1
+  CMD curl -fsS "http://127.0.0.1:8200/health" > /dev/null || exit 1
 
-CMD ["uvicorn", "ctlogs.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "ctlogs.app:app", "--host", "0.0.0.0", "--port", "8200"]

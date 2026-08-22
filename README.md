@@ -16,18 +16,18 @@ Build and run. The live CT worker fills an empty database from current log entri
 
 ```bash
 docker build -t ctlogs:latest .
-docker run -d -p 8000:8000 --name ctlogs ctlogs:latest
+docker run -d -p 8200:8200 --name ctlogs ctlogs:latest
 # or
 docker compose up -d --build
 ```
 
-The image runs `uvicorn ctlogs.app:app --host 0.0.0.0 --port 8000` with `CTLOGS_DB_PATH=/data/ctlogs.sqlite3` persisted in the `ctlogs-data` volume. Production auto-seeding is disabled. Set `CTLOGS_AUTO_SEED=1` only for a local fixture database.
+The image runs `uvicorn ctlogs.app:app --host 0.0.0.0 --port 8200` with `CTLOGS_DB_PATH=/data/ctlogs.sqlite3` persisted in the `ctlogs-data` volume. Production auto-seeding is disabled. Set `CTLOGS_AUTO_SEED=1` only for a local fixture database.
 
-Healthcheck: `curl -fsS http://127.0.0.1:8000/health`
+Healthcheck: `curl -fsS http://127.0.0.1:8200/health`
 
 ```bash
-curl "http://127.0.0.1:8000/v1/search?apex=syncpundit.io"
-curl "http://127.0.0.1:8000/v1/search?apex=syncpundit.io&format=json"
+curl "http://127.0.0.1:8200/v1/search?apex=syncpundit.io"
+curl "http://127.0.0.1:8200/v1/search?apex=syncpundit.io&format=json"
 ```
 
 ## Run locally
