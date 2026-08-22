@@ -138,6 +138,13 @@ def create_app(
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         database.initialize()
+        # Auto-seed so `docker run` is immediately queryable without manual ingest
+        try:
+            from ctlogs.seed import seed_if_empty
+
+            seed_if_empty(database)
+        except Exception:
+            pass
         async with mcp.session_manager.run():
             yield
 
