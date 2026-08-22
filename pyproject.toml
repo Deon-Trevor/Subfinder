@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctlogs"
+version = "0.1.0"
+description = "Indexed subdomain search API"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "mcp>=2,<3",
+  "tldextract>=5.3,<6",
+  "uvicorn>=0.35,<1",
+]
+
+[project.optional-dependencies]
+test = [
+  "httpx>=0.28,<1",
+  "pytest>=8,<10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctlogs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
