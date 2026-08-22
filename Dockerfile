@@ -3,7 +3,9 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    CTLOGS_DB_PATH=/data/ctlogs.sqlite3
+    CTLOGS_DB_PATH=/data/ctlogs.sqlite3 \
+    CTLOGS_ENABLE_LIVE_CT=1 \
+    CTLOGS_AUTO_SEED=1
 
 WORKDIR /app
 

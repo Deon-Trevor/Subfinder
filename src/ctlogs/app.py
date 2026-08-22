@@ -138,15 +138,38 @@ def create_app(
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         database.initialize()
-        # Auto-seed so `docker run` is immediately queryable without manual ingest
-        try:
-            from ctlogs.seed import seed_if_empty
+        # Auto-seed for Docker (CTLOGS_AUTO_SEED=1) so `docker run` is immediately queryable
+        if os.environ.get("CTLOGS_AUTO_SEED") == "1":
+            try:
+                from ctlogs.seed import seed_if_empty
 
-            seed_if_empty(database)
-        except Exception:
-            pass
+                seed_if_empty(database)
+            except Exception:
+                pass
+        # Background CT poller - polls all usable Chrome/Apple logs (enabled in Docker via ENV=1)
+        worker_task = None
+        if os.environ.get("CTLOGS_ENABLE_LIVE_CT") == "1":
+            try:
+                import asyncio
+                from ctlogs.worker import worker_loop
+
+                worker_task = asyncio.create_task(worker_loop(database))
+            except Exception:
+                worker_task = None
         async with mcp.session_manager.run():
-            yield
+            try:
+                yield
+            finally:
+                if worker_task is not None:
+                    worker_task.cancel()
+                    try:
+                        import asyncio
+
+                        await worker_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
 
     app = FastAPI(title="CT Logs API", version="1.0.0", lifespan=lifespan)
     app.state.database = database
