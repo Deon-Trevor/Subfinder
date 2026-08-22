@@ -56,9 +56,10 @@ class GeomysArchive:
         records = self.parse_file(path)
         if not records:
             return 0
-        apex_c, host_c = _batch_upsert(self.database, records)
+        source = f"geomys:{path}"
+        apex_c, host_c = _batch_upsert(self.database, records, source=source)
         self.database.record_ingest_run(
-            f"geomys:{path}",
+            source,
             datetime.now(UTC).isoformat(),
             datetime.now(UTC).isoformat(),
             apex_c,

@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import asyncio
+import hashlib
+import logging
 import os
 import re
+import secrets
+import time
+from functools import lru_cache
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Literal
@@ -14,9 +20,11 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from ctlogs.database import Database, Quota, QuotaExceeded
+from ctlogs.web import mount_frontend
 
 DAILY_REQUEST_LIMIT = 1_000
 LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+LOGGER = logging.getLogger("ctlogs.app")
 EXTRACT = tldextract.TLDExtract(
     suffix_list_urls=(),
     include_psl_private_domains=True,
@@ -24,6 +32,20 @@ EXTRACT = tldextract.TLDExtract(
 )
 
 
+def _get_env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+    if parsed < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
+@lru_cache(maxsize=2048)
 def normalize_apex(value: str) -> str:
     candidate = value.strip().lower().rstrip(".")
     try:
@@ -58,10 +80,8 @@ def _quota_headers(quota: Quota) -> dict[str, str]:
 
 
 def _retry_headers(quota: Quota) -> dict[str, str]:
-    from time import time as unix_time
-
     headers = _quota_headers(quota)
-    headers["Retry-After"] = str(max(1, quota.reset_at - int(unix_time())))
+    headers["Retry-After"] = str(max(1, quota.reset_at - int(time.time())))
     return headers
 
 
@@ -76,11 +96,27 @@ def create_app(
     database_path: str | Path | None = None,
     *,
     daily_request_limit: int = DAILY_REQUEST_LIMIT,
+    api_tokens: list[str] | None = None,
+    token_request_limit: int | None = None,
     allowed_hosts: list[str] | None = None,
     allowed_origins: list[str] | None = None,
 ) -> FastAPI:
     if daily_request_limit < 1:
         raise ValueError("daily_request_limit must be positive")
+
+    configured_tokens = (
+        api_tokens
+        if api_tokens is not None
+        else _csv_environment("CTLOGS_API_TOKENS", [])
+    )
+    configured_tokens = [token for token in configured_tokens if token]
+    authenticated_limit = (
+        token_request_limit
+        if token_request_limit is not None
+        else _get_env_int("CTLOGS_TOKEN_REQUEST_LIMIT", 10_000)
+    )
+    if authenticated_limit < 1:
+        raise ValueError("token_request_limit must be positive")
 
     path = database_path or os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3")
     database = Database(path)
@@ -89,8 +125,61 @@ def create_app(
         instructions="Search the indexed passive subdomain corpus by registrable apex.",
     )
 
-    def consume(client_ip: str) -> Quota:
+    def consume(client_ip: str, authorization: str | None = None) -> Quota:
+        if authorization and authorization.startswith("Bearer "):
+            candidate = authorization.removeprefix("Bearer ").strip()
+            if any(
+                secrets.compare_digest(candidate, token)
+                for token in configured_tokens
+            ):
+                subject = "token:" + hashlib.sha256(candidate.encode()).hexdigest()
+                return database.consume_request(subject, authenticated_limit)
         return database.consume_request(client_ip, daily_request_limit)
+
+    def _run_seed_if_needed() -> None:
+        if os.environ.get("CTLOGS_AUTO_SEED") != "1":
+            return
+
+        try:
+            from ctlogs.seed import seed_if_empty
+        except Exception as error:
+            LOGGER.error("Unable to import seed module: %s", error)
+            return
+
+        try:
+            inserted = seed_if_empty(database)
+        except Exception as error:
+            LOGGER.error("Automatic seed failed: %s", error)
+            return
+
+        if inserted:
+            LOGGER.info("Seeded database with %s rows", inserted)
+        else:
+            LOGGER.debug("Seed skipped: database already has data")
+
+    def _run_worker() -> asyncio.Task[None] | None:
+        if os.environ.get("CTLOGS_ENABLE_LIVE_CT") != "1":
+            return None
+
+        try:
+            from ctlogs.worker import worker_loop
+
+            interval = _get_env_int("CTLOGS_WORKER_INTERVAL", 60)
+            batch = _get_env_int("CTLOGS_WORKER_BATCH_SIZE", 1024)
+            initial_backfill = _get_env_int("CTLOGS_INITIAL_BACKFILL", 1024)
+            max_batches = _get_env_int("CTLOGS_MAX_BATCHES_PER_LOG", 8)
+            return asyncio.create_task(
+                worker_loop(
+                    database,
+                    interval=interval,
+                    batch=batch,
+                    initial_backfill=initial_backfill,
+                    max_batches=max_batches,
+                )
+            )
+        except Exception as error:
+            LOGGER.error("Unable to start live CT worker: %s", error)
+            return None
 
     @mcp.tool()
     async def search(apex: str, ctx: Context) -> list[str]:
@@ -105,7 +194,7 @@ def create_app(
         if client is None:
             raise RuntimeError("client IP is unavailable")
         try:
-            consume(client.host)
+            consume(client.host, request.headers.get("authorization"))
         except QuotaExceeded as error:
             raise ValueError("daily request limit exceeded") from error
         return [row.subdomain for row in database.search(canonical)]
@@ -138,38 +227,17 @@ def create_app(
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         database.initialize()
-        # Auto-seed for Docker (CTLOGS_AUTO_SEED=1) so `docker run` is immediately queryable
-        if os.environ.get("CTLOGS_AUTO_SEED") == "1":
-            try:
-                from ctlogs.seed import seed_if_empty
-
-                seed_if_empty(database)
-            except Exception:
-                pass
+        _run_seed_if_needed()
         # Background CT poller - polls all usable Chrome/Apple logs (enabled in Docker via ENV=1)
-        worker_task = None
-        if os.environ.get("CTLOGS_ENABLE_LIVE_CT") == "1":
-            try:
-                import asyncio
-                from ctlogs.worker import worker_loop
-
-                worker_task = asyncio.create_task(worker_loop(database))
-            except Exception:
-                worker_task = None
+        worker_task = _run_worker()
         async with mcp.session_manager.run():
             try:
                 yield
             finally:
                 if worker_task is not None:
                     worker_task.cancel()
-                    try:
-                        import asyncio
-
+                    with contextlib.suppress(asyncio.CancelledError):
                         await worker_task
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception:
-                        pass
 
     app = FastAPI(title="CT Logs API", version="1.0.0", lifespan=lifespan)
     app.state.database = database
@@ -178,6 +246,34 @@ def create_app(
     @app.get("/health")
     async def health() -> PlainTextResponse:
         return PlainTextResponse("ok")
+
+    @app.get("/ready")
+    async def ready() -> JSONResponse:
+        stats = database.stats()
+        return JSONResponse(
+            {
+                "status": "ready",
+                "hostname_count": stats.hostname_count,
+                "last_ingest_at": stats.last_ingest_at,
+            },
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.get("/v1/stats")
+    async def index_stats() -> JSONResponse:
+        stats = database.stats()
+        return JSONResponse(
+            {
+                "apex_count": stats.apex_count,
+                "dated_hostname_count": stats.dated_hostname_count,
+                "hostname_count": stats.hostname_count,
+                "ct_hostname_count": stats.ct_hostname_count,
+                "ct_log_count": stats.ct_log_count,
+                "last_ingest_at": stats.last_ingest_at,
+                "source_count": stats.source_count,
+            },
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.get("/v1/search")
     async def search_api(
@@ -192,7 +288,10 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(error)) from error
 
         try:
-            quota = consume(_client_ip(request))
+            quota = consume(
+                _client_ip(request),
+                request.headers.get("authorization"),
+            )
         except QuotaExceeded as error:
             raise HTTPException(
                 status_code=429,
@@ -223,6 +322,7 @@ def create_app(
 
     # The root mount preserves the MCP SDK's exact /mcp route. FastAPI routes
     # are registered first because a root mount catches every remaining path.
+    mount_frontend(app)
     app.mount("/", mcp_app)
     return app
 

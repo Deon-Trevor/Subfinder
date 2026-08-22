@@ -14,9 +14,6 @@ probes a hostname.
 | [Apple CT log list](https://support.apple.com/103214) | Add logs accepted by Apple's program that are not present in Chrome's usable set. |
 | Direct CT log APIs | Read new entries from every usable log in the two program lists. Static CT and RFC 6962 need separate readers. |
 | [Geomys CT Archive](https://github.com/geomys/ct-archive) | Replay retired and historical CT logs, including archives hosted by the Internet Archive. |
-| [crt.sh](https://crt.sh/) | Best-effort historical backfill and comparison. It is not the live ingestion authority. |
-| [Cert Spotter](https://sslmate.com/certspotter/api/) | Keyless per-apex backfill and independent coverage checks. |
-| [Shodan CT](https://ctl.shodan.io/) | Keyless per-apex CT lookup. |
 
 ### Zones and apex discovery
 
@@ -27,24 +24,17 @@ probes a hostname.
 | Registry public data for `.ee`, `.se`, `.nu`, `.ch`, and `.li` | Seed apexes where the registry permits public zone transfer or publishes open zone data. Each adapter must record the registry's access and reuse terms. |
 | [Common Crawl](https://commoncrawl.org/get-started) | Extract historical hostnames and apexes from the free crawl index and data files. |
 
-### Passive enrichment
+### Global passive enrichment
 
 | Source | Use |
 | --- | --- |
 | [ProjectDiscovery Chaos](https://chaos.projectdiscovery.io/) public downloads | Import published public DNS datasets without an API key. |
 | [HaGeZi DNS blocklists](https://github.com/hagezi/dns-blocklists) | Import hostname-only lists as discovery evidence, not as a maliciousness verdict. |
-| [THC](https://ip.thc.org/) | Keyless per-apex passive enumeration. |
-| [sub.md](https://sub.md/) | Keyless per-apex passive enumeration. An optional token may raise its service limits. |
-| [crt.name](https://crt.name/) | Keyless per-apex backfill while it remains an external service. |
-| [RapidDNS](https://rapiddns.io/) | Keyless per-apex passive lookup. |
-| [HackerTarget](https://hackertarget.com/find-dns-host-records/) | Keyless, rate-limited per-apex lookup. |
-| [SiteDossier](http://www.sitedossier.com/) | Keyless per-apex lookup with explicit handling for blocking and incomplete responses. |
-
 The seven fast defaults in
 [`subfaster`](https://github.com/melvinsh/subfaster) are `thc`, `submd`, `crt`,
-`shodanct`, `rapiddns`, `hackertarget`, and `sitedossier`. We can reuse its
-source behavior on the indexing side. If a deployment points `crt` back to its
-own API, that source must be excluded to prevent a collection loop.
+`shodanct`, `rapiddns`, `hackertarget`, and `sitedossier`. The `crt` source calls
+this service once. Subfaster runs the other six per-apex sources concurrently
+and merges their results. Those six sources do not belong in this backend.
 
 ## Optional sources that require a free account or key
 

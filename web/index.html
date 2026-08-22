@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subfinder</title>
+<meta name="description" content="Passive subdomain enumeration from a local index of every hostname the certificate transparency logs have published. One indexed read per apex. Never probes the apex you look up.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%230C100E%22/><g fill=%22%237FC29B%22><rect x=%227%22 y=%229%22 width=%2218%22 height=%223.4%22 rx=%221.7%22/><rect x=%227%22 y=%2214.9%22 width=%2213%22 height=%223.4%22 rx=%221.7%22/><rect x=%227%22 y=%2220.8%22 width=%228%22 height=%223.4%22 rx=%221.7%22/></g></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-mark mono">sf</span>
+      <span class="brand-name">Subfinder</span>
+    </a>
+    <span class="topbar-spacer"></span>
+    <span class="ticker" id="ticker" hidden>
+      <span class="ticker-dot" id="ticker-dot"></span>
+      <span class="ticker-value mono" id="ticker-value">0</span>
+      <span class="ticker-label" id="ticker-label">names indexed</span>
+    </span>
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch colour theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+        <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <section class="hero wrap">
+    <div class="hero-grid">
+      <div>
+        <p class="eyebrow">Passive subdomain enumeration</p>
+        <h1 class="hero-title">Certificate transparency, <em>already read</em>.</h1>
+        <p class="hero-lede">A local index of every hostname the certificate transparency logs have published. Give it an apex and the names come back oldest first, each one carrying the date it first appeared.</p>
+
+        <form class="search" id="search-form" autocomplete="off">
+          <div class="search-row">
+            <div class="search-field">
+              <label class="eyebrow" for="apex" hidden>Apex domain</label>
+              <input class="search-input" id="apex" name="apex" type="text" placeholder="syncpundit.io" spellcheck="false" inputmode="url" required>
+            </div>
+            <button class="search-submit" id="search-submit" type="submit">Enumerate</button>
+          </div>
+
+          <div class="search-meta">
+            <span class="chip is-quiet mono">1000 / IP / day</span>
+            <span class="chip is-quiet mono">No key</span>
+            <div class="quota" id="quota" hidden>
+              <span id="quota-text">--</span>
+              <span class="quota-track"><span class="quota-fill" id="quota-fill"></span></span>
+            </div>
+          </div>
+
+          <div class="search-error" id="search-error" hidden></div>
+        </form>
+      </div>
+
+      <aside class="stance">
+        <p class="eyebrow">Where this sits in a run</p>
+        <p class="stance-intro">Subfaster asks seven keyless sources at once. It queries six of them itself, once per apex. The seventh is this service.</p>
+        <div class="stance-list">
+          <div class="stance-row is-self">
+            <span class="stance-label mono">certificate transparency</span>
+            <span class="stance-value">this service</span>
+          </div>
+          <div class="stance-row">
+            <span class="stance-label mono">thc</span>
+            <span class="stance-value is-quiet">in the client</span>
+          </div>
+          <div class="stance-row">
+            <span class="stance-label mono">submd</span>
+            <span class="stance-value is-quiet">in the client</span>
+          </div>
+          <div class="stance-row">
+            <span class="stance-label mono">shodanct</span>
+            <span class="stance-value is-quiet">in the client</span>
+          </div>
+          <div class="stance-row">
+            <span class="stance-label mono">rapiddns</span>
+            <span class="stance-value is-quiet">in the client</span>
+          </div>
+          <div class="stance-row">
+            <span class="stance-label mono">hackertarget</span>
+            <span class="stance-value is-quiet">in the client</span>
+          </div>
+          <div class="stance-row">
+            <span class="stance-label mono">sitedossier</span>
+            <span class="stance-value is-quiet">in the client</span>
+          </div>
+        </div>
+        <p class="stance-note">Nothing here probes the apex you type or resolves a name it hands back. The domain you look up never learns you looked.</p>
+      </aside>
+    </div>
+
+    <div class="wire" id="wire">
+      <div class="wire-cell">
+        <p class="wire-label" id="stat-hostnames-label">Hostnames on file</p>
+        <p class="wire-value mono" id="stat-hostnames">--</p>
+        <p class="wire-note" id="stat-hostnames-note">reading the index</p>
+      </div>
+      <div class="wire-cell">
+        <p class="wire-label">Apexes covered</p>
+        <p class="wire-value mono" id="stat-apexes">--</p>
+        <p class="wire-note" id="stat-apexes-note">distinct registrable domains</p>
+      </div>
+      <div class="wire-cell">
+        <p class="wire-label">CT logs feeding it</p>
+        <p class="wire-value mono" id="stat-sources">--</p>
+        <p class="wire-note" id="stat-sources-note">counted from ingest evidence</p>
+      </div>
+      <div class="wire-cell">
+        <p class="wire-label">Last write to the index</p>
+        <p class="wire-value mono" id="stat-ingest">--</p>
+        <p class="wire-note" id="stat-ingest-note">from the ingest run log</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="register wrap" id="register" hidden>
+    <div class="register-head">
+      <div>
+        <p class="eyebrow">Names on file</p>
+        <h2 class="register-title"><span class="apex" id="register-apex"></span></h2>
+      </div>
+      <div>
+        <p class="register-count mono" id="register-count"></p>
+        <div class="register-tools">
+          <button class="tool" type="button" data-export="text">Copy list</button>
+          <button class="tool" type="button" data-export="json">Copy JSON</button>
+          <a class="tool" id="api-link" href="#" target="_blank" rel="noopener">Open in API</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="shape" id="shape" hidden>
+      <p class="eyebrow">Names first logged, by year <span class="shape-peak" id="shape-peak"></span></p>
+      <div class="shape-bars" id="shape-bars"></div>
+      <div class="shape-axis" id="shape-axis"></div>
+    </div>
+
+    <div class="ledger" id="ledger"></div>
+    <div id="register-state"></div>
+  </section>
+
+  <section class="wireup wrap">
+    <div class="wireup-grid">
+      <div>
+        <p class="eyebrow">Using it from subfaster</p>
+        <h2 class="wireup-title">One call instead of a crawl.</h2>
+        <p>Point subfaster's certificate transparency source at this host. That half of a run stops being the slow half, and this backend never repeats the six per-apex lookups the client is already making.</p>
+        <pre class="wireup-code mono"><code>subfaster -d example.com
+subfaster -dL domains.txt -o out.txt</code></pre>
+      </div>
+      <div>
+        <p class="eyebrow">What the index is built from</p>
+        <p>The Chrome and Apple log lists name the logs worth reading. A poller walks <code class="mono">ct/v1/get-entries</code> on every usable log in both programs, and the Geomys archive backfills logs that have since retired. Zone data from IANA, CISA, and the registries that publish openly, plus Common Crawl, fill in apexes that certificates alone would miss.</p>
+        <p>Each name keeps three fields. Hostname, apex, and the earliest date any source saw it. No certificate bodies, no serial numbers, no issuer chains.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="docs wrap">
+    <p class="eyebrow">Reading it without a browser</p>
+    <div class="docs-grid">
+      <div class="doc-block">
+        <h3>Search</h3>
+        <code class="doc-endpoint"><span class="doc-verb">GET</span> /v1/search?apex=example.com</code>
+        <p>One hostname per line. Add <code class="mono">&amp;format=json</code> for an array, <code class="mono">&amp;dates=1</code> to attach each first-seen date. Rows come back oldest first, undated names last.</p>
+      </div>
+      <div class="doc-block">
+        <h3>Index size</h3>
+        <code class="doc-endpoint"><span class="doc-verb">GET</span> /v1/stats</code>
+        <p>Counts for the whole index and the timestamp of the last ingest run. It costs nothing against the search allowance, which is what lets the counter above keep itself current.</p>
+      </div>
+      <div class="doc-block">
+        <h3>Allowance</h3>
+        <code class="doc-endpoint">X-RateLimit-Remaining</code>
+        <p>1000 successful reads per IP per UTC day, shared with the MCP endpoint. Every response carries the limit, what is left, and the reset time. A spent allowance returns 429 with <code class="mono">Retry-After</code>.</p>
+      </div>
+      <div class="doc-block">
+        <h3>MCP</h3>
+        <code class="doc-endpoint"><span class="doc-verb">POST</span> /mcp</code>
+        <p>One streamable HTTP tool called <code class="mono">search</code>. Pass an apex, get an array of hostnames. Same allowance as the HTTP route, same refusal to probe.</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <footer class="footer">
+      <span>Subfinder</span>
+      <span>certificate transparency, indexed</span>
+      <span class="topbar-spacer"></span>
+      <span>Sync_Pundit</span>
+    </footer>
+  </div>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

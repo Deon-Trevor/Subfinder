@@ -8,8 +8,9 @@ services:
       - ctlogs-data:/data
     environment:
       CTLOGS_DB_PATH: /data/ctlogs.sqlite3
-      CTLOGS_AUTO_SEED: "1"
+      CTLOGS_AUTO_SEED: "0"
       CTLOGS_ENABLE_LIVE_CT: "1"
+      CTLOGS_STATIC_CT_URLS: "https://mon.willow.ct.letsencrypt.org/2026h2"
       CTLOGS_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,[::1]:*"
       CTLOGS_ALLOWED_ORIGINS: "http://127.0.0.1:*,http://localhost:*"
     healthcheck:

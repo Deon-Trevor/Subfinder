@@ -45,7 +45,7 @@ class ChromeCTLogList:
             url = log.get("url")
             state = log.get("state") or {}
             # v3: state has exactly one key like "usable", "qualified", "pending", "retired", "rejected"
-            # Only poll logs that are currently usable (or qualified) — retired/rejected/pending will 404
+            # Retired, rejected, and pending RFC logs commonly return 404 here.
             if isinstance(state, dict):
                 if not ("usable" in state or "qualified" in state):
                     continue

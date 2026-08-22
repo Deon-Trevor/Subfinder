@@ -12,6 +12,7 @@ dependencies = [
   "mcp>=2,<3",
   "tldextract>=5.3,<6",
   "uvicorn>=0.35,<1",
+  "cryptography>=44,<45",
 ]
 
 [project.optional-dependencies]
@@ -25,4 +26,3 @@ packages = ["src/ctlogs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

@@ -35,7 +35,7 @@ def seed_if_empty(database: Database) -> int:
 
     total = 0
     for apex, rows in _SEED_ROWS.items():
-        database.upsert_subdomains(apex, rows)
+        database.upsert_subdomains(apex, rows, source="seed")
         total += len(rows)
 
     # Record a synthetic ingest run for observability

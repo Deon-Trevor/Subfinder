@@ -29,7 +29,13 @@ def _load_text(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _batch_upsert(database: Database, records, batch_size: int = 5000) -> tuple[int, int]:
+def _batch_upsert(
+    database: Database,
+    records,
+    batch_size: int = 5000,
+    *,
+    source: str | None = None,
+) -> tuple[int, int]:
     from collections import defaultdict
 
     def _apex_for_hostname(hostname: str) -> str:
@@ -48,7 +54,11 @@ def _batch_upsert(database: Database, records, batch_size: int = 5000) -> tuple[
     for apex, rows in grouped.items():
         # earliest first_seen kept by DB upsert, so we just batch
         for i in range(0, len(rows), batch_size):
-            database.upsert_subdomains(apex, rows[i : i + batch_size])
+            database.upsert_subdomains(
+                apex,
+                rows[i : i + batch_size],
+                source=source,
+            )
         hostname_total += len(rows)
     return apex_total, hostname_total
 
@@ -105,10 +115,20 @@ def main() -> None:
         t0 = time.monotonic()
         started = datetime.now(UTC).isoformat()
         records = list(adapter.parse(raw))  # type: ignore
-        apex_c, host_c = _batch_upsert(db, records, batch_size=args.batch_size)
+        apex_c, host_c = _batch_upsert(
+            db,
+            records,
+            batch_size=args.batch_size,
+            source=source,
+        )
         dt = int((time.monotonic() - t0) * 1000)
         # Second pass proves idempotency keeps earliest first_seen
-        apex_c2, host_c2 = _batch_upsert(db, records, batch_size=args.batch_size)
+        apex_c2, host_c2 = _batch_upsert(
+            db,
+            records,
+            batch_size=args.batch_size,
+            source=source,
+        )
         assert apex_c == apex_c2 and host_c == host_c2, "idempotency check failed"
         db.record_ingest_run(source, started, datetime.now(UTC).isoformat(), apex_c, host_c, dt, len(raw))
         print(f"{source}:{path.name} apex={apex_c} host={host_c} duration_ms={dt} bytes={len(raw)}")
