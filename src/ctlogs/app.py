@@ -121,7 +121,7 @@ def create_app(
     path = database_path or os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3")
     database = Database(path)
     mcp = MCPServer(
-        "CT Logs",
+        "Subfinder",
         instructions="Search the indexed passive subdomain corpus by registrable apex.",
     )
 
@@ -239,7 +239,7 @@ def create_app(
                     with contextlib.suppress(asyncio.CancelledError):
                         await worker_task
 
-    app = FastAPI(title="CT Logs API", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="Subfinder API", version="1.0.0", lifespan=lifespan)
     app.state.database = database
     app.state.mcp = mcp
 

@@ -1,10 +1,10 @@
 # Subfinder
 
-Subfinder is a passive subdomain enumeration service. Twelve ingest adapters
+Subfinder is a passive subdomain enumeration service. Twelve source adapters
 build a local index from the certificate transparency logs, registry zone data,
 and public crawls. A lookup reads that index and returns every hostname on file
-for one apex, oldest first, each with the date it first appeared. Nothing is
-fetched while the caller waits.
+for one apex, oldest known first, with first-seen dates where the source provides
+them. Nothing is fetched from an upstream source while the caller waits.
 
 Queries are reads against a local SQLite index. `GET /v1/search` and `POST /mcp`
 never probe the requested apex or the hostnames they return.
@@ -62,8 +62,9 @@ MCP exposes one Streamable HTTP tool `search` (`{ "apex": "example.com" }` → `
 
 `GET /v1/search` and `POST /mcp` share one atomic allowance of 1,000 successful searches per client IP per UTC day (`request_counts`). Configure the reverse proxy to pass the real peer address to Uvicorn. Do not trust a client-supplied forwarding header.
 
-Subfaster's `crt` source can send an optional bearer token. Configure accepted
-tokens with `CTLOGS_API_TOKENS` and the daily limit for each token with
+Deployment operators can issue optional bearer tokens with a separate daily
+allowance. Configure accepted tokens with `CTLOGS_API_TOKENS` and the limit for
+each token with
 `CTLOGS_TOKEN_REQUEST_LIMIT`. The database stores only a SHA-256 token digest
 as the quota identity.
 

@@ -2,12 +2,22 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+import re
 
 import httpx
 import pytest
 
 from ctlogs.app import create_app
 from ctlogs.web import ASSETS, INDEX, frontend_directory
+
+
+PUBLIC_PRODUCT_FILES = (
+    Path("README.md"),
+    Path("SOURCES.md"),
+    Path("web/index.html"),
+    Path("web/app.js"),
+    Path("web/app.css"),
+)
 
 
 def _write_frontend(root: Path) -> Path:
@@ -17,6 +27,17 @@ def _write_frontend(root: Path) -> Path:
     for name in ASSETS:
         (directory / name).write_text(f"/* {name} */")
     return directory
+
+
+def test_public_copy_describes_a_standalone_product() -> None:
+    forbidden = re.compile(r"\bsubfaster\b|\bcrt\b", re.IGNORECASE)
+    for path in PUBLIC_PRODUCT_FILES:
+        assert forbidden.search(path.read_text()) is None, path
+
+
+def test_frontend_never_calls_itself_this_service() -> None:
+    for path in PUBLIC_PRODUCT_FILES[2:]:
+        assert "this service" not in path.read_text().lower(), path
 
 
 @pytest.fixture

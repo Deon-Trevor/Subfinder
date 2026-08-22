@@ -10,10 +10,11 @@ probes a hostname.
 
 | Source | Use |
 | --- | --- |
-| [Chrome CT log lists](https://googlechrome.github.io/CertificateTransparency/log_lists.html) | Discover active and retired RFC 6962 and Static CT logs. Cache the signed list and poll usable logs directly. |
-| [Apple CT log list](https://support.apple.com/103214) | Add logs accepted by Apple's program that are not present in Chrome's usable set. |
-| Direct CT log APIs | Read new entries from every usable log in the two program lists. Static CT and RFC 6962 need separate readers. |
-| [Geomys CT Archive](https://github.com/geomys/ct-archive) | Replay retired and historical CT logs, including archives hosted by the Internet Archive. |
+| [Chrome CT log list](https://googlechrome.github.io/CertificateTransparency/log_lists.html) | Discover usable logs in Chrome's program. |
+| [Apple CT log list](https://support.apple.com/103214) | Add usable logs in Apple's program that are absent from Chrome's list. |
+| RFC 6962 log APIs | Read new entries through `get-sth` and `get-entries`. |
+| [C2SP Static CT](https://c2sp.org/static-ct-api) | Read new entries from configured data-tile monitoring prefixes. |
+| [Geomys CT Archive](https://github.com/geomys/ct-archive) | Replay retired and historical logs, including archives hosted by the Internet Archive. |
 
 ### Zones and apex discovery
 
@@ -21,20 +22,19 @@ probes a hostname.
 | --- | --- |
 | [IANA root zone](https://www.internic.net/domain/root.zone) | TLD inventory and delegation metadata. It does not contain registrant domains. |
 | [CISA .gov data](https://github.com/cisagov/dotgov-data) | Public `.gov` registered-domain and zone-derived data. |
-| Registry public data for `.ee`, `.se`, `.nu`, `.ch`, and `.li` | Seed apexes where the registry permits public zone transfer or publishes open zone data. Each adapter must record the registry's access and reuse terms. |
-| [Common Crawl](https://commoncrawl.org/get-started) | Extract historical hostnames and apexes from the free crawl index and data files. |
+| Registry data for `.ee`, `.se`, and `.nu` | Seed apexes from public zone transfers where the registry permits them. |
+| Registry data for `.ch` and `.li` | Seed apexes through the gated TSIG adapter when `CTLOGS_ENABLE_CH_LI=1`. |
 
-### Global passive enrichment
+### Crawls and host lists
 
 | Source | Use |
 | --- | --- |
+| [Common Crawl](https://commoncrawl.org/get-started) | Extract historical hostnames and apexes from the free crawl index and data files. |
 | [ProjectDiscovery Chaos](https://chaos.projectdiscovery.io/) public downloads | Import published public DNS datasets without an API key. |
 | [HaGeZi DNS blocklists](https://github.com/hagezi/dns-blocklists) | Import hostname-only lists as discovery evidence, not as a maliciousness verdict. |
-The seven fast defaults in
-[`subfaster`](https://github.com/melvinsh/subfaster) are `thc`, `submd`, `crt`,
-`shodanct`, `rapiddns`, `hackertarget`, and `sitedossier`. The `crt` source calls
-this service once. Subfaster runs the other six per-apex sources concurrently
-and merges their results. Those six sources do not belong in this backend.
+
+These twelve adapters build one index. Public searches read that index rather
+than contacting an adapter during the request.
 
 ## Optional sources that require a free account or key
 
