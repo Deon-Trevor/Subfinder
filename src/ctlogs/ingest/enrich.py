@@ -56,91 +56,6 @@ def _json_request(
     return parsed, len(raw)
 
 
-class ChaosApiSource:
-    name = "chaos-api"
-
-    def __init__(self, api_key: str, *, timeout: int = 30, opener=urllib.request.urlopen) -> None:
-        self.api_key = api_key
-        self.timeout = timeout
-        self.opener = opener
-
-    def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
-        if cursor:
-            raise ValueError("Chaos does not support pagination")
-        url = f"https://dns.projectdiscovery.io/dns/{urllib.parse.quote(apex)}/subdomains"
-        payload, size = _json_request(
-            url,
-            headers={"Authorization": self.api_key, "User-Agent": "ctlogs/0.1"},
-            timeout=self.timeout,
-            opener=self.opener,
-        )
-        rows: list[tuple[str, str | None]] = []
-        for label in payload.get("subdomains", []):
-            value = label if not isinstance(label, str) or "." in label else f"{label}.{apex}"
-            hostname = _canonical_hostname(value, apex)
-            if hostname:
-                rows.append((hostname, None))
-        return SourcePage(rows, None, size)
-
-
-class CensysSource:
-    name = "censys"
-
-    def __init__(
-        self,
-        token: str,
-        *,
-        organization_id: str | None = None,
-        page_size: int = 100,
-        timeout: int = 30,
-        opener=urllib.request.urlopen,
-    ) -> None:
-        self.token = token
-        self.organization_id = organization_id
-        self.page_size = page_size
-        self.timeout = timeout
-        self.opener = opener
-
-    def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
-        query = urllib.parse.urlencode(
-            {"organization_id": self.organization_id}
-            if self.organization_id
-            else {}
-        )
-        url = "https://api.platform.censys.io/v3/global/search/query"
-        if query:
-            url = f"{url}?{query}"
-        body: dict[str, Any] = {
-            "query": f'cert.names: "{apex}"',
-            "fields": ["cert.names", "cert.added_at"],
-            "page_size": self.page_size,
-        }
-        if cursor:
-            body["page_token"] = cursor
-        payload, size = _json_request(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json",
-                "User-Agent": "ctlogs/0.1",
-            },
-            body=body,
-            timeout=self.timeout,
-            opener=self.opener,
-        )
-        result = payload.get("result") or {}
-        rows: list[tuple[str, str | None]] = []
-        for hit in result.get("hits") or []:
-            certificate = (hit.get("certificate_v1") or {}).get("resource") or {}
-            first_seen = certificate.get("added_at")
-            for value in certificate.get("names") or []:
-                hostname = _canonical_hostname(value, apex)
-                if hostname:
-                    rows.append((hostname, first_seen if isinstance(first_seen, str) else None))
-        next_cursor = result.get("next_page_token") or None
-        return SourcePage(rows, next_cursor, size)
-
-
 class UrlscanSource:
     name = "urlscan"
 
@@ -241,20 +156,6 @@ def run_source(
 
 
 def _source_from_environment(name: str, timeout: int) -> EnrichmentSource:
-    if name == "censys":
-        token = os.environ.get("CENSYS_PERSONAL_ACCESS_TOKEN")
-        if not token:
-            raise ValueError("CENSYS_PERSONAL_ACCESS_TOKEN is required")
-        return CensysSource(
-            token,
-            organization_id=os.environ.get("CENSYS_ORGANIZATION_ID"),
-            timeout=timeout,
-        )
-    if name == "chaos-api":
-        token = os.environ.get("PDCP_API_KEY")
-        if not token:
-            raise ValueError("PDCP_API_KEY is required")
-        return ChaosApiSource(token, timeout=timeout)
     if name == "urlscan":
         token = os.environ.get("URLSCAN_API_KEY")
         if not token:
@@ -266,7 +167,7 @@ def _source_from_environment(name: str, timeout: int) -> EnrichmentSource:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run bounded per-apex enrichment jobs")
     parser.add_argument("--db", default="data/ctlogs.sqlite3")
-    parser.add_argument("--source", choices=("censys", "chaos-api", "urlscan"), required=True)
+    parser.add_argument("--source", choices=("urlscan",), required=True)
     parser.add_argument("--apex", action="append", required=True)
     parser.add_argument("--max-requests", type=int, default=10)
     parser.add_argument("--timeout", type=int, default=30)

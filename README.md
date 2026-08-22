@@ -114,8 +114,8 @@ Bulk adapters: `gov` (CISA), `ee`/`se`/`nu` (AXFR
 
 CT discovery: `chrome_ct` (`gstatic` log list), `apple_ct`
 (`valid.apple.com`), `direct_ct` (`ct/v1/get-entries` / `get-sth`), and
-`static_ct` (C2SP data tiles). Censys, ProjectDiscovery Chaos, and urlscan are
-separate account-backed enrichment jobs.
+`static_ct` (C2SP data tiles). urlscan is a separate account-backed enrichment
+job.
 
 Static CT monitoring prefixes use the C2SP data-tile reader. Configure them as
 a comma-separated list in `CTLOGS_STATIC_CT_URLS`. Docker Compose includes the
@@ -159,10 +159,6 @@ interpolates dollar signs while automatically loading `.env`.
 
 ```bash
 python -m ctlogs.ingest.enrich --db data/ctlogs.sqlite3 \
-  --source censys --apex example.com --max-requests 10
-python -m ctlogs.ingest.enrich --db data/ctlogs.sqlite3 \
-  --source chaos-api --apex example.com --max-requests 10
-python -m ctlogs.ingest.enrich --db data/ctlogs.sqlite3 \
   --source urlscan --apex example.com --max-requests 10
 ```
 
@@ -172,7 +168,7 @@ public API service.
 
 ```bash
 docker compose run --rm jobs -m ctlogs.ingest.enrich --db /data/ctlogs.sqlite3 \
-  --source censys --apex example.com --max-requests 10
+  --source urlscan --apex example.com --max-requests 10
 ```
 
 Approved ICANN CZDS zones can be downloaded and indexed without using the web

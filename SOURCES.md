@@ -44,8 +44,6 @@ begin contributing.
 | --- | --- | --- |
 | [ICANN CZDS](https://github.com/icann/czds-api-client-python) | ICANN account with approved zones | Authenticated registry zone downloads and broad gTLD backfill. |
 | [urlscan.io](https://urlscan.io/docs/api/) | API key for dependable automation | Per-apex hostname discovery from indexed scans. |
-| [Censys](https://docs.censys.com/reference/get-started) | Personal access token, plus an optional organization ID | Per-apex certificate-name backfill when quota permits. |
-| [ProjectDiscovery Chaos API](https://docs.projectdiscovery.io/opensource/chaos/overview) | API key | Incremental access beyond public downloads. |
 
 These are enrichment sources. The planned no-credential pipeline must remain
 operable when all optional sources are disabled.
