@@ -39,7 +39,7 @@
       <div>
         <p class="eyebrow">Passive subdomain enumeration</p>
         <h1 class="hero-title">Subdomains, <em>already found</em>.</h1>
-        <p class="hero-lede">A local index built from the certificate transparency logs, registry zone data, and public crawls. Give it an apex and the names come back oldest first, each one carrying the date it first appeared. Nothing is fetched while you wait.</p>
+        <p class="hero-lede">A local index built from certificate transparency logs, registry zone data, and public crawls. Give it an apex and the names come back oldest known first, with first-seen dates where the source provides them. Nothing is fetched from an upstream source while you wait.</p>
 
         <form class="search" id="search-form" autocomplete="off">
           <div class="search-row">
@@ -69,15 +69,15 @@
         <div class="stance-list">
           <div class="stance-row is-primary">
             <span class="stance-label mono">certificate transparency</span>
-            <span class="stance-value">5 readers</span>
+            <span class="stance-value">5 adapters</span>
           </div>
           <div class="stance-row">
             <span class="stance-label mono">registry zone data</span>
-            <span class="stance-value">4 sources</span>
+            <span class="stance-value">4 adapters</span>
           </div>
           <div class="stance-row">
             <span class="stance-label mono">crawls and host lists</span>
-            <span class="stance-value">3 imports</span>
+            <span class="stance-value">3 adapters</span>
           </div>
           <div class="stance-row">
             <span class="stance-label mono">fields kept per name</span>
