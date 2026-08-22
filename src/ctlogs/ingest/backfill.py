@@ -18,6 +18,13 @@ from ctlogs.ingest.rootzone import RootZoneAdapter
 from ctlogs.ingest.ee_se_nu import EeSeNuAdapter
 
 DEFAULT_MAX_BYTES = 256 * 1024 * 1024
+DEFAULT_JOBS = (
+    ("root", "https://www.internic.net/domain/root.zone"),
+    (
+        "gov",
+        "https://raw.githubusercontent.com/cisagov/dotgov-data/main/current-full.csv",
+    ),
+)
 
 
 def _adapter(source: str):
@@ -136,9 +143,13 @@ def main() -> None:
     parser.add_argument(
         "--job",
         action="append",
-        required=True,
         type=_parse_job,
         metavar="SOURCE=PATH_OR_URL",
+    )
+    parser.add_argument(
+        "--defaults",
+        action="store_true",
+        help="import the maintained IANA root and CISA .gov artifacts",
     )
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
@@ -146,10 +157,13 @@ def main() -> None:
 
     if args.timeout < 1 or args.max_bytes < 1:
         parser.error("timeout and max-bytes must be positive")
+    jobs = [*(DEFAULT_JOBS if args.defaults else ()), *(args.job or ())]
+    if not jobs:
+        parser.error("at least one --job or --defaults is required")
 
     database = Database(args.db)
     database.initialize()
-    for source, location in args.job:
+    for source, location in jobs:
         count = run_job(
             database,
             source,

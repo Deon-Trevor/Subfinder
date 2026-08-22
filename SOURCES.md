@@ -33,16 +33,18 @@ probes a hostname.
 | [ProjectDiscovery Chaos](https://chaos.projectdiscovery.io/) public downloads | Import published public DNS datasets without an API key. |
 | [HaGeZi DNS blocklists](https://github.com/hagezi/dns-blocklists) | Import hostname-only lists as discovery evidence, not as a maliciousness verdict. |
 
-These twelve adapters build one index. Public searches read that index rather
-than contacting an adapter during the request.
+These adapters build one index. Public searches read that index rather than
+contacting an adapter during the request. `/v1/stats` reports the current count
+of distinct provenance source IDs, which changes as logs and optional sources
+begin contributing.
 
 ## Optional sources that require a free account or key
 
 | Source | Requirement | Use |
 | --- | --- | --- |
-| [ICANN CZDS](https://czds.icann.org/) | Login and approved zone requests | Broad gTLD zone backfill. |
-| [urlscan.io](https://urlscan.io/docs/api/) | API key for dependable automation | Per-apex hostname discovery and comparison with Threat Hunter results. |
-| [Censys](https://docs.censys.com/docs/platform-api) | Account and API credentials | Certificate and host backfill when quota permits. |
+| [ICANN CZDS](https://github.com/icann/czds-api-client-python) | ICANN account with approved zones | Authenticated registry zone downloads and broad gTLD backfill. |
+| [urlscan.io](https://urlscan.io/docs/api/) | API key for dependable automation | Per-apex hostname discovery from indexed scans. |
+| [Censys](https://docs.censys.com/reference/get-started) | Personal access token, plus an optional organization ID | Per-apex certificate-name backfill when quota permits. |
 | [ProjectDiscovery Chaos API](https://docs.projectdiscovery.io/opensource/chaos/overview) | API key | Incremental access beyond public downloads. |
 
 These are enrichment sources. The planned no-credential pipeline must remain

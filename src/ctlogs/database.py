@@ -345,6 +345,52 @@ class Database:
                     ],
                 )
 
+    def upsert_subdomains_batch_apex(
+        self,
+        rows: Iterable[tuple[str, str | None]],
+        *,
+        source: str,
+        observed_at: str | None = None,
+    ) -> None:
+        """Insert apex-only rows whose apex is the hostname itself."""
+        source = source.strip()
+        if not source:
+            raise ValueError("source must not be empty")
+        observed_at = observed_at or datetime.now(UTC).isoformat()
+        values = [(hostname, hostname, first_seen) for hostname, first_seen in rows]
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO subdomains (apex, subdomain, first_seen)
+                VALUES (?, ?, ?)
+                ON CONFLICT (apex, subdomain) DO UPDATE SET
+                    first_seen = CASE
+                        WHEN subdomains.first_seen IS NULL THEN excluded.first_seen
+                        WHEN excluded.first_seen IS NULL THEN subdomains.first_seen
+                        WHEN excluded.first_seen < subdomains.first_seen THEN excluded.first_seen
+                        ELSE subdomains.first_seen
+                    END
+                """,
+                values,
+            )
+            connection.executemany(
+                """
+                INSERT INTO subdomain_sources (
+                    apex, subdomain, source, first_seen, last_seen
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (apex, subdomain, source) DO UPDATE SET
+                    last_seen = CASE
+                        WHEN excluded.last_seen > subdomain_sources.last_seen
+                            THEN excluded.last_seen
+                        ELSE subdomain_sources.last_seen
+                    END
+                """,
+                [
+                    (apex, hostname, source, first_seen, observed_at)
+                    for apex, hostname, first_seen in values
+                ],
+            )
+
     def stats(self) -> IndexStats:
         with self.connect() as connection:
             row = connection.execute(

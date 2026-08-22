@@ -2,18 +2,41 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import urllib.request
+import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from cryptography import x509
+from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.x509 import DNSName
 from cryptography.x509.oid import ExtensionOID, NameOID
 
 from ctlogs.database import Database
 
 _LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+LOGGER = logging.getLogger("ctlogs.ingest.direct_ct")
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"^The parsed certificate contains a NULL parameter value",
+    category=CryptographyDeprecationWarning,
+    module=r"ctlogs\.ingest\.direct_ct",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"^Invalid ASN\.1 .* certificate policies extension",
+    category=CryptographyDeprecationWarning,
+    module=r"ctlogs\.ingest\.direct_ct",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"^Attribute's length must be >= 1 and <= 64",
+    category=UserWarning,
+    module=r"ctlogs\.ingest\.direct_ct",
+)
 
 
 @dataclass(frozen=True)
@@ -112,7 +135,6 @@ def _extract_hostnames_from_entry(entry: dict) -> list[str]:
 
 
 def extract_hostnames_from_der(der: bytes) -> list[str]:
-
     try:
         certificate = x509.load_der_x509_certificate(der)
     except ValueError:
@@ -190,11 +212,25 @@ class DirectCTClient:
         from ctlogs.ingest import ZoneRecord
 
         records: list[ZoneRecord] = []
+        parse_error_count = 0
         for e in entries:
             first_seen = _extract_first_seen(e)
-            for h in self._extract_hostnames(e):
+            try:
+                hostnames = self._extract_hostnames(e)
+            except ValueError:
+                parse_error_count += 1
+                continue
+            for h in hostnames:
                 records.append(ZoneRecord(apex=h, hostname=h, first_seen=first_seen))
         source = f"direct_ct:{log_url}"
+        if parse_error_count:
+            LOGGER.warning(
+                "Skipped %s unparseable certificate entries from %s in %s-%s",
+                parse_error_count,
+                log_url,
+                start,
+                end,
+            )
         if records:
             apex_c, host_c = _batch_upsert(self.database, records, source=source)
         else:
