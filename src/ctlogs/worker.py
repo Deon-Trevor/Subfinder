@@ -32,7 +32,12 @@ def _poll_one_log(database: Database, log_url: str, batch: int = 64) -> int:
         sth = client.get_sth(log_url)
         tree_size = int(sth.get("tree_size", 0)) if isinstance(sth, dict) else 0
     except Exception as e:
-        log.warning("get-sth failed %s: %s", log_url, e)
+        # 404 for retired logs and DNS for dead logs are expected once per cycle
+        msg = str(e)
+        if "404" in msg or "Name or service not known" in msg or "Temporary failure" in msg:
+            log.debug("get-sth skipped %s: %s", log_url, e)
+        else:
+            log.warning("get-sth failed %s: %s", log_url, e)
         return 0
     state = database.get_ingest_state(f"direct_ct:{log_url}")
     try:

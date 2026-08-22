@@ -43,10 +43,12 @@ class ChromeCTLogList:
         urls: list[str] = []
         for log in logs:
             url = log.get("url")
-            # Only include logs that are usable/qualified - Chrome list marks state
-            state = log.get("state") or log.get("log_state") or {}
-            # In v3, state is nested: log["state"]["usable"]["timestamp"] etc.
-            # Simplify: include all with url, filter later by caller if needed
+            state = log.get("state") or {}
+            # v3: state has exactly one key like "usable", "qualified", "pending", "retired", "rejected"
+            # Only poll logs that are currently usable (or qualified) — retired/rejected/pending will 404
+            if isinstance(state, dict):
+                if not ("usable" in state or "qualified" in state):
+                    continue
             if isinstance(url, str) and url.strip():
                 urls.append(url.strip().rstrip("/"))
         # Dedup preserve order

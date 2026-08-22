@@ -40,6 +40,11 @@ class AppleCTLogList:
         urls: list[str] = []
         for log in logs:
             url = log.get("url")
+            state = log.get("state") or log.get("status") or {}
+            # Apple: state often {"usable": {}} or {"qualified": {}} etc.
+            if isinstance(state, dict) and state:
+                if not ("usable" in state or "qualified" in state):
+                    continue
             if isinstance(url, str) and url.strip():
                 urls.append(url.strip().rstrip("/"))
         seen: set[str] = set()
