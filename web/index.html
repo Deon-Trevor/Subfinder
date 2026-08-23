@@ -3,20 +3,83 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Subfinder</title>
-<meta name="description" content="Passive subdomain enumeration. One apex in, every hostname on file out, read from a local index built from certificate transparency logs, registry zone data, and public crawls. Never probes the apex you look up.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%230C100E%22/><g fill=%22%237FC29B%22><rect x=%227%22 y=%229%22 width=%2218%22 height=%223.4%22 rx=%221.7%22/><rect x=%227%22 y=%2214.9%22 width=%2213%22 height=%223.4%22 rx=%221.7%22/><rect x=%227%22 y=%2220.8%22 width=%228%22 height=%223.4%22 rx=%221.7%22/></g></svg>">
+
+<title>Subfinder — passive subdomain enumeration from certificate transparency</title>
+<meta name="description" content="Every subdomain on record for a domain, in one request, from a prebuilt index of certificate transparency logs, registry zone data and public crawls. The domain you look up is never probed.">
+<link rel="canonical" href="/">
+<meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Subfinder">
+<meta property="og:title" content="Subfinder — passive subdomain enumeration">
+<meta property="og:description" content="Type a domain, get every hostname on record under it, with first-seen dates. Read from a prebuilt index, so nothing is fetched while you wait and the domain never learns you looked.">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Subfinder — passive subdomain enumeration">
+<meta name="twitter:description" content="Every subdomain on record for a domain, in one request. Zero packets to the target.">
+
+<meta name="theme-color" content="#EDEFEA" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0C100E" media="(prefers-color-scheme: dark)">
+
+<link rel="icon" href="favicon.ico" sizes="32x32">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+
+<!-- Fonts load without blocking the first paint: the preload fetches at high
+     priority and the onload flips it to a stylesheet, so the hero paints in the
+     fallback face and swaps rather than waiting on a third-party round trip. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" onload="this.rel='stylesheet'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap"></noscript>
+
 <link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "#website",
+      "name": "Subfinder",
+      "description": "Passive subdomain enumeration. One domain in, every hostname on record out, with first-seen dates.",
+      "potentialAction": {
+        "@type": "SearchAction",
+        "target": { "@type": "EntryPoint", "urlTemplate": "/?apex={apex}" },
+        "query-input": "required name=apex"
+      }
+    },
+    {
+      "@type": "WebApplication",
+      "name": "Subfinder",
+      "applicationCategory": "SecurityApplication",
+      "operatingSystem": "Any",
+      "isPartOf": { "@id": "#website" },
+      "description": "Passive subdomain enumeration against a prebuilt index of certificate transparency logs, registry zone data and public crawls. Lookups never probe the domain being searched.",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "featureList": [
+        "Passive subdomain enumeration with no DNS or HTTP traffic to the domain",
+        "First-seen dates from certificate transparency logs",
+        "Plain text and JSON over HTTP with no API key",
+        "Model Context Protocol endpoint for agents"
+      ]
+    }
+  ]
+}
+</script>
 </head>
 <body>
+
+<a class="skip" href="#apex">Skip to search</a>
 
 <header class="topbar">
   <div class="wrap topbar-inner">
     <a class="brand" href="/">
-      <span class="brand-mark mono">sf</span>
+      <svg class="brand-mark" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+        <path d="M30 7A3 3 0 0 0 27 4L8 4A3 3 0 0 0 5 7L5 16A3 3 0 0 0 8 19L21 19L21 22L5 22A3 3 0 0 0 2 25A3 3 0 0 0 5 28L24 28A3 3 0 0 0 27 25L27 16A3 3 0 0 0 24 13L11 13L11 10L27 10A3 3 0 0 0 30 7Z"/>
+      </svg>
       <span class="brand-name">Subfinder</span>
     </a>
     <span class="topbar-spacer"></span>
@@ -25,46 +88,53 @@
       <span class="ticker-value mono" id="ticker-value">0</span>
       <span class="ticker-label" id="ticker-label">names indexed</span>
     </span>
-    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch colour theme">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme" aria-pressed="false">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
         <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path>
+      </svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4"></circle>
+        <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
       </svg>
     </button>
   </div>
 </header>
 
-<main>
+<main id="main">
   <section class="hero wrap">
     <div class="hero-grid">
       <div>
         <p class="eyebrow">Passive subdomain enumeration</p>
-        <h1 class="hero-title">Subdomains, <em>already found</em>.</h1>
-        <p class="hero-lede">A local index built from certificate transparency logs, registry zone data, and public crawls. Give it an apex and the names come back oldest known first, with first-seen dates where the source provides them. Nothing is fetched from an upstream source while you wait.</p>
+        <h1 class="hero-title">Every subdomain on record. <em>Zero packets to the target.</em></h1>
+        <p class="hero-lede">Type a domain and get back every hostname the index has ever seen under it, oldest first, with the date each name first appeared. The index is already built, so nothing is fetched while you wait — and the domain you look up never learns you looked.</p>
 
         <form class="search" id="search-form" autocomplete="off">
           <div class="search-row">
             <div class="search-field">
-              <label class="eyebrow" for="apex" hidden>Apex domain</label>
-              <input class="search-input" id="apex" name="apex" type="text" placeholder="syncpundit.io" spellcheck="false" inputmode="url" required>
+              <label class="visually-hidden" for="apex">Domain to enumerate</label>
+              <input class="search-input mono" id="apex" name="apex" type="text" placeholder="syncpundit.io"
+                     spellcheck="false" inputmode="url" autocapitalize="off" autocorrect="off"
+                     enterkeyhint="search" aria-describedby="search-meta" required>
+              <kbd class="search-key" aria-hidden="true">/</kbd>
             </div>
             <button class="search-submit" id="search-submit" type="submit">Enumerate</button>
           </div>
 
-          <div class="search-meta">
-            <span class="chip is-quiet mono">1000 / IP / day</span>
-            <span class="chip is-quiet mono">No key</span>
+          <div class="search-meta" id="search-meta">
+            <span class="chip is-quiet mono">1000 lookups / IP / day</span>
+            <span class="chip is-quiet mono">No key, no account</span>
             <div class="quota" id="quota" hidden>
               <span id="quota-text">--</span>
               <span class="quota-track"><span class="quota-fill" id="quota-fill"></span></span>
             </div>
           </div>
 
-          <div class="search-error" id="search-error" hidden></div>
+          <div class="search-error" id="search-error" role="alert" hidden></div>
         </form>
       </div>
 
       <aside class="stance">
-        <p class="eyebrow">Where the names come from</p>
+        <h2 class="eyebrow">Where the names come from</h2>
         <p class="stance-intro">Twelve adapters feed the index, in three families.</p>
         <div class="stance-list">
           <div class="stance-row is-primary">
@@ -92,7 +162,7 @@
             <span class="stance-value is-never">never</span>
           </div>
         </div>
-        <p class="stance-note">Nothing here probes the apex you type or resolves a name it hands back. The domain you look up never learns you looked.</p>
+        <p class="stance-note">No DNS query, no HTTP request, no port touched — not against the domain you type, and not against the names it hands back.</p>
       </aside>
     </div>
 
@@ -120,17 +190,31 @@
     </div>
   </section>
 
-  <section class="register wrap" id="register" hidden>
+  <section class="register wrap" id="register" aria-labelledby="register-heading" hidden>
     <div class="register-head">
-      <div>
+      <div class="register-head-main">
         <p class="eyebrow">Names on file</p>
-        <h2 class="register-title"><span class="apex" id="register-apex"></span></h2>
-      </div>
-      <div>
+        <h2 class="register-title" id="register-heading" tabindex="-1"><span class="apex mono" id="register-apex"></span></h2>
         <p class="register-count mono" id="register-count"></p>
+      </div>
+
+      <div class="register-head-tools">
+        <div class="filter" id="filter-wrap" hidden>
+          <label class="visually-hidden" for="filter">Filter these names</label>
+          <input class="filter-input mono" id="filter" type="search" placeholder="filter names"
+                 spellcheck="false" autocomplete="off" autocapitalize="off">
+        </div>
         <div class="register-tools">
-          <button class="tool" type="button" data-export="text">Copy list</button>
-          <button class="tool" type="button" data-export="json">Copy JSON</button>
+          <span class="tool-group">
+            <span class="tool-group-label">Copy</span>
+            <button class="tool" type="button" data-copy="text">list</button>
+            <button class="tool" type="button" data-copy="json">JSON</button>
+          </span>
+          <span class="tool-group">
+            <span class="tool-group-label">Download</span>
+            <button class="tool" type="button" data-download="text">.txt</button>
+            <button class="tool" type="button" data-download="json">.json</button>
+          </span>
           <a class="tool" id="api-link" href="#" target="_blank" rel="noopener">Open in API</a>
         </div>
       </div>
@@ -138,35 +222,38 @@
 
     <div class="shape" id="shape" hidden>
       <p class="eyebrow">Names first logged, by year <span class="shape-peak" id="shape-peak"></span></p>
-      <div class="shape-bars" id="shape-bars"></div>
-      <div class="shape-axis" id="shape-axis"></div>
+      <div class="shape-bars" id="shape-bars" role="img" aria-label="Names first logged per year"></div>
+      <div class="shape-axis" id="shape-axis" aria-hidden="true"></div>
     </div>
 
     <div class="ledger" id="ledger"></div>
-    <div id="register-state"></div>
+    <div id="register-state" role="status" aria-live="polite"></div>
   </section>
 
-  <section class="wireup wrap">
+  <section class="wireup wrap" aria-labelledby="wireup-heading">
     <div class="wireup-grid">
       <div>
         <p class="eyebrow">Using it</p>
-        <h2 class="wireup-title">One call, no key.</h2>
-        <p>One apex in, hostnames out, from a shell or from anything that speaks HTTP. There is no key to request and no account to make. An apex with nothing on file answers 200 with an empty body, so a miss is cheap to handle.</p>
-        <pre class="wireup-code mono"><code>curl -s "$SUBFINDER/v1/search?apex=example.com"
+        <h2 class="wireup-title" id="wireup-heading">One call, no key.</h2>
+        <p>One domain in, hostnames out, from a shell or from anything that speaks HTTP. There is no key to request and no account to make. A domain with nothing on file answers 200 with an empty body, so a miss is cheap to handle.</p>
+        <div class="wireup-code-wrap">
+          <button class="tool wireup-copy" type="button" data-copy-code="wireup-code">Copy</button>
+          <pre class="wireup-code mono" id="wireup-code"><code>curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com"
 
-curl -s "$SUBFINDER/v1/search?apex=example.com&amp;format=json&amp;dates=1" \
+curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com&amp;format=json&amp;dates=1" \
   | jq -r '.[] | "\(.first_seen // "undated")\t\(.sub)"'</code></pre>
+        </div>
       </div>
       <div>
         <p class="eyebrow">What the index is built from</p>
-        <p>The Chrome and Apple log lists name the logs worth reading. A poller walks <code class="mono">ct/v1/get-entries</code> on every usable log in both programs, and the Geomys archive backfills logs that have since retired. Zone data from IANA, CISA, and the registries that publish openly, plus Common Crawl, fill in apexes that certificates alone would miss.</p>
+        <p>The Chrome and Apple log lists name the logs worth reading. A poller walks <code class="mono">ct/v1/get-entries</code> on every usable log in both programs, and the Geomys archive backfills logs that have since retired. Zone data from IANA, CISA, and the registries that publish openly, plus Common Crawl, fill in domains that certificates alone would miss.</p>
         <p>Each name keeps three fields. Hostname, apex, and the earliest date any source saw it. No certificate bodies, no serial numbers, no issuer chains.</p>
       </div>
     </div>
   </section>
 
-  <section class="docs wrap">
-    <p class="eyebrow">Reading it without a browser</p>
+  <section class="docs wrap" aria-labelledby="docs-heading">
+    <h2 class="eyebrow" id="docs-heading">Reading it without a browser</h2>
     <div class="docs-grid">
       <div class="doc-block">
         <h3>Search</h3>
@@ -186,7 +273,7 @@ curl -s "$SUBFINDER/v1/search?apex=example.com&amp;format=json&amp;dates=1" \
       <div class="doc-block">
         <h3>MCP</h3>
         <code class="doc-endpoint"><span class="doc-verb">POST</span> /mcp</code>
-        <p>One streamable HTTP tool called <code class="mono">search</code>. Pass an apex, get an array of hostnames. Same allowance as the HTTP route, same refusal to probe.</p>
+        <p>One streamable HTTP tool called <code class="mono">search</code>. Pass a domain, get an array of hostnames. Same allowance as the HTTP route, same refusal to probe.</p>
       </div>
     </div>
   </section>
@@ -195,12 +282,16 @@ curl -s "$SUBFINDER/v1/search?apex=example.com&amp;format=json&amp;dates=1" \
     <footer class="footer">
       <span>Subfinder</span>
       <span>passive, no probes</span>
+      <a href="https://github.com/Deon-Trevor/Subfinder" rel="noopener">Source</a>
       <span class="topbar-spacer"></span>
       <span>Sync_Pundit</span>
     </footer>
   </div>
 </main>
 
-<script src="app.js"></script>
+<!-- Outside the results section, which is hidden until a search: a live region
+     inside a hidden ancestor is a live region nothing announces. -->
+<p class="visually-hidden" id="tool-status" role="status" aria-live="polite"></p>
+
 </body>
 </html>

@@ -1,5 +1,8 @@
 # Subfinder
 
+<img src="brand/lockup-on-dark.png#gh-dark-mode-only" alt="Subfinder" width="260">
+<img src="brand/lockup-on-light.png#gh-light-mode-only" alt="Subfinder" width="260">
+
 Subfinder is a passive subdomain enumeration service. Source adapters build a
 local index from certificate transparency logs, registry zone data, public
 crawls, and optional account-backed services. A lookup reads that index and
@@ -55,6 +58,10 @@ POST /mcp
 GET /                    the web interface, when web/ is shipped
 GET /app.css
 GET /app.js
+GET /robots.txt
+GET /site.webmanifest
+GET /favicon.ico         and favicon.svg, apple-touch-icon.png,
+                         icon-192.png, icon-512.png, icon-512-maskable.png
 ```
 
 Plain text is one hostname per line unless `format=json` is requested. `dates=1` adds `first_seen`. Empty index returns `200` with empty body/array, not `404`.
@@ -79,13 +86,25 @@ route consumes the search allowance.
 
 ## Web interface
 
-`web/` holds the frontend as three files with no build step: `index.html`,
-`app.css`, `app.js`. `ctlogs.web.mount_frontend` registers each one as an
-explicit named route at startup, so the page is served from the same origin as
-the API. Named routes rather than a `StaticFiles` mount, because `create_app`
-mounts the MCP app at `/` and a second directory mount on that prefix would
-swallow `/mcp`. Only those three names are servable, so a stray file dropped in
-`web/` is not reachable.
+`web/` holds the frontend with no build step: `index.html`, `app.css`, `app.js`,
+`robots.txt`, `site.webmanifest`, and the icon set.
+`ctlogs.web.mount_frontend` registers each one as an explicit named route at
+startup, so the page is served from the same origin as the API. Named routes
+rather than a `StaticFiles` mount, because `create_app` mounts the MCP app at
+`/` and a second directory mount on that prefix would swallow `/mcp`. Only
+those names are servable, so a stray file dropped in `web/` is not reachable.
+
+`ASSETS` are served with `Cache-Control: no-cache`, because the markup and the
+assets it is versioned with ship together and a browser must not pair new
+markup with a cached script. `MEDIA` — the icons — carry no such pairing and
+are cached for a week instead. Brand sources live in [`brand/`](brand/), which
+is not served.
+
+`robots.txt` disallows `/v1/`, `/mcp`, and the `?apex=` form of the page. Those
+routes spend the shared search allowance, and a crawler following every result
+link would spend a visitor's day of reads on nobody's behalf. The page carries
+`rel="canonical"` pointing at `/` for the same reason: `/?apex=example.com` is
+the same document with a query on it, not a second page.
 
 The page is optional. When `web/index.html` is missing, `mount_frontend` logs
 and returns, and the API serves alone. Set `CTLOGS_WEB_DIR` to serve the

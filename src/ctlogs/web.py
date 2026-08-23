@@ -16,7 +16,27 @@ INDEX = "index.html"
 ASSETS: dict[str, str] = {
     "app.css": "text/css; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
+    # robots.txt keeps crawlers off /v1/search and off the "?apex=" form of the
+    # page. Both spend the shared 1000-reads-per-IP-per-day allowance, and a
+    # crawler following every result link would spend it on nobody's behalf.
+    "robots.txt": "text/plain; charset=utf-8",
+    "site.webmanifest": "application/manifest+json",
 }
+
+# Icons are the same bytes across deploys and nothing pairs them with the
+# markup the way app.css and app.js are paired, so they are cached for a week
+# instead of revalidated on every load.
+MEDIA: dict[str, str] = {
+    "favicon.ico": "image/x-icon",
+    "favicon.svg": "image/svg+xml",
+    "apple-touch-icon.png": "image/png",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
+    "icon-512-maskable.png": "image/png",
+}
+
+REVALIDATE = "no-cache"
+MEDIA_CACHE = "public, max-age=604800"
 
 
 def frontend_directory() -> Path | None:
@@ -26,18 +46,21 @@ def frontend_directory() -> Path | None:
     return root if (root / INDEX).is_file() else None
 
 
-def _serve(path: Path, media_type: str) -> Callable[[], Awaitable[FileResponse]]:
+def _serve(
+    path: Path, media_type: str, cache: str = REVALIDATE
+) -> Callable[[], Awaitable[FileResponse]]:
     # A factory rather than a closure over the loop variable: a route function
     # with parameters would have them read as query parameters by FastAPI.
     async def route() -> FileResponse:
         if not path.is_file():
             raise HTTPException(status_code=404, detail="not found")
-        # The page and its two assets ship together, so revalidate rather than
-        # let a browser pair new markup with a cached script.
+        # The page and the assets it is versioned with ship together, so those
+        # revalidate rather than let a browser pair new markup with a cached
+        # script. Icons carry no such pairing and are cached outright.
         return FileResponse(
             path,
             media_type=media_type,
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": cache},
         )
 
     return route
@@ -46,8 +69,8 @@ def _serve(path: Path, media_type: str) -> Callable[[], Awaitable[FileResponse]]
 def mount_frontend(app: FastAPI) -> bool:
     """Serve the frontend from the same origin as the API.
 
-    The page is three static files, registered as explicit routes rather than a
-    StaticFiles mount: create_app mounts the MCP app at "/", and a second
+    The page is a handful of static files, registered as explicit routes rather
+    than a StaticFiles mount: create_app mounts the MCP app at "/", and a second
     directory mount on that prefix would swallow /mcp. Named paths cannot
     shadow an API route.
 
@@ -60,11 +83,17 @@ def mount_frontend(app: FastAPI) -> bool:
         LOGGER.info("No frontend found; serving the API alone")
         return False
 
-    routes = {INDEX: "text/html; charset=utf-8", **ASSETS}
-    for name, media_type in routes.items():
+    routes = [
+        *(
+            (name, media_type, REVALIDATE)
+            for name, media_type in {INDEX: "text/html; charset=utf-8", **ASSETS}.items()
+        ),
+        *((name, media_type, MEDIA_CACHE) for name, media_type in MEDIA.items()),
+    ]
+    for name, media_type, cache in routes:
         app.add_api_route(
             "/" if name == INDEX else f"/{name}",
-            _serve(directory / name, media_type),
+            _serve(directory / name, media_type, cache),
             methods=["GET"],
             include_in_schema=False,
         )

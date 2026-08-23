@@ -1,0 +1,13 @@
+# Subfinder
+#
+# The page itself is welcome. The rules below keep crawlers off the metered
+# routes: GET /v1/search and POST /mcp share one allowance of 1000 successful
+# reads per IP per UTC day, and a crawler walking every "?apex=" link it finds
+# would spend that allowance on nobody's behalf. The parameterised page is also
+# the same document as "/", which rel=canonical already says.
+
+User-agent: *
+Disallow: /v1/
+Disallow: /mcp
+Disallow: /*?apex=
+Allow: /
