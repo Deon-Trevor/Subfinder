@@ -78,6 +78,7 @@ services:
       CTLOGS_SCHEDULER_LOCK: /data/urlscan-scheduler.lock
       CTLOGS_SCHEDULE_DEFAULTS: "0"
       CTLOGS_SCHEDULE_CZDS: "0"
+      CTLOGS_URLSCAN_APEXES: "*"
       CTLOGS_URLSCAN_APEXES_PER_RUN: "69"
       CTLOGS_URLSCAN_DAILY_LIMIT: "100000"
       CTLOGS_URLSCAN_INTERVAL: "60"
@@ -89,4 +90,4 @@ services:
 
 volumes:
   ctlogs-data:
-    name: ${CTLOGS_DATA_VOLUME:-ctlogs_ctlogs-data}
+    name: ${CTLOGS_DATA_VOLUME:-subfinder_ctlogs-data}
