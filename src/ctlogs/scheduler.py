@@ -22,7 +22,12 @@ from ctlogs.ingest.backfill import (
     run_job,
 )
 from ctlogs.ingest.czds import CzdsClient, run_czds
-from ctlogs.ingest.enrich import UrlscanSource, run_source
+from ctlogs.ingest.enrich import (
+    DEFAULT_URLSCAN_DAILY_LIMIT,
+    URLSCAN_QUOTA_SUBJECT,
+    UrlscanSource,
+    run_source,
+)
 
 LOGGER = logging.getLogger("ctlogs.scheduler")
 DEFAULT_INTERVAL_SECONDS = 24 * 60 * 60
@@ -106,6 +111,7 @@ def _run_urlscan_batch(
     apexes: list[str],
     *,
     apexes_per_run: int,
+    request_guard: Callable[[], object] | None = None,
 ) -> tuple[int, int]:
     state_key = "scheduler:urlscan:rotation"
     state = database.get_ingest_state(state_key)
@@ -123,6 +129,7 @@ def _run_urlscan_batch(
                 [apex],
                 max_requests=1,
                 refresh=True,
+                request_guard=request_guard,
             )
             requests += source_requests
             hostnames += source_hostnames
@@ -144,6 +151,7 @@ def _run_urlscan_index_batch(
     source: UrlscanSource,
     *,
     apexes_per_run: int,
+    request_guard: Callable[[], object] | None = None,
 ) -> tuple[int, int]:
     state_key = "scheduler:urlscan:index-cursor"
     state = database.get_ingest_state(state_key)
@@ -166,6 +174,7 @@ def _run_urlscan_index_batch(
             [apex],
             max_requests=1,
             refresh=True,
+            request_guard=request_guard,
         )
         requests += source_requests
         hostnames += source_hostnames
@@ -266,11 +275,20 @@ def build_jobs(database: Database) -> list[ScheduledJob]:
             "CTLOGS_URLSCAN_RETRY_INTERVAL",
             retry,
         )
+        urlscan_daily_limit = _positive_environment_integer(
+            "CTLOGS_URLSCAN_DAILY_LIMIT",
+            DEFAULT_URLSCAN_DAILY_LIMIT,
+        )
+        request_guard = lambda: database.consume_request(
+            URLSCAN_QUOTA_SUBJECT,
+            urlscan_daily_limit,
+        )
         if urlscan_apexes == [ALL_INDEXED_APEXES]:
             urlscan_action = lambda: _run_urlscan_index_batch(
                 database,
                 UrlscanSource(urlscan_key, timeout=timeout),
                 apexes_per_run=apexes_per_run,
+                request_guard=request_guard,
             )
         else:
             urlscan_action = lambda: _run_urlscan_batch(
@@ -278,6 +296,7 @@ def build_jobs(database: Database) -> list[ScheduledJob]:
                 UrlscanSource(urlscan_key, timeout=timeout),
                 urlscan_apexes,
                 apexes_per_run=apexes_per_run,
+                request_guard=request_guard,
             )
         jobs.append(
             ScheduledJob(

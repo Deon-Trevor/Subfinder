@@ -59,6 +59,7 @@ def test_runner_stops_at_source_budget_and_resumes_cursor(tmp_path: Path) -> Non
     database = Database(tmp_path / "enrich.sqlite3")
     database.initialize()
     cursors: list[str | None] = []
+    guarded_requests: list[None] = []
 
     class Source:
         name = "bounded"
@@ -70,6 +71,20 @@ def test_runner_stops_at_source_budget_and_resumes_cursor(tmp_path: Path) -> Non
             number = len(cursors)
             return SourcePage([(f"n{number}.{apex}", None)], f"cursor-{number}", 10)
 
-    assert run_source(database, Source(), ["example.com"], max_requests=1) == (1, 1)
-    assert run_source(database, Source(), ["example.com"], max_requests=1) == (1, 1)
+    guard = lambda: guarded_requests.append(None)
+    assert run_source(
+        database,
+        Source(),
+        ["example.com"],
+        max_requests=1,
+        request_guard=guard,
+    ) == (1, 1)
+    assert run_source(
+        database,
+        Source(),
+        ["example.com"],
+        max_requests=1,
+        request_guard=guard,
+    ) == (1, 1)
     assert cursors == [None, "cursor-1"]
+    assert guarded_requests == [None, None]

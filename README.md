@@ -7,11 +7,11 @@ Subfinder is a passive subdomain enumeration service. Source adapters build a
 local index from certificate transparency logs, registry zone data, public
 crawls, and optional account-backed services. A lookup reads that index and
 returns every hostname on file for one apex, oldest known first, with first-seen
-dates where the source provides them. Nothing is fetched from an upstream source
-while the caller waits.
+dates where the source provides them. When urlscan is configured, each lookup
+first searches its historical scans and stores matching hostnames locally.
 
-Queries are reads against a local SQLite index. `GET /v1/search` and `POST /mcp`
-never probe the requested apex or the hostnames they return.
+`GET /v1/search` and `POST /mcp` do not submit a urlscan scan and never probe the
+requested apex or the hostnames they return.
 
 ## Run with Docker (recommended)
 
@@ -67,6 +67,12 @@ GET /favicon.ico         and favicon.svg, apple-touch-icon.png,
 ```
 
 Plain text is one hostname per line unless `format=json` is requested. `dates=1` adds `first_seen`. Empty index returns `200` with empty body/array, not `404`.
+
+`GET /v1/search` reports the refresh result in `X-URLScan-Status`: `ok`,
+`disabled`, `quota-exhausted`, `timeout`, or `error`. Provider failure does not
+hide cached results. The route falls back to SQLite after the configured
+five-second wall-clock limit. On-demand refreshes read at most 100 historical
+scans per call.
 
 MCP exposes one Streamable HTTP tool `search` (`{ "apex": "example.com" }` → `string[]`).
 
@@ -155,8 +161,10 @@ Set `CTLOGS_URLSCAN_APEXES` to a comma-separated allowlist, or set it to `*` to
 walk every apex already in the local index. The all-index mode keeps its cursor
 in SQLite, processes up to 69 apexes per run, and starts the next run 60 seconds
 after the previous one finishes. A failed apex remains at the cursor for retry.
-The hard scheduling ceiling is 99,360 searches per UTC day. Confirm that this
-fits the account quota and urlscan's usage terms before enabling it.
+The scheduler can start at most 99,360 searches per UTC day. API-triggered and
+scheduled searches share one atomic 100,000-request daily ceiling, so API use
+reduces the scheduler's remaining allowance. Confirm that this fits the account
+quota and urlscan's usage terms before enabling it.
 
 HaGeZi, public Chaos data, Common Crawl, and registry exports are parsers for
 artifacts whose locations or access details vary by deployment. Configure
@@ -219,8 +227,8 @@ python -m ctlogs.ingest.enrich --db data/ctlogs.sqlite3 \
 ```
 
 With Docker Compose, run the same modules through the dormant `jobs` service.
-Provider secrets are available to that short-lived container, not to the
-public API service.
+The public API receives only the urlscan credential. CZDS credentials remain
+limited to ingestion services.
 
 ```bash
 docker compose run --rm jobs -m ctlogs.ingest.enrich --db /data/ctlogs.sqlite3 \

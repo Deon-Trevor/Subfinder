@@ -6,11 +6,15 @@ import os
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from ctlogs.database import Database
+
+DEFAULT_URLSCAN_DAILY_LIMIT = 100_000
+URLSCAN_QUOTA_SUBJECT = "provider:urlscan"
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,7 @@ def run_source(
     *,
     max_requests: int,
     refresh: bool = False,
+    request_guard: Callable[[], object] | None = None,
 ) -> tuple[int, int]:
     started_at = datetime.now(UTC).isoformat()
     started = time.monotonic()
@@ -125,6 +130,8 @@ def run_source(
         cursor = None if refresh or not state else state.get("cursor")
         apex_count += 1
         while request_count < max_requests:
+            if request_guard is not None:
+                request_guard()
             page = source.fetch_page(apex, cursor)
             request_count += 1
             bytes_read += page.bytes_read

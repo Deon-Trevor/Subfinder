@@ -1,8 +1,8 @@
 # Source catalog
 
-This catalog separates the public query service from the indexing jobs. A
-query only reads the local index. It never fans out to these sources and never
-probes a hostname.
+This catalog separates the public query service from bulk indexing jobs. When
+configured, a query searches urlscan's historical records before reading the
+local index. It does not submit a live scan or probe a hostname.
 
 ## Default sources without credentials
 
@@ -33,10 +33,9 @@ probes a hostname.
 | [ProjectDiscovery Chaos](https://chaos.projectdiscovery.io/) public downloads | Import published public DNS datasets without an API key. |
 | [HaGeZi DNS blocklists](https://github.com/hagezi/dns-blocklists) | Import hostname-only lists as discovery evidence, not as a maliciousness verdict. |
 
-These adapters build one index. Public searches read that index rather than
-contacting an adapter during the request. `/v1/stats` reports the current count
-of distinct provenance source IDs, which changes as logs and optional sources
-begin contributing.
+These adapters build one index. Public searches refresh urlscan when configured,
+then read that index. `/v1/stats` reports the current count of distinct
+provenance source IDs, which changes as logs and optional sources contribute.
 
 ## Update cadence
 
@@ -44,15 +43,17 @@ The API container polls Chrome, Apple, RFC 6962, and configured Static CT logs
 continuously. Each cycle starts after the previous cycle and a 60-second wait.
 One scheduler runs IANA, CISA, configured artifacts, and CZDS every 24 hours.
 A separate urlscan scheduler starts its next bounded run 60 seconds after the
-previous run finishes. Website requests only read SQLite and never start
-ingestion.
+previous run finishes. Search requests also perform one bounded urlscan refresh
+before reading SQLite.
 
 CZDS and urlscan have independent caps. CZDS checks the 25 least-recently
 checked approved zones per run. urlscan makes one request for each configured
 apex. With `CTLOGS_URLSCAN_APEXES=*`, it walks the full local apex index in
 batches of up to 69 using a persisted cursor. The 60-second minimum interval
-caps it at 99,360 searches per UTC day. Artifact imports each have their own
-download and parser run, so adding one cannot consume another source's slot.
+limits scheduled starts to 99,360 per UTC day. Scheduled and API-triggered
+requests share an atomic 100,000-request daily ceiling. Artifact imports each
+have their own download and parser run, so adding one cannot consume another
+source's slot.
 
 The `.ee`, `.se`, `.nu`, `.ch`, `.li`, Chaos, Common Crawl, HaGeZi, and Geomys
 adapters do not discover their own upstream files. They run unattended only

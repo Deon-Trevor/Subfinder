@@ -20,6 +20,13 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from ctlogs.database import Database, Quota, QuotaExceeded
+from ctlogs.ingest.enrich import (
+    DEFAULT_URLSCAN_DAILY_LIMIT,
+    URLSCAN_QUOTA_SUBJECT,
+    EnrichmentSource,
+    UrlscanSource,
+    run_source,
+)
 from ctlogs.web import mount_frontend
 
 DAILY_REQUEST_LIMIT = 1_000
@@ -100,6 +107,9 @@ def create_app(
     token_request_limit: int | None = None,
     allowed_hosts: list[str] | None = None,
     allowed_origins: list[str] | None = None,
+    urlscan_source: EnrichmentSource | None = None,
+    urlscan_daily_limit: int | None = None,
+    urlscan_wait_seconds: float | None = None,
 ) -> FastAPI:
     if daily_request_limit < 1:
         raise ValueError("daily_request_limit must be positive")
@@ -120,9 +130,38 @@ def create_app(
 
     path = database_path or os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3")
     database = Database(path)
+    configured_urlscan_wait = (
+        urlscan_wait_seconds
+        if urlscan_wait_seconds is not None
+        else float(_get_env_int("CTLOGS_URLSCAN_SEARCH_TIMEOUT", 5))
+    )
+    if configured_urlscan_wait <= 0:
+        raise ValueError("urlscan_wait_seconds must be positive")
+    configured_urlscan = urlscan_source
+    if configured_urlscan is None:
+        urlscan_key = os.environ.get("URLSCAN_API_KEY")
+        if urlscan_key:
+            configured_urlscan = UrlscanSource(
+                urlscan_key,
+                page_size=_get_env_int("CTLOGS_URLSCAN_SEARCH_PAGE_SIZE", 100),
+                timeout=max(1, int(configured_urlscan_wait)),
+            )
+    configured_urlscan_limit = (
+        urlscan_daily_limit
+        if urlscan_daily_limit is not None
+        else _get_env_int(
+            "CTLOGS_URLSCAN_DAILY_LIMIT",
+            DEFAULT_URLSCAN_DAILY_LIMIT,
+        )
+    )
+    if configured_urlscan_limit < 1:
+        raise ValueError("urlscan_daily_limit must be positive")
     mcp = MCPServer(
         "Subfinder",
-        instructions="Search the indexed passive subdomain corpus by registrable apex.",
+        instructions=(
+            "Refresh urlscan's historical results, then search the passive "
+            "subdomain index by registrable apex."
+        ),
     )
 
     def consume(client_ip: str, authorization: str | None = None) -> Quota:
@@ -135,6 +174,38 @@ def create_app(
                 subject = "token:" + hashlib.sha256(candidate.encode()).hexdigest()
                 return database.consume_request(subject, authenticated_limit)
         return database.consume_request(client_ip, daily_request_limit)
+
+    def refresh_urlscan(apex: str) -> str:
+        if configured_urlscan is None:
+            return "disabled"
+        try:
+            run_source(
+                database,
+                configured_urlscan,
+                [apex],
+                max_requests=1,
+                refresh=True,
+                request_guard=lambda: database.consume_request(
+                    URLSCAN_QUOTA_SUBJECT,
+                    configured_urlscan_limit,
+                ),
+            )
+        except QuotaExceeded:
+            return "quota-exhausted"
+        except Exception:
+            LOGGER.exception("urlscan search refresh failed for %s", apex)
+            return "error"
+        return "ok"
+
+    async def refresh_urlscan_before_search(apex: str) -> str:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(refresh_urlscan, apex),
+                timeout=configured_urlscan_wait,
+            )
+        except TimeoutError:
+            LOGGER.warning("urlscan search refresh timed out for %s", apex)
+            return "timeout"
 
     def _run_seed_if_needed() -> None:
         if os.environ.get("CTLOGS_AUTO_SEED") != "1":
@@ -183,10 +254,10 @@ def create_app(
 
     @mcp.tool()
     async def search(apex: str, ctx: Context) -> list[str]:
-        """Return every indexed hostname for one registrable apex.
+        """Refresh from urlscan, then return indexed hostnames for an apex.
 
-        This only reads the passive index. It does not probe the apex or any
-        returned hostname.
+        This searches urlscan's historical scans. It does not submit a live scan
+        or probe the apex or any returned hostname.
         """
         canonical = normalize_apex(apex)
         request = ctx.request_context.request
@@ -197,6 +268,7 @@ def create_app(
             consume(client.host, request.headers.get("authorization"))
         except QuotaExceeded as error:
             raise ValueError("daily request limit exceeded") from error
+        await refresh_urlscan_before_search(canonical)
         return [row.subdomain for row in database.search(canonical)]
 
     security = TransportSecuritySettings(
@@ -299,8 +371,10 @@ def create_app(
                 headers=_retry_headers(error.quota),
             ) from error
 
+        urlscan_status = await refresh_urlscan_before_search(canonical)
         rows = database.search(canonical)
         headers = _quota_headers(quota)
+        headers["X-URLScan-Status"] = urlscan_status
         if output_format == "json":
             if dates:
                 body = [

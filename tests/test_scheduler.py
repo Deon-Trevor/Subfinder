@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from ctlogs.database import Database
+from ctlogs.database import Database, QuotaExceeded
+from ctlogs.ingest.enrich import SourcePage, URLSCAN_QUOTA_SUBJECT
 from ctlogs.scheduler import (
     ScheduledJob,
     _run_urlscan_batch,
@@ -50,7 +51,15 @@ def test_urlscan_budget_rotates_without_starving_later_apexes(
     database.initialize()
     visited: list[str] = []
 
-    def run_one(_database, _source, apexes, *, max_requests, refresh):
+    def run_one(
+        _database,
+        _source,
+        apexes,
+        *,
+        max_requests,
+        refresh,
+        request_guard,
+    ):
         assert max_requests == 1
         assert refresh is True
         visited.extend(apexes)
@@ -84,7 +93,15 @@ def test_urlscan_all_apexes_uses_a_persistent_index_cursor(
         database.upsert_subdomains(apex, [(apex, None)])
     visited: list[str] = []
 
-    def run_one(_database, _source, apexes, *, max_requests, refresh):
+    def run_one(
+        _database,
+        _source,
+        apexes,
+        *,
+        max_requests,
+        refresh,
+        request_guard,
+    ):
         assert max_requests == 1
         assert refresh is True
         visited.extend(apexes)
@@ -112,7 +129,15 @@ def test_urlscan_all_apexes_does_not_advance_past_a_failure(
         database.upsert_subdomains(apex, [(apex, None)])
     attempts: list[str] = []
 
-    def run_one(_database, _source, apexes, *, max_requests, refresh):
+    def run_one(
+        _database,
+        _source,
+        apexes,
+        *,
+        max_requests,
+        refresh,
+        request_guard,
+    ):
         apex = apexes[0]
         attempts.append(apex)
         if apex == "two.example" and attempts.count(apex) == 1:
@@ -187,3 +212,37 @@ def test_singleton_lock_rejects_a_second_scheduler(tmp_path: Path) -> None:
         with pytest.raises(RuntimeError, match="already held"):
             with _singleton_lock(lock):
                 pass
+
+
+def test_scheduler_honors_the_shared_urlscan_daily_ceiling(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    database.upsert_subdomains("example.com", [("example.com", None)])
+    monkeypatch.setenv("CTLOGS_SCHEDULE_DEFAULTS", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "0")
+    monkeypatch.setenv("URLSCAN_API_KEY", "key")
+    monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "*")
+    monkeypatch.setenv("CTLOGS_URLSCAN_APEXES_PER_RUN", "1")
+    monkeypatch.setenv("CTLOGS_URLSCAN_DAILY_LIMIT", "1")
+    calls: list[str] = []
+
+    class Source:
+        name = "urlscan"
+
+        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
+            calls.append(apex)
+            return SourcePage([], None, 1)
+
+    monkeypatch.setattr(
+        "ctlogs.scheduler.UrlscanSource",
+        lambda *_args, **_kwargs: Source(),
+    )
+    database.consume_request(URLSCAN_QUOTA_SUBJECT, 1)
+    urlscan_job = build_jobs(database)[0]
+
+    with pytest.raises(QuotaExceeded, match="daily request limit exceeded"):
+        urlscan_job.action()
+    assert calls == []
