@@ -58,6 +58,8 @@
       "operatingSystem": "Any",
       "isPartOf": { "@id": "#website" },
       "description": "Passive subdomain enumeration against a prebuilt index of certificate transparency logs, registry zone data and public crawls. Lookups never probe the domain being searched.",
+      "codeRepository": "https://github.com/Deon-Trevor/Subfinder",
+      "sameAs": "https://github.com/Deon-Trevor/Subfinder",
       "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
       "featureList": [
         "Passive subdomain enumeration with no DNS or HTTP traffic to the domain",
@@ -127,7 +129,7 @@
           <div class="search-row">
             <div class="search-field">
               <label class="visually-hidden" for="apex">Domain to enumerate</label>
-              <input class="search-input mono" id="apex" name="apex" type="text" placeholder="syncpundit.io"
+              <input class="search-input mono" id="apex" name="apex" type="text" placeholder="example.com"
                      spellcheck="false" inputmode="url" autocapitalize="off" autocorrect="off"
                      enterkeyhint="search" aria-describedby="search-meta" required>
               <kbd class="search-key" aria-hidden="true">/</kbd>
@@ -297,7 +299,7 @@ curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com&amp;form
     <footer class="footer">
       <span>Subfinder</span>
       <span>passive, no probes</span>
-      <a href="https://github.com/Deon-Trevor/Subfinder" rel="noopener">Source</a>
+      <a href="https://github.com/Deon-Trevor/Subfinder">Source</a>
       <span class="topbar-spacer"></span>
       <span>Sync_Pundit</span>
     </footer>
