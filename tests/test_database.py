@@ -70,7 +70,7 @@ def test_concurrent_quota_consumers_cannot_exceed_the_limit(tmp_path: Path) -> N
     assert outcomes.count(False) == 15
 
 
-def test_provenance_tracks_each_source_without_duplicating_search_rows(
+def test_sources_consolidate_without_duplicating_search_rows(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "provenance.sqlite3")
@@ -78,14 +78,20 @@ def test_provenance_tracks_each_source_without_duplicating_search_rows(
     database.upsert_subdomains(
         "example.com",
         [("www.example.com", "2025-01-02T00:00:00Z")],
-        source="source-a",
+        source="direct_ct:https://ct.example",
         observed_at="2026-08-21T00:00:00Z",
     )
     database.upsert_subdomains(
         "example.com",
         [("www.example.com", "2024-01-02T00:00:00Z")],
-        source="source-b",
+        source="urlscan",
         observed_at="2026-08-22T00:00:00Z",
+    )
+    database.upsert_subdomains(
+        "example.com",
+        [("www.example.com", None)],
+        source="commoncrawl",
+        observed_at="2026-08-23T00:00:00Z",
     )
 
     rows = database.search("example.com")
@@ -100,8 +106,13 @@ def test_provenance_tracks_each_source_without_duplicating_search_rows(
             """
         ).fetchall()
     assert [tuple(row) for row in sources] == [
-        ("source-a", "2025-01-02T00:00:00Z", "2026-08-21T00:00:00Z"),
-        ("source-b", "2024-01-02T00:00:00Z", "2026-08-22T00:00:00Z"),
+        ("commoncrawl", None, "2026-08-23T00:00:00Z"),
+        (
+            "direct_ct:https://ct.example",
+            "2025-01-02T00:00:00Z",
+            "2026-08-21T00:00:00Z",
+        ),
+        ("urlscan", "2024-01-02T00:00:00Z", "2026-08-22T00:00:00Z"),
     ]
 
 

@@ -185,6 +185,7 @@ def create_app(
                 [apex],
                 max_requests=1,
                 refresh=True,
+                persist_state=False,
                 request_guard=lambda: database.consume_request(
                     URLSCAN_QUOTA_SUBJECT,
                     configured_urlscan_limit,

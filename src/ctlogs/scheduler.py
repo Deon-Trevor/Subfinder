@@ -123,12 +123,10 @@ def _run_urlscan_batch(
     failures = 0
     for apex in selected:
         try:
-            source_requests, source_hostnames = run_source(
+            source_requests, source_hostnames = _run_urlscan_apex(
                 database,
                 source,
-                [apex],
-                max_requests=1,
-                refresh=True,
+                apex,
                 request_guard=request_guard,
             )
             requests += source_requests
@@ -144,6 +142,26 @@ def _run_urlscan_batch(
     if failures:
         raise RuntimeError(f"urlscan failed for {failures} configured apexes")
     return requests, hostnames
+
+
+def _run_urlscan_apex(
+    database: Database,
+    source: UrlscanSource,
+    apex: str,
+    *,
+    request_guard: Callable[[], object] | None = None,
+) -> tuple[int, int]:
+    state = database.get_ingest_state(f"enrich:{source.name}:{apex}")
+    history_complete = bool(state and state.get("cursor") == "complete")
+    return run_source(
+        database,
+        source,
+        [apex],
+        max_requests=1,
+        refresh=history_complete,
+        persist_state=not history_complete,
+        request_guard=request_guard,
+    )
 
 
 def _run_urlscan_index_batch(
@@ -168,12 +186,10 @@ def _run_urlscan_index_batch(
     requests = 0
     hostnames = 0
     for apex in apexes:
-        source_requests, source_hostnames = run_source(
+        source_requests, source_hostnames = _run_urlscan_apex(
             database,
             source,
-            [apex],
-            max_requests=1,
-            refresh=True,
+            apex,
             request_guard=request_guard,
         )
         requests += source_requests

@@ -111,6 +111,11 @@ async def test_search_refreshes_urlscan_before_reading_the_local_index(
         allowed_origins=[],
     )
     async with app.router.lifespan_context(app):
+        app.state.database.upsert_ingest_state(
+            "enrich:urlscan:example.com",
+            cursor="older-page",
+            updated_at="2026-08-23T00:00:00Z",
+        )
         original_search = app.state.database.search
 
         def tracked_search(apex: str):
@@ -131,6 +136,9 @@ async def test_search_refreshes_urlscan_before_reading_the_local_index(
     assert response.headers["x-urlscan-status"] == "ok"
     assert response.json() == [{"sub": "fresh.example.com"}]
     assert events == ["urlscan", "local"]
+    assert app.state.database.get_ingest_state("enrich:urlscan:example.com")[
+        "cursor"
+    ] == "older-page"
 
 
 @pytest.mark.anyio

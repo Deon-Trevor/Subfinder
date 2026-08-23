@@ -9,6 +9,7 @@ from ctlogs.database import Database, QuotaExceeded
 from ctlogs.ingest.enrich import SourcePage, URLSCAN_QUOTA_SUBJECT
 from ctlogs.scheduler import (
     ScheduledJob,
+    _run_urlscan_apex,
     _run_urlscan_batch,
     _run_urlscan_index_batch,
     _singleton_lock,
@@ -58,15 +59,17 @@ def test_urlscan_budget_rotates_without_starving_later_apexes(
         *,
         max_requests,
         refresh,
+        persist_state,
         request_guard,
     ):
         assert max_requests == 1
-        assert refresh is True
+        assert refresh is False
+        assert persist_state is True
         visited.extend(apexes)
         return 1, 1
 
     monkeypatch.setattr("ctlogs.scheduler.run_source", run_one)
-    source = object()
+    source = type("Source", (), {"name": "urlscan"})()
     apexes = ["one.example", "two.example", "three.example"]
 
     assert _run_urlscan_batch(  # type: ignore[arg-type]
@@ -100,15 +103,17 @@ def test_urlscan_all_apexes_uses_a_persistent_index_cursor(
         *,
         max_requests,
         refresh,
+        persist_state,
         request_guard,
     ):
         assert max_requests == 1
-        assert refresh is True
+        assert refresh is False
+        assert persist_state is True
         visited.extend(apexes)
         return 1, 1
 
     monkeypatch.setattr("ctlogs.scheduler.run_source", run_one)
-    source = object()
+    source = type("Source", (), {"name": "urlscan"})()
 
     assert _run_urlscan_index_batch(  # type: ignore[arg-type]
         database, source, apexes_per_run=2
@@ -136,6 +141,7 @@ def test_urlscan_all_apexes_does_not_advance_past_a_failure(
         *,
         max_requests,
         refresh,
+        persist_state,
         request_guard,
     ):
         apex = apexes[0]
@@ -145,7 +151,7 @@ def test_urlscan_all_apexes_does_not_advance_past_a_failure(
         return 1, 1
 
     monkeypatch.setattr("ctlogs.scheduler.run_source", run_one)
-    source = object()
+    source = type("Source", (), {"name": "urlscan"})()
 
     with pytest.raises(RuntimeError, match="temporary failure"):
         _run_urlscan_index_batch(  # type: ignore[arg-type]
@@ -158,6 +164,55 @@ def test_urlscan_all_apexes_does_not_advance_past_a_failure(
         database, source, apexes_per_run=2
     ) == (1, 1)
     assert attempts == ["one.example", "two.example", "two.example"]
+
+
+def test_urlscan_apex_resumes_older_pages_then_refreshes_without_resetting(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    cursors: list[str | None] = []
+
+    class Source:
+        name = "urlscan"
+
+        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
+            cursors.append(cursor)
+            if cursor == "older-page":
+                return SourcePage(
+                    [(f"old.{apex}", "2020-01-01T00:00:00Z")],
+                    None,
+                    1,
+                )
+            return SourcePage(
+                [(f"new.{apex}", "2026-01-01T00:00:00Z")],
+                "older-page",
+                1,
+            )
+
+    source = Source()
+    assert _run_urlscan_apex(  # type: ignore[arg-type]
+        database, source, "example.com"
+    ) == (1, 1)
+    state = database.get_ingest_state("enrich:urlscan:example.com")
+    assert state["cursor"] == "older-page"
+
+    assert _run_urlscan_apex(  # type: ignore[arg-type]
+        database, source, "example.com"
+    ) == (1, 1)
+    state = database.get_ingest_state("enrich:urlscan:example.com")
+    assert state["cursor"] == "complete"
+
+    assert _run_urlscan_apex(  # type: ignore[arg-type]
+        database, source, "example.com"
+    ) == (1, 1)
+    state = database.get_ingest_state("enrich:urlscan:example.com")
+    assert state["cursor"] == "complete"
+    assert cursors == [None, "older-page", None]
+    assert [row.subdomain for row in database.search("example.com")] == [
+        "old.example.com",
+        "new.example.com",
+    ]
 
 
 def test_build_jobs_keeps_each_capped_source_on_its_own_budget(

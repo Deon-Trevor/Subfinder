@@ -33,9 +33,12 @@ local index. It does not submit a live scan or probe a hostname.
 | [ProjectDiscovery Chaos](https://chaos.projectdiscovery.io/) public downloads | Import published public DNS datasets without an API key. |
 | [HaGeZi DNS blocklists](https://github.com/hagezi/dns-blocklists) | Import hostname-only lists as discovery evidence, not as a maliciousness verdict. |
 
-These adapters build one index. Public searches refresh urlscan when configured,
-then read that index. `/v1/stats` reports the current count of distinct
-provenance source IDs, which changes as logs and optional sources contribute.
+Every enabled adapter writes to one index. A hostname keeps its earliest dated
+observation across sources, while `subdomain_sources` keeps each source's own
+first and last observation. Public searches refresh urlscan when configured,
+then read the consolidated index. Bulk sources run on their own schedules and
+are never replaced by urlscan results. `/v1/stats` reports the current count of
+distinct provenance source IDs.
 
 ## Update cadence
 
@@ -47,13 +50,16 @@ previous run finishes. Search requests also perform one bounded urlscan refresh
 before reading SQLite.
 
 CZDS and urlscan have independent caps. CZDS checks the 25 least-recently
-checked approved zones per run. urlscan makes one request for each configured
-apex. With `CTLOGS_URLSCAN_APEXES=*`, it walks the full local apex index in
-batches of up to 69 using a persisted cursor. The 60-second minimum interval
-limits scheduled starts to 99,360 per UTC day. Scheduled and API-triggered
-requests share an atomic 100,000-request daily ceiling. Artifact imports each
-have their own download and parser run, so adding one cannot consume another
-source's slot.
+checked approved zones per run. With `CTLOGS_URLSCAN_APEXES=*`, urlscan walks
+the full local apex index in batches of up to 69. Each apex keeps its own
+`search_after` cursor, so later visits request the next older results page.
+After an apex reaches the end of its history, later visits refresh its newest
+page without resetting the completed history state. API-triggered refreshes
+also leave the scheduler's history cursor unchanged. The 60-second minimum
+interval limits scheduled starts to 99,360 per UTC day. Scheduled and
+API-triggered requests share an atomic 100,000-request daily ceiling. Artifact
+imports each have their own download and parser run, so adding one cannot
+consume another source's slot.
 
 The `.ee`, `.se`, `.nu`, `.ch`, `.li`, Chaos, Common Crawl, HaGeZi, and Geomys
 adapters do not discover their own upstream files. They run unattended only

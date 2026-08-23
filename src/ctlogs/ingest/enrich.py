@@ -113,6 +113,7 @@ def run_source(
     *,
     max_requests: int,
     refresh: bool = False,
+    persist_state: bool = True,
     request_guard: Callable[[], object] | None = None,
 ) -> tuple[int, int]:
     started_at = datetime.now(UTC).isoformat()
@@ -124,7 +125,7 @@ def run_source(
 
     for apex in apexes:
         state_key = f"enrich:{source.name}:{apex}"
-        state = database.get_ingest_state(state_key)
+        state = database.get_ingest_state(state_key) if persist_state else None
         if state and state.get("cursor") == "complete" and not refresh:
             continue
         cursor = None if refresh or not state else state.get("cursor")
@@ -139,11 +140,12 @@ def run_source(
                 database.upsert_subdomains(apex, page.rows, source=source.name)
                 hostname_count += len(page.rows)
             cursor = page.next_cursor
-            database.upsert_ingest_state(
-                state_key,
-                cursor=cursor or "complete",
-                updated_at=datetime.now(UTC).isoformat(),
-            )
+            if persist_state:
+                database.upsert_ingest_state(
+                    state_key,
+                    cursor=cursor or "complete",
+                    updated_at=datetime.now(UTC).isoformat(),
+                )
             if cursor is None:
                 break
         if request_count >= max_requests:

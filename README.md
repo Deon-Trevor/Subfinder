@@ -158,17 +158,26 @@ process and request budget. Separate volume locks prevent duplicate processes,
 and SQLite stores each job's next run time.
 
 Set `CTLOGS_URLSCAN_APEXES` to a comma-separated allowlist, or set it to `*` to
-walk every apex already in the local index. The all-index mode keeps its cursor
-in SQLite, processes up to 69 apexes per run, and starts the next run 60 seconds
-after the previous one finishes. A failed apex remains at the cursor for retry.
-The scheduler can start at most 99,360 searches per UTC day. API-triggered and
+walk every apex already in the local index. The all-index mode keeps both its
+apex cursor and each apex's `search_after` cursor in SQLite. Each scheduled
+visit fetches the next older page until that apex's history is complete. Later
+visits refresh the newest page without discarding the completed history state.
+API-triggered refreshes do not change scheduler pagination. The scheduler
+processes up to 69 apexes per run and starts the next run 60 seconds after the
+previous run finishes. A failed apex remains at the cursor for retry. The
+scheduler can start at most 99,360 searches per UTC day. API-triggered and
 scheduled searches share one atomic 100,000-request daily ceiling, so API use
 reduces the scheduler's remaining allowance. Confirm that this fits the account
 quota and urlscan's usage terms before enabling it.
 
+All enabled sources consolidate into the same `subdomains` table. The database
+keeps the earliest dated observation and records each source separately in
+`subdomain_sources`. The API queries urlscan before reading this combined local
+index. It does not query bulk sources during a request.
+
 HaGeZi, public Chaos data, Common Crawl, and registry exports are parsers for
-artifacts whose locations or access details vary by deployment. Configure
-recurring downloads once as a JSON list of `SOURCE=PATH_OR_URL` strings:
+artifacts whose locations or access details vary by deployment. Configure every
+permitted artifact as a JSON list of `SOURCE=PATH_OR_URL` strings:
 
 ```env
 CTLOGS_URLSCAN_APEXES=*
