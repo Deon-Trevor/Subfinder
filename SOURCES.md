@@ -42,9 +42,10 @@ begin contributing.
 
 The API container polls Chrome, Apple, RFC 6962, and configured Static CT logs
 continuously. Each cycle starts after the previous cycle and a 60-second wait.
-The separate scheduler runs IANA, CISA, configured artifacts, and CZDS every 24
-hours. urlscan starts its next bounded run 60 seconds after the previous run
-finishes. Website requests only read SQLite and never start ingestion.
+One scheduler runs IANA, CISA, configured artifacts, and CZDS every 24 hours.
+A separate urlscan scheduler starts its next bounded run 60 seconds after the
+previous run finishes. Website requests only read SQLite and never start
+ingestion.
 
 CZDS and urlscan have independent caps. CZDS checks the 25 least-recently
 checked approved zones per run. urlscan makes one request for each configured

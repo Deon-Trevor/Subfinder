@@ -144,11 +144,12 @@ current Let's Encrypt Willow 2026h2 shard. Static shards are time-bounded, so
 deployment configuration must add new usable shards before the current shard
 closes.
 
-The Compose `scheduler` service runs recurring non-CT ingestion without web
-traffic. It runs IANA root and CISA `.gov` imports every 24 hours. When CZDS
-credentials are present, it also checks up to 25 least-recently-checked zones
-per day. Failed jobs retry after one hour. A volume lock prevents two scheduler
-processes from running at once, and SQLite stores each job's next run time.
+The Compose `scheduler` and `urlscan-scheduler` services run recurring non-CT
+ingestion without web traffic. The first runs IANA root and CISA `.gov` imports
+every 24 hours. When CZDS credentials are present, it also checks up to 25
+least-recently-checked zones per day. The second gives urlscan an independent
+process and request budget. Separate volume locks prevent duplicate processes,
+and SQLite stores each job's next run time.
 
 Set `CTLOGS_URLSCAN_APEXES` to a comma-separated allowlist, or set it to `*` to
 walk every apex already in the local index. The all-index mode keeps its cursor
@@ -175,6 +176,7 @@ Inspect the configured schedule without contacting upstream sources:
 
 ```bash
 docker compose run --rm scheduler --list
+docker compose run --rm urlscan-scheduler --list
 ```
 
 Benchmark bulk fixtures:
