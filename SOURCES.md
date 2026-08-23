@@ -50,8 +50,9 @@ ingestion.
 CZDS and urlscan have independent caps. CZDS checks the 25 least-recently
 checked approved zones per run. urlscan makes one request for each configured
 apex. With `CTLOGS_URLSCAN_APEXES=*`, it walks the full local apex index in
-batches of up to 250 using a persisted cursor. Artifact imports each have their
-own download and parser run, so adding one cannot consume another source's slot.
+batches of up to 69 using a persisted cursor. The 60-second minimum interval
+caps it at 99,360 searches per UTC day. Artifact imports each have their own
+download and parser run, so adding one cannot consume another source's slot.
 
 The `.ee`, `.se`, `.nu`, `.ch`, `.li`, Chaos, Common Crawl, HaGeZi, and Geomys
 adapters do not discover their own upstream files. They run unattended only

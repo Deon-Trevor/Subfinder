@@ -153,10 +153,10 @@ and SQLite stores each job's next run time.
 
 Set `CTLOGS_URLSCAN_APEXES` to a comma-separated allowlist, or set it to `*` to
 walk every apex already in the local index. The all-index mode keeps its cursor
-in SQLite, processes up to 250 apexes per run, and starts the next run 60 seconds
+in SQLite, processes up to 69 apexes per run, and starts the next run 60 seconds
 after the previous one finishes. A failed apex remains at the cursor for retry.
-The theoretical ceiling is 360,000 searches per day. Confirm that this fits the
-account quota and urlscan's usage terms before enabling it.
+The hard scheduling ceiling is 99,360 searches per UTC day. Confirm that this
+fits the account quota and urlscan's usage terms before enabling it.
 
 HaGeZi, public Chaos data, Common Crawl, and registry exports are parsers for
 artifacts whose locations or access details vary by deployment. Configure
