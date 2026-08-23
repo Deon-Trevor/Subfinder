@@ -212,21 +212,20 @@ button { cursor: pointer; }
 
 .brand {
   display: flex;
-  align-items: baseline;
-  gap: .55rem;
+  align-items: center;
+  gap: .5rem;
   text-decoration: none;
   color: inherit;
 }
 
+/* The mark carries the brand colour and the wordmark carries the ink, so the
+   pair reads on either theme without a container behind either half. */
 .brand-mark {
-  font-family: var(--mono);
-  font-size: var(--t-sm);
-  font-weight: 600;
-  letter-spacing: -.02em;
-  color: var(--on-accent);
-  background: var(--sage);
-  border-radius: 3px;
-  padding: .1rem .34rem;
+  display: block;
+  width: 21px;
+  height: 21px;
+  flex: none;
+  color: var(--sage);
 }
 
 .brand-name { font-weight: 700; letter-spacing: -.02em; }

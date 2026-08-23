@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from ctlogs.app import create_app
-from ctlogs.web import ASSETS, INDEX, frontend_directory
+from ctlogs.web import ASSETS, INDEX, MEDIA, frontend_directory
 
 
 PUBLIC_PRODUCT_FILES = (
@@ -24,7 +24,7 @@ def _write_frontend(root: Path) -> Path:
     directory = root / "web"
     directory.mkdir()
     (directory / INDEX).write_text("<!doctype html><title>First Seen</title>")
-    for name in ASSETS:
+    for name in (*ASSETS, *MEDIA):
         (directory / name).write_text(f"/* {name} */")
     return directory
 
@@ -79,13 +79,54 @@ async def test_assets_carry_their_own_content_type(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(("name", "media_type"), sorted(MEDIA.items()))
+async def test_icons_carry_their_own_content_type(
+    client: httpx.AsyncClient, name: str, media_type: str
+) -> None:
+    response = await client.get(f"/{name}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == media_type
+
+
+@pytest.mark.anyio
 async def test_page_and_assets_revalidate(client: httpx.AsyncClient) -> None:
-    # The markup and its two assets ship together, so a browser must not pair
-    # new markup with a cached script.
+    # The markup and the assets it is versioned with ship together, so a
+    # browser must not pair new markup with a cached script.
     for path in ("/", *(f"/{name}" for name in ASSETS)):
         response = await client.get(path)
 
         assert response.headers["cache-control"] == "no-cache"
+
+
+@pytest.mark.anyio
+async def test_icons_are_cached_rather_than_revalidated(
+    client: httpx.AsyncClient,
+) -> None:
+    # Icons are the same bytes across deploys and nothing pairs them with the
+    # markup, so paying a conditional request for each one on every load is
+    # waste the page does not need to spend.
+    for name in MEDIA:
+        response = await client.get(f"/{name}")
+
+        assert response.headers["cache-control"] == "public, max-age=604800"
+
+
+@pytest.mark.anyio
+async def test_robots_keeps_crawlers_off_the_metered_routes(
+    client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    # A crawler walking every "?apex=" link it finds would spend a visitor's
+    # whole day of reads, so the real file has to name each metered path. The
+    # fixture frontend holds a placeholder, so this reads the shipped one.
+    rules = Path("web/robots.txt").read_text()
+
+    for path in ("/v1/", "/mcp", "/*?apex="):
+        assert f"Disallow: {path}" in rules
+
+    response = await client.get("/robots.txt")
+
+    assert response.status_code == 200
 
 
 @pytest.mark.anyio

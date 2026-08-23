@@ -20,7 +20,10 @@
 <meta name="theme-color" content="#EDEFEA" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0C100E" media="(prefers-color-scheme: dark)">
 
-<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%230C100E%22/><g fill=%22%237FC29B%22><rect x=%227%22 y=%229%22 width=%2218%22 height=%223.4%22 rx=%221.7%22/><rect x=%227%22 y=%2214.9%22 width=%2213%22 height=%223.4%22 rx=%221.7%22/><rect x=%227%22 y=%2220.8%22 width=%228%22 height=%223.4%22 rx=%221.7%22/></g></svg>">
+<link rel="icon" href="favicon.ico" sizes="32x32">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
 
 <!-- Fonts load without blocking the first paint: the preload fetches at high
      priority and the onload flips it to a stylesheet, so the hero paints in the
@@ -74,7 +77,9 @@
 <header class="topbar">
   <div class="wrap topbar-inner">
     <a class="brand" href="/">
-      <span class="brand-mark mono">sf</span>
+      <svg class="brand-mark" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+        <path d="M30 7A3 3 0 0 0 27 4L8 4A3 3 0 0 0 5 7L5 16A3 3 0 0 0 8 19L21 19L21 22L5 22A3 3 0 0 0 2 25A3 3 0 0 0 5 28L24 28A3 3 0 0 0 27 25L27 16A3 3 0 0 0 24 13L11 13L11 10L27 10A3 3 0 0 0 30 7Z"/>
+      </svg>
       <span class="brand-name">Subfinder</span>
     </a>
     <span class="topbar-spacer"></span>
