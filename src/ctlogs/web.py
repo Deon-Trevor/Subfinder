@@ -16,6 +16,10 @@ INDEX = "index.html"
 ASSETS: dict[str, str] = {
     "app.css": "text/css; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
+    # robots.txt keeps crawlers off /v1/search and off the "?apex=" form of the
+    # page. Both spend the shared 1000-reads-per-IP-per-day allowance, and a
+    # crawler following every result link would spend it on nobody's behalf.
+    "robots.txt": "text/plain; charset=utf-8",
 }
 
 
@@ -46,8 +50,8 @@ def _serve(path: Path, media_type: str) -> Callable[[], Awaitable[FileResponse]]
 def mount_frontend(app: FastAPI) -> bool:
     """Serve the frontend from the same origin as the API.
 
-    The page is three static files, registered as explicit routes rather than a
-    StaticFiles mount: create_app mounts the MCP app at "/", and a second
+    The page is a handful of static files, registered as explicit routes rather
+    than a StaticFiles mount: create_app mounts the MCP app at "/", and a second
     directory mount on that prefix would swallow /mcp. Named paths cannot
     shadow an API route.
 

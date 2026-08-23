@@ -1,10 +1,12 @@
-/* Subfinder - frontend for the certificate transparency index.
+/* Subfinder - frontend for the passive subdomain index.
  *
  * The one rule that shapes this file: /v1/search and POST /mcp share a single
  * allowance of 1000 successful reads per IP per UTC day. A browser UI is a new
  * caller on that shared pool, so it never spends a request the user did not ask
  * for. No search on load, no search per keystroke, and a repeat lookup of an
  * apex already read this session is served from memory instead of the API.
+ * Filtering, sorting and exporting all work on rows already in hand, so none of
+ * them return to the API either.
  *
  * The live counter obeys the same rule from the other direction. It polls
  * /v1/stats, which is outside the allowance, and it polls on a timer, so it
@@ -16,6 +18,9 @@ const API_BASE = "";
 const CACHE = new Map();
 const STATS_PATH = "/v1/stats";
 const POLL_MS = 15_000;
+const POLL_MAX_MS = 5 * 60_000;
+const FETCH_TIMEOUT_MS = 15_000;
+const FILTER_DEBOUNCE_MS = 120;
 const SUBMIT_LABEL = "Enumerate";
 
 const el = {
@@ -27,9 +32,13 @@ const el = {
   quotaText: document.getElementById("quota-text"),
   quotaFill: document.getElementById("quota-fill"),
   register: document.getElementById("register"),
+  registerHeading: document.getElementById("register-heading"),
   registerApex: document.getElementById("register-apex"),
   registerCount: document.getElementById("register-count"),
   registerState: document.getElementById("register-state"),
+  filterWrap: document.getElementById("filter-wrap"),
+  filter: document.getElementById("filter"),
+  toolStatus: document.getElementById("tool-status"),
   ledger: document.getElementById("ledger"),
   shape: document.getElementById("shape"),
   shapeBars: document.getElementById("shape-bars"),
@@ -54,21 +63,47 @@ const el = {
 
 let current = { apex: "", rows: [] };
 
+/* Older engines miss AbortSignal.timeout, and a hung fetch would otherwise
+   stall the poll chain behind it forever. */
+function timeoutSignal(ms) {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
 /* ── theme ───────────────────────────────────────────────────────── */
 const stored = (() => {
-  try { return localStorage.getItem("firstseen-theme"); } catch { return null; }
+  try { return localStorage.getItem("subfinder-theme"); } catch { return null; }
 })();
 if (stored === "light" || stored === "dark") {
   document.documentElement.setAttribute("data-theme", stored);
 }
 
+function activeTheme() {
+  return document.documentElement.getAttribute("data-theme")
+    || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+}
+
+/* The control offers the theme you would move to, so its label has to name that
+   theme rather than the one already on screen. */
+function syncThemeToggle() {
+  const dark = activeTheme() === "dark";
+  el.themeToggle.setAttribute("aria-label", dark ? "Switch to light theme" : "Switch to dark theme");
+  el.themeToggle.setAttribute("aria-pressed", String(dark));
+}
+
 el.themeToggle.addEventListener("click", () => {
-  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
-  const active = document.documentElement.getAttribute("data-theme") || (dark ? "dark" : "light");
-  const next = active === "dark" ? "light" : "dark";
+  const next = activeTheme() === "dark" ? "light" : "dark";
   document.documentElement.setAttribute("data-theme", next);
-  try { localStorage.setItem("firstseen-theme", next); } catch { /* private mode */ }
+  syncThemeToggle();
+  try { localStorage.setItem("subfinder-theme", next); } catch { /* private mode */ }
 });
+
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncThemeToggle);
+syncThemeToggle();
 
 /* ── the live index counter ──────────────────────────────────────── */
 /* /v1/stats is outside the search allowance, so this doubles as the liveness
@@ -77,23 +112,29 @@ el.themeToggle.addEventListener("click", () => {
    The motion between two readings is a tween across real values, never an
    extrapolation, so the counter cannot run ahead of the index. */
 
-let poll = null;
+let pollTimer = null;
+let failures = 0;
 let baseline = null;
 let shown = 0;
+let tween = 0;
 
 function commas(value) {
   return value.toLocaleString("en");
 }
 
 /* Count from the last reading to the new one instead of snapping, so a write
-   to the index is visible rather than just different on the next glance. */
+   to the index is visible rather than just different on the next glance. A
+   token retires the previous frame loop, so two readings landing close together
+   cannot leave two loops writing the same node. */
 function tweenTo(target) {
   const from = shown;
   if (from === target) return;
+  const mine = ++tween;
   const started = performance.now();
   const span = 700;
 
   const step = (now) => {
+    if (mine !== tween) return;
     const t = Math.min(1, (now - started) / span);
     const eased = 1 - (1 - t) ** 3;
     shown = Math.round(from + (target - from) * eased);
@@ -191,37 +232,53 @@ function statsUnreachable() {
 
 async function readStats() {
   try {
-    const response = await fetch(`${API_BASE}${STATS_PATH}`, { cache: "no-store" });
+    const response = await fetch(`${API_BASE}${STATS_PATH}`, {
+      cache: "no-store",
+      signal: timeoutSignal(FETCH_TIMEOUT_MS),
+    });
     if (!response.ok) throw new Error(String(response.status));
     renderStats(await response.json());
+    failures = 0;
   } catch {
+    failures += 1;
     statsUnreachable();
   }
 }
 
-/* A hidden tab is not watching a counter, so it should not be asking for one. */
-function startPolling() {
-  if (poll !== null) return;
-  poll = setInterval(readStats, POLL_MS);
+/* A hidden tab is not watching a counter, so it should not be asking for one.
+   A dead index should not be asked every 15 seconds either: each failure backs
+   the next attempt off, up to five minutes, and the first success resets it. */
+function nextDelay() {
+  return failures === 0 ? POLL_MS : Math.min(POLL_MS * 2 ** failures, POLL_MAX_MS);
+}
+
+function schedulePoll() {
+  stopPolling();
+  pollTimer = setTimeout(pollOnce, nextDelay());
+}
+
+async function pollOnce() {
+  pollTimer = null;
+  if (document.hidden) return;
+  await readStats();
+  if (!document.hidden) schedulePoll();
 }
 
 function stopPolling() {
-  if (poll === null) return;
-  clearInterval(poll);
-  poll = null;
+  if (pollTimer === null) return;
+  clearTimeout(pollTimer);
+  pollTimer = null;
 }
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     stopPolling();
   } else {
-    readStats();
-    startPolling();
+    readStats().then(schedulePoll);
   }
 });
 
-readStats();
-startPolling();
+readStats().then(schedulePoll);
 
 /* ── helpers ─────────────────────────────────────────────────────── */
 function yearOf(firstSeen) {
@@ -241,17 +298,21 @@ function plural(n, word) {
   return `${n.toLocaleString("en")} ${word}${n === 1 ? "" : "s"}`;
 }
 
+/* Every error path also hides the results section, and reveal() may already
+   have put focus on its heading. Sending focus back to the field keeps the
+   keyboard somewhere useful instead of dropping it on <body>. */
 function showError(headline, detail) {
-  el.error.innerHTML = "";
+  el.error.replaceChildren();
   const strong = document.createElement("strong");
   strong.textContent = headline;
   el.error.append(strong, document.createTextNode(` ${detail}`));
   el.error.hidden = false;
+  el.input.focus({ preventScroll: true });
 }
 
 function clearError() {
   el.error.hidden = true;
-  el.error.textContent = "";
+  el.error.replaceChildren();
 }
 
 function setQuota(headers) {
@@ -270,25 +331,31 @@ function setQuota(headers) {
 
 /* ── rendering ───────────────────────────────────────────────────── */
 function renderShape(rows) {
-  const years = rows.map((row) => yearOf(row.first_seen)).filter((year) => year !== null);
-  if (years.length < 2) {
-    el.shape.hidden = true;
-    return;
-  }
-
-  const first = Math.min(...years);
-  const last = Math.max(...years);
-  if (last - first < 1) {
-    el.shape.hidden = true;
-    return;
-  }
-
+  // A single pass rather than Math.min(...years): a busy apex can carry tens of
+  // thousands of dated names, and spreading an array that long into a call
+  // blows the argument limit and throws.
   const counts = new Map();
-  for (const year of years) counts.set(year, (counts.get(year) || 0) + 1);
-  const peak = Math.max(...counts.values());
+  let first = Infinity;
+  let last = -Infinity;
+  let dated = 0;
 
-  el.shapeBars.innerHTML = "";
-  el.shapeAxis.innerHTML = "";
+  for (const row of rows) {
+    const year = yearOf(row.first_seen);
+    if (year === null) continue;
+    dated += 1;
+    if (year < first) first = year;
+    if (year > last) last = year;
+    counts.set(year, (counts.get(year) || 0) + 1);
+  }
+
+  if (dated < 2 || last - first < 1) {
+    el.shape.hidden = true;
+    return;
+  }
+
+  let peak = 0;
+  for (const count of counts.values()) if (count > peak) peak = count;
+
   const span = last - first + 1;
   const tickEvery = span > 12 ? Math.ceil(span / 8) : 1;
 
@@ -298,6 +365,13 @@ function renderShape(rows) {
   // bar at every span.
   el.shape.style.setProperty("--shape-width", `min(100%, ${span * 92}px)`);
   el.shapePeak.textContent = `· peak ${plural(peak, "name")}`;
+  el.shapeBars.setAttribute(
+    "aria-label",
+    `Names first logged per year, ${first} to ${last}. Busiest year holds ${plural(peak, "name")}.`,
+  );
+
+  const bars = document.createDocumentFragment();
+  const axis = document.createDocumentFragment();
 
   for (let year = first; year <= last; year += 1) {
     const count = counts.get(year) || 0;
@@ -321,20 +395,20 @@ function renderShape(rows) {
     if (count === peak) bar.dataset.peak = "true";
 
     cell.append(bar);
-    el.shapeBars.append(cell);
+    bars.append(cell);
 
     const tick = document.createElement("span");
     tick.className = "shape-tick";
     tick.textContent = (year - first) % tickEvery === 0 ? `'${String(year).slice(2)}` : "";
-    el.shapeAxis.append(tick);
+    axis.append(tick);
   }
 
+  el.shapeBars.replaceChildren(bars);
+  el.shapeAxis.replaceChildren(axis);
   el.shape.hidden = false;
 }
 
 function renderLedger(apex, rows) {
-  el.ledger.innerHTML = "";
-
   // rows arrive oldest-first with undated names last, so a single pass groups them
   const groups = [];
   for (const row of rows) {
@@ -345,6 +419,10 @@ function renderLedger(apex, rows) {
   }
 
   const suffix = `.${apex}`;
+  // One fragment for the whole list: the document is touched once at the end
+  // rather than once per year, which matters when a result runs to thousands
+  // of rows. CSS then keeps the offscreen years out of layout and paint.
+  const fragment = document.createDocumentFragment();
 
   for (const group of groups) {
     const section = document.createElement("section");
@@ -400,26 +478,39 @@ function renderLedger(apex, rows) {
     }
 
     section.append(gutter, list);
-    el.ledger.append(section);
+    fragment.append(section);
   }
+
+  el.ledger.replaceChildren(fragment);
 }
 
 function renderEmpty(apex) {
-  el.registerState.innerHTML = "";
   const box = document.createElement("div");
   box.className = "state";
   const title = document.createElement("p");
   title.className = "state-title";
-  title.textContent = "Nothing on file for this apex.";
+  title.textContent = "Nothing on file for this domain.";
   const body = document.createElement("p");
   body.className = "state-body";
   body.textContent = `The index holds no name under ${apex}. That is an answer, not an error, and the domain was not contacted to produce it.`;
   box.append(title, body);
-  el.registerState.append(box);
+  el.registerState.replaceChildren(box);
+}
+
+function renderNoMatches(term) {
+  const box = document.createElement("div");
+  box.className = "state";
+  const title = document.createElement("p");
+  title.className = "state-title";
+  title.textContent = "No name matches that filter.";
+  const body = document.createElement("p");
+  body.className = "state-body";
+  body.textContent = `Nothing in this result contains "${term}". Clearing the filter brings the whole list back; it never returns to the API.`;
+  box.append(title, body);
+  el.registerState.replaceChildren(box);
 }
 
 function renderLoading() {
-  el.registerState.innerHTML = "";
   const box = document.createElement("div");
   box.className = "skeleton";
   for (let i = 0; i < 8; i += 1) {
@@ -428,24 +519,71 @@ function renderLoading() {
     row.style.width = `${88 - i * 6}%`;
     box.append(row);
   }
-  el.registerState.append(box);
+  el.registerState.replaceChildren(box);
 }
+
+function setCount(total, visible, dated) {
+  el.registerCount.replaceChildren();
+  if (!total) return;
+
+  el.registerCount.append(document.createTextNode(
+    `${plural(total, "name")} · ${dated.toLocaleString("en")} dated`,
+  ));
+  if (visible === total) return;
+
+  const filtered = document.createElement("span");
+  filtered.className = "is-filtered";
+  filtered.textContent = ` · ${visible.toLocaleString("en")} shown`;
+  el.registerCount.append(filtered);
+}
+
+/* Filtering works on rows already in hand, so it costs nothing against the
+   allowance no matter how often it runs. */
+function visibleRows() {
+  const term = el.filter.value.trim().toLowerCase();
+  if (!term) return { rows: current.rows, term: "" };
+  return { rows: current.rows.filter((row) => row.sub.includes(term)), term };
+}
+
+function applyFilter() {
+  const { rows, term } = visibleRows();
+  const dated = current.rows.reduce((n, row) => n + (row.first_seen ? 1 : 0), 0);
+  setCount(current.rows.length, rows.length, dated);
+
+  if (!rows.length) {
+    el.ledger.replaceChildren();
+    renderNoMatches(term);
+    return;
+  }
+
+  el.registerState.replaceChildren();
+  renderLedger(current.apex, rows);
+}
+
+let filterTimer = null;
+el.filter.addEventListener("input", () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(applyFilter, FILTER_DEBOUNCE_MS);
+});
 
 function renderRegister(apex, rows) {
   current = { apex, rows };
+  // A keystroke from the previous result must not re-filter this one.
+  clearTimeout(filterTimer);
+  el.filter.value = "";
   el.register.hidden = false;
+  el.register.removeAttribute("aria-busy");
   el.registerApex.textContent = apex;
-  el.registerState.innerHTML = "";
+  el.registerState.replaceChildren();
 
-  const dated = rows.filter((row) => row.first_seen).length;
-  el.registerCount.textContent = rows.length
-    ? `${plural(rows.length, "name")} · ${dated.toLocaleString("en")} dated`
-    : "";
+  const dated = rows.reduce((n, row) => n + (row.first_seen ? 1 : 0), 0);
+  setCount(rows.length, rows.length, dated);
 
   el.apiLink.href = `${API_BASE}/v1/search?apex=${encodeURIComponent(apex)}&format=json&dates=1`;
+  el.filterWrap.hidden = rows.length < 2;
 
   if (!rows.length) {
-    el.ledger.innerHTML = "";
+    el.ledger.replaceChildren();
     el.shape.hidden = true;
     renderEmpty(apex);
     return;
@@ -457,18 +595,38 @@ function renderRegister(apex, rows) {
 
 function reveal() {
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // Focus first so a keyboard or screen reader lands on the result rather than
+  // staying behind in the search field; the scroll then does the visual half.
+  el.registerHeading.focus({ preventScroll: true });
   el.register.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
 }
 
 /* ── search ──────────────────────────────────────────────────────── */
-async function search(raw) {
-  const apex = raw.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/\.$/, "");
+function normalise(raw) {
+  return raw.trim().toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "")
+    .replace(/\.$/, "");
+}
+
+/* A result is worth a URL: it makes the lookup shareable and puts it in the
+   back button. Replaying one costs nothing, because the apex is in CACHE by
+   then and popstate never reaches the network. */
+function syncUrl(apex, push) {
+  const url = `${location.pathname}?apex=${encodeURIComponent(apex)}`;
+  if (push) history.pushState({ apex }, "", url);
+  else history.replaceState({ apex }, "", url);
+}
+
+async function search(raw, { push = true } = {}) {
+  const apex = normalise(raw);
   if (!apex) return;
 
   clearError();
 
   if (CACHE.has(apex)) {
     renderRegister(apex, CACHE.get(apex));
+    syncUrl(apex, push && new URLSearchParams(location.search).get("apex") !== apex);
     reveal();
     return;
   }
@@ -476,22 +634,27 @@ async function search(raw) {
   el.submit.disabled = true;
   el.submit.textContent = "Reading";
   el.register.hidden = false;
+  el.register.setAttribute("aria-busy", "true");
   el.registerApex.textContent = apex;
-  el.ledger.innerHTML = "";
+  el.ledger.replaceChildren();
   el.shape.hidden = true;
-  el.registerCount.textContent = "";
+  el.filterWrap.hidden = true;
+  el.registerCount.replaceChildren();
   renderLoading();
   reveal();
 
   const url = `${API_BASE}/v1/search?apex=${encodeURIComponent(apex)}&format=json&dates=1`;
 
   try {
-    const response = await fetch(url, { headers: { Accept: "application/json" } });
+    const response = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: timeoutSignal(FETCH_TIMEOUT_MS),
+    });
     setQuota(response.headers);
 
     if (response.status === 400) {
       el.register.hidden = true;
-      showError("Not an apex.", "Search the registrable domain itself, so example.com rather than mail.example.com.");
+      showError("Not a registrable domain.", "Search the domain itself, so example.com rather than mail.example.com.");
       return;
     }
 
@@ -512,11 +675,13 @@ async function search(raw) {
     const rows = await response.json();
     CACHE.set(apex, rows);
     renderRegister(apex, rows);
+    syncUrl(apex, push);
     reveal();
   } catch {
     el.register.hidden = true;
     showError("Could not reach the index.", "Check that the API is running on this origin, then try again.");
   } finally {
+    el.register.removeAttribute("aria-busy");
     el.submit.disabled = false;
     el.submit.textContent = SUBMIT_LABEL;
   }
@@ -527,24 +692,97 @@ el.form.addEventListener("submit", (event) => {
   search(el.input.value);
 });
 
+window.addEventListener("popstate", () => {
+  const apex = new URLSearchParams(location.search).get("apex");
+  if (!apex) {
+    el.register.hidden = true;
+    el.input.value = "";
+    return;
+  }
+  el.input.value = apex;
+  search(apex, { push: false });
+});
+
+/* "/" is the search key everywhere else a list of hostnames shows up, so it is
+   the search key here too - except while something else already has the caret. */
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+  const active = document.activeElement;
+  if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
+  event.preventDefault();
+  el.input.focus();
+  el.input.select();
+});
+
 /* ── export ──────────────────────────────────────────────────────── */
-for (const button of document.querySelectorAll("[data-export]")) {
+function payloadFor(mode) {
+  const rows = visibleRows().rows;
+  return mode === "json"
+    ? JSON.stringify(rows, null, 2)
+    : rows.map((row) => row.sub).join("\n");
+}
+
+function flash(button, message) {
+  const label = button.dataset.label ?? button.textContent;
+  button.dataset.label = label;
+  button.textContent = message;
+  button.classList.add("is-done");
+  el.toolStatus.textContent = message;
+  clearTimeout(Number(button.dataset.timer));
+  button.dataset.timer = String(setTimeout(() => {
+    button.textContent = button.dataset.label;
+    button.classList.remove("is-done");
+  }, 1600));
+}
+
+for (const button of document.querySelectorAll("[data-copy]")) {
   button.addEventListener("click", async () => {
     if (!current.rows.length) return;
-    const mode = button.dataset.export;
-    const payload = mode === "json"
-      ? JSON.stringify(current.rows, null, 2)
-      : current.rows.map((row) => row.sub).join("\n");
-
-    const original = button.textContent;
     try {
-      await navigator.clipboard.writeText(payload);
-      button.textContent = "Copied";
+      await navigator.clipboard.writeText(payloadFor(button.dataset.copy));
+      flash(button, "copied");
     } catch {
-      button.textContent = "Copy blocked";
+      flash(button, "blocked");
     }
-    setTimeout(() => { button.textContent = original; }, 1400);
   });
+}
+
+for (const button of document.querySelectorAll("[data-download]")) {
+  button.addEventListener("click", () => {
+    if (!current.rows.length) return;
+    const mode = button.dataset.download;
+    const blob = new Blob([payloadFor(mode)], {
+      type: mode === "json" ? "application/json" : "text/plain;charset=utf-8",
+    });
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = `${current.apex}-subdomains.${mode === "json" ? "json" : "txt"}`;
+    link.click();
+    // Give the download a tick to start before the URL stops resolving.
+    setTimeout(() => URL.revokeObjectURL(href), 1000);
+    flash(button, "saved");
+  });
+}
+
+for (const button of document.querySelectorAll("[data-copy-code]")) {
+  button.addEventListener("click", async () => {
+    const source = document.getElementById(button.dataset.copyCode);
+    try {
+      await navigator.clipboard.writeText(source.textContent.trim());
+      flash(button, "Copied");
+    } catch {
+      flash(button, "Blocked");
+    }
+  });
+}
+
+/* The sample is meant to be pasted, so it names the origin it was served from
+   rather than a variable the reader has to define first. */
+if (location.protocol === "http:" || location.protocol === "https:") {
+  for (const slot of document.querySelectorAll("[data-origin]")) {
+    slot.textContent = location.origin;
+  }
 }
 
 /* Deep link support: /?apex=example.com reads once, on an explicit URL the
@@ -552,5 +790,5 @@ for (const button of document.querySelectorAll("[data-export]")) {
 const requested = new URLSearchParams(location.search).get("apex");
 if (requested) {
   el.input.value = requested;
-  search(requested);
+  search(requested, { push: false });
 }
