@@ -34,5 +34,29 @@ services:
         required: false
         format: raw
 
+  scheduler:
+    build: .
+    image: ctlogs:latest
+    entrypoint: ["python", "-m", "ctlogs.scheduler"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    volumes:
+      - ctlogs-data:/data
+    environment:
+      CTLOGS_DB_PATH: /data/ctlogs.sqlite3
+      CTLOGS_SCHEDULER_LOCK: /data/scheduler.lock
+      CTLOGS_SCHEDULER_INTERVAL: "86400"
+      CTLOGS_SCHEDULER_RETRY_INTERVAL: "3600"
+      CTLOGS_CZDS_MAX_ZONES: "25"
+      CTLOGS_URLSCAN_APEXES_PER_RUN: "250"
+      CTLOGS_URLSCAN_INTERVAL: "60"
+      CTLOGS_URLSCAN_RETRY_INTERVAL: "60"
+    env_file:
+      - path: .env.providers
+        required: false
+        format: raw
+
 volumes:
   ctlogs-data:
+    name: ${CTLOGS_DATA_VOLUME:-ctlogs_ctlogs-data}

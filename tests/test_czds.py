@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ctlogs.database import Database
@@ -116,3 +117,53 @@ def test_completed_local_download_resumes_without_fetching(
     monkeypatch.setattr("ctlogs.ingest.czds.import_zone", lambda *_args: 1)
 
     assert run_czds(database, Client(), tmp_path, max_zones=1) == (1, 1)  # type: ignore[arg-type]
+
+
+def test_refresh_cap_rotates_to_the_least_recently_checked_zone(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "czds.sqlite3")
+    database.initialize()
+    now = datetime(2026, 8, 23, tzinfo=UTC)
+    database.upsert_ingest_state(
+        "czds-download:alpha",
+        cursor="10",
+        etag="alpha-tag",
+        updated_at=(now - timedelta(days=2)).isoformat(),
+    )
+    database.upsert_ingest_state(
+        "czds-download:beta",
+        cursor="10",
+        etag="beta-tag",
+        updated_at=(now - timedelta(days=1)).isoformat(),
+    )
+    downloads: list[str] = []
+
+    class Client:
+        def approved_links(self) -> list[str]:
+            return [
+                "https://czds-api.icann.org/czds/downloads/beta.zone",
+                "https://czds-api.icann.org/czds/downloads/alpha.zone",
+            ]
+
+        def download(self, url: str, *_args, **_kwargs):
+            downloads.append(url)
+            return None
+
+    assert run_czds(  # type: ignore[arg-type]
+        database,
+        Client(),
+        tmp_path,
+        max_zones=1,
+        refresh=True,
+    ) == (0, 0)
+    assert downloads[0].endswith("/alpha.zone")
+
+    assert run_czds(  # type: ignore[arg-type]
+        database,
+        Client(),
+        tmp_path,
+        max_zones=1,
+        refresh=True,
+    ) == (0, 0)
+    assert downloads[1].endswith("/beta.zone")

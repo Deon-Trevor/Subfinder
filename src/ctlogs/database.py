@@ -281,6 +281,22 @@ class Database:
             ).fetchall()
         return [SearchResult(row["subdomain"], row["first_seen"]) for row in rows]
 
+    def apexes_after(self, cursor: str, limit: int) -> list[str]:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT apex
+                FROM subdomains
+                WHERE apex > ?
+                ORDER BY apex
+                LIMIT ?
+                """,
+                (cursor, limit),
+            ).fetchall()
+        return [str(row["apex"]) for row in rows]
+
     def upsert_subdomains(
         self,
         apex: str,

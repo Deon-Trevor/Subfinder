@@ -189,26 +189,29 @@ def run_czds(
     max_zones: int = 25,
     refresh: bool = False,
 ) -> tuple[int, int]:
-    links = sorted(
-        (
-            link
-            for link in client.approved_links()
-            if tlds is None or _zone_from_link(link) in tlds
-        ),
-        key=_zone_from_link,
+    candidates = []
+    for link in client.approved_links():
+        zone = _zone_from_link(link)
+        if tlds is not None and zone not in tlds:
+            continue
+        state = database.get_ingest_state(f"czds-download:{zone}")
+        if state and not refresh:
+            continue
+        candidates.append((link, state))
+    candidates.sort(
+        key=lambda candidate: (
+            candidate[1] is not None,
+            (candidate[1] or {}).get("updated_at") or "",
+            _zone_from_link(candidate[0]),
+        )
+        if refresh
+        else (False, "", _zone_from_link(candidate[0]))
     )
     zone_count = 0
     hostname_count = 0
-    attempt_count = 0
-    for link in links:
+    for link, state in candidates[:max_zones]:
         zone = _zone_from_link(link)
         state_key = f"czds-download:{zone}"
-        state = database.get_ingest_state(state_key)
-        if state and not refresh:
-            continue
-        if attempt_count >= max_zones:
-            break
-        attempt_count += 1
         path = output_directory / f"{zone}.zone.gz"
         started_at = datetime.now(UTC).isoformat()
         started = time.monotonic()
@@ -222,6 +225,12 @@ def run_czds(
             )
         )
         if result is None:
+            database.upsert_ingest_state(
+                state_key,
+                cursor=state.get("cursor") if state else None,
+                etag=state.get("etag") if state else None,
+                updated_at=datetime.now(UTC).isoformat(),
+            )
             continue
         bytes_read, modified = result
         inserted = import_zone(database, zone, path)

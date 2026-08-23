@@ -25,6 +25,20 @@ def test_upsert_keeps_the_earliest_first_seen(tmp_path: Path) -> None:
     assert database.search("example.com")[0].first_seen == "2024-03-01T00:00:00Z"
 
 
+def test_apexes_after_pages_unique_apexes_in_index_order(tmp_path: Path) -> None:
+    database = Database(tmp_path / "apexes.sqlite3")
+    database.initialize()
+    database.upsert_subdomains(
+        "two.example",
+        [("two.example", None), ("www.two.example", None)],
+    )
+    database.upsert_subdomains("one.example", [("one.example", None)])
+    database.upsert_subdomains("three.example", [("three.example", None)])
+
+    assert database.apexes_after("", 2) == ["one.example", "three.example"]
+    assert database.apexes_after("three.example", 2) == ["two.example"]
+
+
 def test_quota_resets_on_the_next_utc_day(tmp_path: Path) -> None:
     database = Database(tmp_path / "quota.sqlite3")
     database.initialize()

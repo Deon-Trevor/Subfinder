@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!pyproject.toml
+!README.md
+!SOURCES.md
+!src/
+!src/**
+!web/
+!web/**

@@ -38,6 +38,25 @@ contacting an adapter during the request. `/v1/stats` reports the current count
 of distinct provenance source IDs, which changes as logs and optional sources
 begin contributing.
 
+## Update cadence
+
+The API container polls Chrome, Apple, RFC 6962, and configured Static CT logs
+continuously. Each cycle starts after the previous cycle and a 60-second wait.
+The separate scheduler runs IANA, CISA, configured artifacts, and CZDS every 24
+hours. urlscan starts its next bounded run 60 seconds after the previous run
+finishes. Website requests only read SQLite and never start ingestion.
+
+CZDS and urlscan have independent caps. CZDS checks the 25 least-recently
+checked approved zones per run. urlscan makes one request for each configured
+apex. With `CTLOGS_URLSCAN_APEXES=*`, it walks the full local apex index in
+batches of up to 250 using a persisted cursor. Artifact imports each have their
+own download and parser run, so adding one cannot consume another source's slot.
+
+The `.ee`, `.se`, `.nu`, `.ch`, `.li`, Chaos, Common Crawl, HaGeZi, and Geomys
+adapters do not discover their own upstream files. They run unattended only
+after an operator configures a permitted artifact location. `.ch` and `.li`
+also require the registry's purpose-approved TSIG access.
+
 ## Optional sources that require a free account or key
 
 | Source | Requirement | Use |

@@ -15,7 +15,9 @@ never probe the requested apex or the hostnames they return.
 
 ## Run with Docker (recommended)
 
-Build and run. The live CT worker fills an empty database from current log entries.
+Build and run. The live CT worker fills an empty database from current log
+entries. Docker Compose also starts the recurring non-CT scheduler. A standalone
+`docker run` starts only the API and CT worker.
 
 ```bash
 docker build -t ctlogs:latest .
@@ -142,14 +144,47 @@ current Let's Encrypt Willow 2026h2 shard. Static shards are time-bounded, so
 deployment configuration must add new usable shards before the current shard
 closes.
 
+The Compose `scheduler` service runs recurring non-CT ingestion without web
+traffic. It runs IANA root and CISA `.gov` imports every 24 hours. When CZDS
+credentials are present, it also checks up to 25 least-recently-checked zones
+per day. Failed jobs retry after one hour. A volume lock prevents two scheduler
+processes from running at once, and SQLite stores each job's next run time.
+
+Set `CTLOGS_URLSCAN_APEXES` to a comma-separated allowlist, or set it to `*` to
+walk every apex already in the local index. The all-index mode keeps its cursor
+in SQLite, processes up to 250 apexes per run, and starts the next run 60 seconds
+after the previous one finishes. A failed apex remains at the cursor for retry.
+The theoretical ceiling is 360,000 searches per day. Confirm that this fits the
+account quota and urlscan's usage terms before enabling it.
+
+HaGeZi, public Chaos data, Common Crawl, and registry exports are parsers for
+artifacts whose locations or access details vary by deployment. Configure
+recurring downloads once as a JSON list of `SOURCE=PATH_OR_URL` strings:
+
+```env
+CTLOGS_URLSCAN_APEXES=*
+CTLOGS_SCHEDULED_ARTIFACTS=["hagezi=https://data.example/hosts.txt"]
+```
+
+The scheduler accepts `root`, `gov`, `hagezi`, `chaos`, `commoncrawl`, `ee`,
+`se`, and `nu` artifact sources. It applies the same 256 MiB per-artifact cap
+as the manual importer. `.ch` and `.li` still require a purpose-approved TSIG
+fetch outside this service. Geomys replay still requires a chosen archive.
+
+Inspect the configured schedule without contacting upstream sources:
+
+```bash
+docker compose run --rm scheduler --list
+```
+
 Benchmark bulk fixtures:
 
 ```bash
 python -m ctlogs.ingest.benchmark --fixtures data/fixtures --db data/ctlogs.sqlite3
 ```
 
-Import configured global artifacts as a separate job. Repeating the same file
-or ETag is a no-op.
+Import configured global artifacts immediately when an unscheduled run is
+needed. Repeating the same file or ETag is a no-op.
 
 ```bash
 python -m ctlogs.ingest.backfill --db data/ctlogs.sqlite3 \
