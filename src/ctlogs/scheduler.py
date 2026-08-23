@@ -68,8 +68,15 @@ def _enabled(name: str, default: bool = True) -> bool:
 
 
 def _apexes_from_environment() -> list[str]:
+    configured = os.environ.get("CTLOGS_URLSCAN_APEXES", "").strip()
+    if (
+        len(configured) >= 2
+        and configured[0] == configured[-1]
+        and configured[0] in {"'", '"'}
+    ):
+        configured = configured[1:-1]
     apexes: list[str] = []
-    for raw in os.environ.get("CTLOGS_URLSCAN_APEXES", "").split(","):
+    for raw in configured.split(","):
         apex = raw.strip().lower().rstrip(".")
         if not apex:
             continue
@@ -274,11 +281,17 @@ def build_jobs(database: Database) -> list[ScheduledJob]:
             )
         )
 
-    urlscan_key = os.environ.get("URLSCAN_API_KEY")
-    urlscan_apexes = _apexes_from_environment()
-    if urlscan_apexes and not urlscan_key:
-        raise ValueError("URLSCAN_API_KEY is required when CTLOGS_URLSCAN_APEXES is set")
-    if urlscan_key and urlscan_apexes and _enabled("CTLOGS_SCHEDULE_URLSCAN"):
+    if _enabled("CTLOGS_SCHEDULE_URLSCAN"):
+        urlscan_key = os.environ.get("URLSCAN_API_KEY")
+        urlscan_apexes = _apexes_from_environment()
+        if urlscan_apexes and not urlscan_key:
+            raise ValueError(
+                "URLSCAN_API_KEY is required when CTLOGS_URLSCAN_APEXES is set"
+            )
+    else:
+        urlscan_key = None
+        urlscan_apexes = []
+    if urlscan_key and urlscan_apexes:
         apexes_per_run = _positive_environment_integer(
             "CTLOGS_URLSCAN_APEXES_PER_RUN",
             10,
@@ -400,7 +413,11 @@ def main() -> None:
     database = Database(args.db)
     database.initialize()
     jobs = build_jobs(database)
-    if os.environ.get("URLSCAN_API_KEY") and not os.environ.get("CTLOGS_URLSCAN_APEXES"):
+    if (
+        _enabled("CTLOGS_SCHEDULE_URLSCAN")
+        and os.environ.get("URLSCAN_API_KEY")
+        and not os.environ.get("CTLOGS_URLSCAN_APEXES")
+    ):
         LOGGER.warning("urlscan is disabled because CTLOGS_URLSCAN_APEXES is empty")
     if args.list:
         for job in jobs:

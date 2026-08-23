@@ -261,6 +261,35 @@ def test_build_jobs_keeps_each_capped_source_on_its_own_budget(
     assert urlscan_job.retry_seconds == 120
 
 
+def test_disabled_urlscan_ignores_unrelated_provider_configuration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    monkeypatch.setenv("CTLOGS_SCHEDULE_URLSCAN", "0")
+    monkeypatch.setenv("URLSCAN_API_KEY", "key")
+    monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "not an apex")
+    monkeypatch.delenv("CZDS_USERNAME", raising=False)
+    monkeypatch.delenv("CZDS_PASSWORD", raising=False)
+
+    assert [job.name for job in build_jobs(database)] == ["root", "gov"]
+
+
+def test_urlscan_accepts_a_quoted_wildcard_from_a_raw_env_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    monkeypatch.setenv("CTLOGS_SCHEDULE_DEFAULTS", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "0")
+    monkeypatch.setenv("URLSCAN_API_KEY", "key")
+    monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "'*'")
+
+    assert [job.name for job in build_jobs(database)] == ["urlscan"]
+
+
 def test_singleton_lock_rejects_a_second_scheduler(tmp_path: Path) -> None:
     lock = tmp_path / "scheduler.lock"
     with _singleton_lock(lock):
