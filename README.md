@@ -8,7 +8,8 @@ local index from certificate transparency logs, registry zone data, public
 crawls, and optional account-backed services. A lookup reads that index and
 returns every hostname on file for one apex, oldest known first, with first-seen
 dates where the source provides them. When urlscan is configured, each lookup
-first searches its historical scans and stores matching hostnames locally.
+refreshes its newest indexed scans, stores matching hostnames locally, and
+queues that apex for deeper historical pagination.
 
 `GET /v1/search` and `POST /mcp` do not submit a urlscan scan and never probe the
 requested apex or the hostnames they return.
@@ -71,8 +72,9 @@ Plain text is one hostname per line unless `format=json` is requested. `dates=1`
 `GET /v1/search` reports the refresh result in `X-URLScan-Status`: `ok`,
 `disabled`, `quota-exhausted`, `timeout`, or `error`. Provider failure does not
 hide cached results. The route falls back to SQLite after the configured
-five-second wall-clock limit. On-demand refreshes read at most 100 historical
-scans per call.
+five-second wall-clock limit. On-demand refreshes read at most 100 indexed
+scans per call. A background priority job advances older pages for searched
+apexes without making the request wait for the full history.
 
 MCP exposes one Streamable HTTP tool `search` (`{ "apex": "example.com" }` → `string[]`).
 
@@ -150,25 +152,34 @@ current Let's Encrypt Willow 2026h2 shard. Static shards are time-bounded, so
 deployment configuration must add new usable shards before the current shard
 closes.
 
-The Compose `scheduler` and `urlscan-scheduler` services run recurring non-CT
-ingestion without web traffic. The first runs IANA root and CISA `.gov` imports
-every 24 hours. When CZDS credentials are present, it also checks up to 25
-least-recently-checked zones per day. The second gives urlscan an independent
-process and request budget. Separate volume locks prevent duplicate processes,
-and SQLite stores each job's next run time.
+The Compose `scheduler`, `urlscan-scheduler`, and `ct-history-scheduler`
+services run recurring ingestion without web traffic. The first runs IANA root
+and CISA `.gov` imports every 24 hours. When CZDS credentials are present, it
+also checks up to 25 least-recently-checked zones per day. The second handles
+urlscan breadth and searched-apex history. The third replays bounded prefixes
+of usable RFC 6962 logs from their first entries. Separate volume locks prevent
+duplicate processes, and SQLite stores each job's next run time.
 
 Set `CTLOGS_URLSCAN_APEXES` to a comma-separated allowlist, or set it to `*` to
 walk every apex already in the local index. The all-index mode keeps both its
 apex cursor and each apex's `search_after` cursor in SQLite. Each scheduled
 visit fetches the next older page until that apex's history is complete. Later
 visits refresh the newest page without discarding the completed history state.
-API-triggered refreshes do not change scheduler pagination. The scheduler
-processes up to 69 apexes per run and starts the next run 60 seconds after the
-previous run finishes. A failed apex remains at the cursor for retry. The
-scheduler can start at most 99,360 searches per UTC day. API-triggered and
-scheduled searches share one atomic 100,000-request daily ceiling, so API use
-reduces the scheduler's remaining allowance. Confirm that this fits the account
-quota and urlscan's usage terms before enabling it.
+API-triggered refreshes do not change scheduler pagination. They add the apex
+to a persistent FIFO queue. The priority job processes up to 14 queued apexes
+per run, one older 1,000-result page per apex, and rotates incomplete apexes to
+the back of the queue. The global walk processes up to 69 apexes per run. Both
+jobs start their next run 60 seconds after the previous run finishes.
+
+The automated URLSCAN ceiling is 100,000 requests per UTC day. Three
+independent quota identities prevent one class from starving another: 10,000
+live search refreshes, 20,000 priority-history requests, and the remaining
+70,000 requests for the global breadth walk. Configure the total with
+`CTLOGS_URLSCAN_DAILY_LIMIT`, the first share with
+`CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT`, and the second share with
+`CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT`. The breadth share is always the
+remainder, so the three maximums cannot exceed the configured total. Confirm
+that this fits the account quota and urlscan's usage terms before enabling it.
 
 All enabled sources consolidate into the same `subdomains` table. The database
 keeps the earliest dated observation and records each source separately in
@@ -194,6 +205,7 @@ Inspect the configured schedule without contacting upstream sources:
 ```bash
 docker compose run --rm scheduler --list
 docker compose run --rm urlscan-scheduler --list
+docker compose run --rm ct-history-scheduler --list
 ```
 
 Benchmark bulk fixtures:
@@ -218,7 +230,8 @@ python -m ctlogs.ingest.backfill --db data/ctlogs.sqlite3 --defaults
 ```
 
 Historical RFC 6962 replay has a separate cursor and batch budget, so it does
-not move or compete with the live tail cursor:
+not move or compete with the live tail cursor. Compose runs this continuously
+through `ct-history-scheduler`; the same operation can be invoked manually:
 
 ```bash
 python -m ctlogs.ingest.history --db data/ctlogs.sqlite3 \

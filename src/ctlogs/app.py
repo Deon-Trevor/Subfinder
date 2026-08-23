@@ -22,10 +22,14 @@ from mcp.server.transport_security import TransportSecuritySettings
 from ctlogs.database import Database, Quota, QuotaExceeded
 from ctlogs.ingest.enrich import (
     DEFAULT_URLSCAN_DAILY_LIMIT,
-    URLSCAN_QUOTA_SUBJECT,
+    DEFAULT_URLSCAN_PRIORITY_DAILY_LIMIT,
+    DEFAULT_URLSCAN_SEARCH_DAILY_LIMIT,
+    URLSCAN_SEARCH_QUOTA_SUBJECT,
+    URLSCAN_TOTAL_QUOTA_SUBJECT,
     EnrichmentSource,
     UrlscanSource,
     run_source,
+    split_urlscan_budget,
 )
 from ctlogs.web import mount_frontend
 
@@ -156,11 +160,22 @@ def create_app(
     )
     if configured_urlscan_limit < 1:
         raise ValueError("urlscan_daily_limit must be positive")
+    configured_urlscan_budgets = split_urlscan_budget(
+        configured_urlscan_limit,
+        _get_env_int(
+            "CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT",
+            DEFAULT_URLSCAN_SEARCH_DAILY_LIMIT,
+        ),
+        _get_env_int(
+            "CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT",
+            DEFAULT_URLSCAN_PRIORITY_DAILY_LIMIT,
+        ),
+    )
     mcp = MCPServer(
         "Subfinder",
         instructions=(
-            "Refresh urlscan's historical results, then search the passive "
-            "subdomain index by registrable apex."
+            "Refresh urlscan's newest results, queue deeper history, then "
+            "search the passive subdomain index by registrable apex."
         ),
     )
 
@@ -178,6 +193,7 @@ def create_app(
     def refresh_urlscan(apex: str) -> str:
         if configured_urlscan is None:
             return "disabled"
+        database.enqueue_urlscan_history(apex)
         try:
             run_source(
                 database,
@@ -186,9 +202,11 @@ def create_app(
                 max_requests=1,
                 refresh=True,
                 persist_state=False,
-                request_guard=lambda: database.consume_request(
-                    URLSCAN_QUOTA_SUBJECT,
+                request_guard=lambda: database.consume_partitioned_request(
+                    URLSCAN_TOTAL_QUOTA_SUBJECT,
                     configured_urlscan_limit,
+                    URLSCAN_SEARCH_QUOTA_SUBJECT,
+                    configured_urlscan_budgets.search,
                 ),
             )
         except QuotaExceeded:
@@ -255,10 +273,11 @@ def create_app(
 
     @mcp.tool()
     async def search(apex: str, ctx: Context) -> list[str]:
-        """Refresh from urlscan, then return indexed hostnames for an apex.
+        """Refresh from urlscan, queue history, then return indexed hostnames.
 
-        This searches urlscan's historical scans. It does not submit a live scan
-        or probe the apex or any returned hostname.
+        This searches existing urlscan records. It does not submit a live scan
+        or probe the apex or any returned hostname. Deeper history continues in
+        the background.
         """
         canonical = normalize_apex(apex)
         request = ctx.request_context.request

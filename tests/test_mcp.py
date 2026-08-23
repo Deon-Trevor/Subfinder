@@ -100,3 +100,4 @@ async def test_mcp_search_refreshes_urlscan_before_reading_the_index(
 
     assert result.structured_content == {"result": ["fresh.example.com"]}
     assert calls == ["example.com"]
+    assert app.state.database.queued_urlscan_history(1) == ["example.com"]

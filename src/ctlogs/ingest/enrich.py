@@ -14,7 +14,37 @@ from typing import Any, Protocol
 from ctlogs.database import Database
 
 DEFAULT_URLSCAN_DAILY_LIMIT = 100_000
-URLSCAN_QUOTA_SUBJECT = "provider:urlscan"
+DEFAULT_URLSCAN_SEARCH_DAILY_LIMIT = 10_000
+DEFAULT_URLSCAN_PRIORITY_DAILY_LIMIT = 20_000
+URLSCAN_SEARCH_QUOTA_SUBJECT = "provider:urlscan:search"
+URLSCAN_PRIORITY_QUOTA_SUBJECT = "provider:urlscan:priority"
+URLSCAN_BREADTH_QUOTA_SUBJECT = "provider:urlscan:breadth"
+URLSCAN_TOTAL_QUOTA_SUBJECT = "provider:urlscan"
+
+
+@dataclass(frozen=True)
+class UrlscanBudgets:
+    search: int
+    priority: int
+    breadth: int
+
+
+def split_urlscan_budget(
+    total: int,
+    search: int = DEFAULT_URLSCAN_SEARCH_DAILY_LIMIT,
+    priority: int = DEFAULT_URLSCAN_PRIORITY_DAILY_LIMIT,
+) -> UrlscanBudgets:
+    if total < 1:
+        raise ValueError("urlscan total budget must be positive")
+    if search < 1 or priority < 1:
+        raise ValueError("urlscan reserved budgets must be positive")
+    search_budget = min(search, total)
+    priority_budget = min(priority, total - search_budget)
+    return UrlscanBudgets(
+        search=search_budget,
+        priority=priority_budget,
+        breadth=total - search_budget - priority_budget,
+    )
 
 
 @dataclass(frozen=True)

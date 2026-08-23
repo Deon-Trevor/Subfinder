@@ -39,6 +39,41 @@ def test_apexes_after_pages_unique_apexes_in_index_order(tmp_path: Path) -> None
     assert database.apexes_after("three.example", 2) == ["two.example"]
 
 
+def test_urlscan_history_queue_is_fifo_and_drops_completed_apexes(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "queue.sqlite3")
+    database.initialize()
+    database.enqueue_urlscan_history(
+        "one.example",
+        requested_at="2026-08-24T00:00:00Z",
+    )
+    database.enqueue_urlscan_history(
+        "two.example",
+        requested_at="2026-08-24T00:00:01Z",
+    )
+    database.enqueue_urlscan_history(
+        "one.example",
+        requested_at="2026-08-24T00:00:02Z",
+    )
+
+    assert database.queued_urlscan_history(2) == ["one.example", "two.example"]
+
+    database.finish_urlscan_history_attempt(
+        "one.example",
+        attempted_at="2026-08-24T00:00:03Z",
+    )
+    assert database.queued_urlscan_history(2) == ["two.example", "one.example"]
+
+    database.upsert_ingest_state(
+        "enrich:urlscan:two.example",
+        cursor="complete",
+    )
+    database.finish_urlscan_history_attempt("two.example")
+    database.enqueue_urlscan_history("two.example")
+    assert database.queued_urlscan_history(2) == ["one.example"]
+
+
 def test_quota_resets_on_the_next_utc_day(tmp_path: Path) -> None:
     database = Database(tmp_path / "quota.sqlite3")
     database.initialize()
@@ -68,6 +103,83 @@ def test_concurrent_quota_consumers_cannot_exceed_the_limit(tmp_path: Path) -> N
 
     assert outcomes.count(True) == 5
     assert outcomes.count(False) == 15
+
+
+def test_partitioned_quota_keeps_the_legacy_total_as_a_hard_ceiling(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "partitioned.sqlite3")
+    database.initialize()
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    database.consume_request("provider:urlscan", 2, now)
+
+    quota = database.consume_partitioned_request(
+        "provider:urlscan",
+        2,
+        "provider:urlscan:priority",
+        1,
+        now,
+    )
+    assert quota.remaining == 0
+    with pytest.raises(QuotaExceeded):
+        database.consume_partitioned_request(
+            "provider:urlscan",
+            2,
+            "provider:urlscan:search",
+            1,
+            now,
+        )
+
+    with database.connect() as connection:
+        counts = connection.execute(
+            """
+            SELECT client_ip, used
+            FROM request_counts
+            WHERE day = ?
+            ORDER BY client_ip
+            """,
+            (now.date().isoformat(),),
+        ).fetchall()
+    assert [tuple(row) for row in counts] == [
+        ("provider:urlscan", 2),
+        ("provider:urlscan:priority", 1),
+    ]
+
+
+def test_concurrent_partitioned_quotas_cannot_exceed_the_total(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "partitioned-concurrent.sqlite3")
+    database.initialize()
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+
+    def consume(attempt: int) -> bool:
+        try:
+            database.consume_partitioned_request(
+                "provider:urlscan",
+                5,
+                f"provider:urlscan:class-{attempt % 2}",
+                5,
+                now,
+            )
+            return True
+        except QuotaExceeded:
+            return False
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        outcomes = list(executor.map(consume, range(20)))
+
+    assert outcomes.count(True) == 5
+    assert outcomes.count(False) == 15
+    with database.connect() as connection:
+        total = connection.execute(
+            """
+            SELECT used FROM request_counts
+            WHERE day = ? AND client_ip = 'provider:urlscan'
+            """,
+            (now.date().isoformat(),),
+        ).fetchone()
+    assert total["used"] == 5
 
 
 def test_sources_consolidate_without_duplicating_search_rows(

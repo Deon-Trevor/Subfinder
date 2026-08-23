@@ -297,6 +297,74 @@ class Database:
             ).fetchall()
         return [str(row["apex"]) for row in rows]
 
+    def enqueue_urlscan_history(
+        self,
+        apex: str,
+        *,
+        requested_at: str | None = None,
+    ) -> None:
+        requested_at = requested_at or datetime.now(UTC).isoformat()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO ingest_state (
+                    source, cursor, updated_at
+                )
+                SELECT ?, 'pending', ?
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM ingest_state
+                    WHERE source = ? AND cursor = 'complete'
+                )
+                """,
+                (
+                    f"queue:urlscan:{apex}",
+                    requested_at,
+                    f"enrich:urlscan:{apex}",
+                ),
+            )
+
+    def queued_urlscan_history(self, limit: int) -> list[str]:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        prefix = "queue:urlscan:"
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT substr(source, ?) AS apex
+                FROM ingest_state
+                WHERE source >= 'queue:urlscan:' AND source < 'queue:urlscan;'
+                ORDER BY updated_at, source
+                LIMIT ?
+                """,
+                (len(prefix) + 1, limit),
+            ).fetchall()
+        return [str(row["apex"]) for row in rows]
+
+    def finish_urlscan_history_attempt(
+        self,
+        apex: str,
+        *,
+        attempted_at: str | None = None,
+    ) -> None:
+        attempted_at = attempted_at or datetime.now(UTC).isoformat()
+        queue_key = f"queue:urlscan:{apex}"
+        with self.connect() as connection:
+            state = connection.execute(
+                "SELECT cursor FROM ingest_state WHERE source = ?",
+                (f"enrich:urlscan:{apex}",),
+            ).fetchone()
+            if state and state["cursor"] == "complete":
+                connection.execute(
+                    "DELETE FROM ingest_state WHERE source = ?",
+                    (queue_key,),
+                )
+            else:
+                connection.execute(
+                    "UPDATE ingest_state SET updated_at = ? WHERE source = ?",
+                    (attempted_at, queue_key),
+                )
+
     def upsert_subdomains(
         self,
         apex: str,
@@ -476,6 +544,63 @@ class Database:
             limit=limit,
             remaining=max(0, limit - used),
             reset_at=int(reset.timestamp()),
+        )
+
+    def consume_partitioned_request(
+        self,
+        total_subject: str,
+        total_limit: int,
+        class_subject: str,
+        class_limit: int,
+        now: datetime | None = None,
+    ) -> Quota:
+        if total_subject == class_subject:
+            raise ValueError("quota subjects must be distinct")
+        if total_limit < 1 or class_limit < 1:
+            raise ValueError("quota limits must be positive")
+        if now is None:
+            now = datetime.now(UTC)
+        if now.tzinfo is None:
+            raise ValueError("now must include a timezone")
+
+        current = now.astimezone(UTC)
+        day = current.date().isoformat()
+        reset = datetime.combine(current.date() + timedelta(days=1), time.min, UTC)
+        reset_at = int(reset.timestamp())
+
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT client_ip, used
+                FROM request_counts
+                WHERE day = ? AND client_ip IN (?, ?)
+                """,
+                (day, total_subject, class_subject),
+            ).fetchall()
+            used = {str(row["client_ip"]): int(row["used"]) for row in rows}
+            total_used = used.get(total_subject, 0)
+            class_used = used.get(class_subject, 0)
+            if total_used >= total_limit:
+                raise QuotaExceeded(Quota(total_limit, 0, reset_at))
+            if class_used >= class_limit:
+                raise QuotaExceeded(Quota(class_limit, 0, reset_at))
+            connection.executemany(
+                """
+                INSERT INTO request_counts (day, client_ip, used)
+                VALUES (?, ?, 1)
+                ON CONFLICT (day, client_ip) DO UPDATE SET used = used + 1
+                """,
+                (
+                    (day, total_subject),
+                    (day, class_subject),
+                ),
+            )
+
+        return Quota(
+            limit=class_limit,
+            remaining=class_limit - class_used - 1,
+            reset_at=reset_at,
         )
 
     def record_ingest_run(

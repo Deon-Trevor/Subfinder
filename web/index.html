@@ -12,7 +12,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Subfinder">
 <meta property="og:title" content="Subfinder - passive subdomain enumeration">
-<meta property="og:description" content="Type a domain, get every hostname on record under it, with first-seen dates. Read from a prebuilt index, so nothing is fetched while you wait and the domain never learns you looked.">
+<meta property="og:description" content="Type a domain, get every hostname on record under it, with first-seen dates. Each lookup refreshes passive urlscan records, then reads the combined index without probing the domain.">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Subfinder - passive subdomain enumeration">
 <meta name="twitter:description" content="Every subdomain on record for a domain, in one request. Zero packets to the target.">
@@ -123,7 +123,7 @@
       <div>
         <p class="eyebrow">Passive subdomain enumeration</p>
         <h1 class="hero-title">Every subdomain on record. <em>Zero packets to the target.</em></h1>
-        <p class="hero-lede">Type a domain and get back every hostname the index has ever seen under it, oldest first, with the date each name first appeared. The index is already built, so nothing is fetched while you wait - and the domain you look up never learns you looked.</p>
+        <p class="hero-lede">Type a domain and get back every hostname the index has seen under it, oldest first, with the date each name first appeared. A lookup refreshes passive urlscan records, then queues deeper history in the background. The domain you look up is never probed and never learns you looked.</p>
 
         <form class="search" id="search-form" autocomplete="off">
           <div class="search-row">

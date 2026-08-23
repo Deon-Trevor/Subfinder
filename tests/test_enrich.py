@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from ctlogs.database import Database
-from ctlogs.ingest.enrich import UrlscanSource, run_source
+from ctlogs.ingest.enrich import UrlscanSource, run_source, split_urlscan_budget
 
 
 class Response:
@@ -20,6 +20,15 @@ class Response:
 
     def read(self, _size: int = -1) -> bytes:
         return self.payload
+
+
+def test_urlscan_budget_classes_add_up_to_the_hard_ceiling() -> None:
+    budgets = split_urlscan_budget(100_000, 10_000, 20_000)
+
+    assert budgets.search == 10_000
+    assert budgets.priority == 20_000
+    assert budgets.breadth == 70_000
+    assert budgets.search + budgets.priority + budgets.breadth == 100_000
 
 
 def test_urlscan_uses_api_key_and_search_after() -> None:

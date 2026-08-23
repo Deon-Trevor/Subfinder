@@ -14,6 +14,8 @@ services:
       CTLOGS_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,[::1]:*"
       CTLOGS_ALLOWED_ORIGINS: "http://127.0.0.1:*,http://localhost:*"
       CTLOGS_URLSCAN_DAILY_LIMIT: "100000"
+      CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT: "10000"
+      CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT: "20000"
       CTLOGS_URLSCAN_SEARCH_PAGE_SIZE: "100"
       CTLOGS_URLSCAN_SEARCH_TIMEOUT: "5"
       CZDS_USERNAME: ""
@@ -80,13 +82,38 @@ services:
       CTLOGS_SCHEDULE_CZDS: "0"
       CTLOGS_URLSCAN_APEXES: "*"
       CTLOGS_URLSCAN_APEXES_PER_RUN: "69"
+      CTLOGS_URLSCAN_PRIORITY_APEXES_PER_RUN: "14"
       CTLOGS_URLSCAN_DAILY_LIMIT: "100000"
+      CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT: "10000"
+      CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT: "20000"
       CTLOGS_URLSCAN_INTERVAL: "60"
       CTLOGS_URLSCAN_RETRY_INTERVAL: "3600"
     env_file:
       - path: .env.providers
         required: false
         format: raw
+
+  ct-history-scheduler:
+    build: .
+    image: ctlogs:latest
+    entrypoint: ["python", "-m", "ctlogs.scheduler"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    volumes:
+      - ctlogs-data:/data
+    environment:
+      CTLOGS_DB_PATH: /data/ctlogs.sqlite3
+      CTLOGS_SCHEDULER_LOCK: /data/ct-history-scheduler.lock
+      CTLOGS_SCHEDULE_DEFAULTS: "0"
+      CTLOGS_SCHEDULE_CZDS: "0"
+      CTLOGS_SCHEDULE_URLSCAN: "0"
+      CTLOGS_SCHEDULE_CT_HISTORY: "1"
+      CTLOGS_CT_HISTORY_LOGS_PER_RUN: "1"
+      CTLOGS_CT_HISTORY_BATCH_SIZE: "1024"
+      CTLOGS_CT_HISTORY_MAX_BATCHES_PER_LOG: "8"
+      CTLOGS_CT_HISTORY_INTERVAL: "60"
+      CTLOGS_CT_HISTORY_RETRY_INTERVAL: "3600"
 
 volumes:
   ctlogs-data:

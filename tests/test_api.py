@@ -9,7 +9,11 @@ import httpx
 import pytest
 
 from ctlogs.app import create_app, normalize_apex
-from ctlogs.ingest.enrich import SourcePage, URLSCAN_QUOTA_SUBJECT
+from ctlogs.ingest.enrich import (
+    SourcePage,
+    URLSCAN_SEARCH_QUOTA_SUBJECT,
+    URLSCAN_TOTAL_QUOTA_SUBJECT,
+)
 
 
 @pytest.fixture
@@ -139,6 +143,7 @@ async def test_search_refreshes_urlscan_before_reading_the_local_index(
     assert app.state.database.get_ingest_state("enrich:urlscan:example.com")[
         "cursor"
     ] == "older-page"
+    assert app.state.database.queued_urlscan_history(1) == ["example.com"]
 
 
 @pytest.mark.anyio
@@ -210,6 +215,7 @@ async def test_search_has_a_wall_clock_urlscan_limit(tmp_path: Path) -> None:
     assert response.headers["x-urlscan-status"] == "timeout"
     assert response.text == "cached.example.com\n"
     assert elapsed < 0.15
+    assert app.state.database.queued_urlscan_history(1) == ["example.com"]
 
 
 @pytest.mark.anyio
@@ -239,7 +245,12 @@ async def test_api_honors_the_shared_urlscan_daily_ceiling(
             base_url="http://testserver",
         ) as test_client,
     ):
-        app.state.database.consume_request(URLSCAN_QUOTA_SUBJECT, 1)
+        app.state.database.consume_partitioned_request(
+            URLSCAN_TOTAL_QUOTA_SUBJECT,
+            1,
+            URLSCAN_SEARCH_QUOTA_SUBJECT,
+            1,
+        )
         response = await test_client.get(
             "/v1/search", params={"apex": "example.net"}
         )

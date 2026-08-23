@@ -6,12 +6,18 @@ from pathlib import Path
 import pytest
 
 from ctlogs.database import Database, QuotaExceeded
-from ctlogs.ingest.enrich import SourcePage, URLSCAN_QUOTA_SUBJECT
+from ctlogs.ingest.enrich import (
+    SourcePage,
+    URLSCAN_BREADTH_QUOTA_SUBJECT,
+    URLSCAN_TOTAL_QUOTA_SUBJECT,
+)
 from ctlogs.scheduler import (
     ScheduledJob,
+    _run_ct_history_batch,
     _run_urlscan_apex,
     _run_urlscan_batch,
     _run_urlscan_index_batch,
+    _run_urlscan_priority_batch,
     _singleton_lock,
     build_jobs,
     run_due_jobs,
@@ -215,6 +221,125 @@ def test_urlscan_apex_resumes_older_pages_then_refreshes_without_resetting(
     ]
 
 
+def test_priority_urlscan_queue_advances_history_until_complete(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    database.enqueue_urlscan_history("example.com")
+    cursors: list[str | None] = []
+
+    class Source:
+        name = "urlscan"
+
+        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
+            cursors.append(cursor)
+            if cursor == "older-page":
+                return SourcePage(
+                    [(f"old.{apex}", "2020-01-01T00:00:00Z")],
+                    None,
+                    1,
+                )
+            return SourcePage(
+                [(f"new.{apex}", "2026-01-01T00:00:00Z")],
+                "older-page",
+                1,
+            )
+
+    source = Source()
+    assert _run_urlscan_priority_batch(  # type: ignore[arg-type]
+        database,
+        source,
+        apexes_per_run=1,
+    ) == (1, 1)
+    assert database.queued_urlscan_history(1) == ["example.com"]
+
+    assert _run_urlscan_priority_batch(  # type: ignore[arg-type]
+        database,
+        source,
+        apexes_per_run=1,
+    ) == (1, 1)
+    assert database.queued_urlscan_history(1) == []
+    assert cursors == [None, "older-page"]
+    assert [row.subdomain for row in database.search("example.com")] == [
+        "old.example.com",
+        "new.example.com",
+    ]
+
+
+def test_priority_quota_exhaustion_keeps_the_queue_position(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    database.enqueue_urlscan_history(
+        "one.example",
+        requested_at="2026-08-24T00:00:00Z",
+    )
+    database.enqueue_urlscan_history(
+        "two.example",
+        requested_at="2026-08-24T00:00:01Z",
+    )
+
+    class Source:
+        name = "urlscan"
+
+        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
+            raise AssertionError("provider must not be called after quota denial")
+
+    database.consume_request("exhausted", 1)
+    with pytest.raises(QuotaExceeded):
+        _run_urlscan_priority_batch(  # type: ignore[arg-type]
+            database,
+            Source(),
+            apexes_per_run=1,
+            request_guard=lambda: database.consume_request("exhausted", 1),
+        )
+
+    assert database.queued_urlscan_history(2) == ["one.example", "two.example"]
+
+
+def test_ct_history_scheduler_rotates_across_logs_with_separate_cursors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    calls: list[str] = []
+
+    def run_one(_database, log_url, *, batch_size, max_batches):
+        assert batch_size == 1024
+        assert max_batches == 8
+        calls.append(log_url)
+        return 2, 3
+
+    monkeypatch.setattr("ctlogs.scheduler.run_history", run_one)
+    urls = ["https://c.example", "https://a.example", "https://b.example"]
+
+    assert _run_ct_history_batch(
+        database,
+        urls,
+        logs_per_run=2,
+        batch_size=1024,
+        max_batches_per_log=8,
+    ) == (4, 6)
+    assert _run_ct_history_batch(
+        database,
+        urls,
+        logs_per_run=2,
+        batch_size=1024,
+        max_batches_per_log=8,
+    ) == (2, 3)
+    assert _run_ct_history_batch(
+        database,
+        urls,
+        logs_per_run=2,
+        batch_size=1024,
+        max_batches_per_log=8,
+    ) == (0, 0)
+    assert calls == ["https://a.example", "https://b.example", "https://c.example"]
+
+
 def test_build_jobs_keeps_each_capped_source_on_its_own_budget(
     tmp_path: Path,
     monkeypatch,
@@ -249,6 +374,7 @@ def test_build_jobs_keeps_each_capped_source_on_its_own_budget(
         "gov",
         "artifact:hagezi:bf2fe8a0d413",
         "czds",
+        "urlscan-priority",
         "urlscan",
     ]
 
@@ -287,7 +413,26 @@ def test_urlscan_accepts_a_quoted_wildcard_from_a_raw_env_file(
     monkeypatch.setenv("URLSCAN_API_KEY", "key")
     monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "'*'")
 
-    assert [job.name for job in build_jobs(database)] == ["urlscan"]
+    assert [job.name for job in build_jobs(database)] == [
+        "urlscan-priority",
+        "urlscan",
+    ]
+
+
+def test_ct_history_job_is_explicit_and_independent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    monkeypatch.setenv("CTLOGS_SCHEDULE_DEFAULTS", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_URLSCAN", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_CT_HISTORY", "1")
+    monkeypatch.delenv("CZDS_USERNAME", raising=False)
+    monkeypatch.delenv("CZDS_PASSWORD", raising=False)
+
+    assert [job.name for job in build_jobs(database)] == ["ct-history"]
 
 
 def test_singleton_lock_rejects_a_second_scheduler(tmp_path: Path) -> None:
@@ -298,7 +443,7 @@ def test_singleton_lock_rejects_a_second_scheduler(tmp_path: Path) -> None:
                 pass
 
 
-def test_scheduler_honors_the_shared_urlscan_daily_ceiling(
+def test_urlscan_breadth_cannot_spend_priority_or_search_reserves(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -310,7 +455,9 @@ def test_scheduler_honors_the_shared_urlscan_daily_ceiling(
     monkeypatch.setenv("URLSCAN_API_KEY", "key")
     monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "*")
     monkeypatch.setenv("CTLOGS_URLSCAN_APEXES_PER_RUN", "1")
-    monkeypatch.setenv("CTLOGS_URLSCAN_DAILY_LIMIT", "1")
+    monkeypatch.setenv("CTLOGS_URLSCAN_DAILY_LIMIT", "3")
+    monkeypatch.setenv("CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT", "1")
+    monkeypatch.setenv("CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT", "1")
     calls: list[str] = []
 
     class Source:
@@ -324,9 +471,58 @@ def test_scheduler_honors_the_shared_urlscan_daily_ceiling(
         "ctlogs.scheduler.UrlscanSource",
         lambda *_args, **_kwargs: Source(),
     )
-    database.consume_request(URLSCAN_QUOTA_SUBJECT, 1)
-    urlscan_job = build_jobs(database)[0]
+    database.consume_partitioned_request(
+        URLSCAN_TOTAL_QUOTA_SUBJECT,
+        3,
+        URLSCAN_BREADTH_QUOTA_SUBJECT,
+        1,
+    )
+    jobs = {job.name: job for job in build_jobs(database)}
 
     with pytest.raises(QuotaExceeded, match="daily request limit exceeded"):
-        urlscan_job.action()
+        jobs["urlscan"].action()
     assert calls == []
+
+
+def test_priority_history_still_runs_after_breadth_budget_is_exhausted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    database.upsert_subdomains("breadth.example", [("breadth.example", None)])
+    database.enqueue_urlscan_history("priority.example")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_DEFAULTS", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "0")
+    monkeypatch.setenv("URLSCAN_API_KEY", "key")
+    monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "*")
+    monkeypatch.setenv("CTLOGS_URLSCAN_APEXES_PER_RUN", "1")
+    monkeypatch.setenv("CTLOGS_URLSCAN_PRIORITY_APEXES_PER_RUN", "1")
+    monkeypatch.setenv("CTLOGS_URLSCAN_DAILY_LIMIT", "3")
+    monkeypatch.setenv("CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT", "1")
+    monkeypatch.setenv("CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT", "1")
+    calls: list[str] = []
+
+    class Source:
+        name = "urlscan"
+
+        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
+            calls.append(apex)
+            return SourcePage([], None, 1)
+
+    monkeypatch.setattr(
+        "ctlogs.scheduler.UrlscanSource",
+        lambda *_args, **_kwargs: Source(),
+    )
+    database.consume_partitioned_request(
+        URLSCAN_TOTAL_QUOTA_SUBJECT,
+        3,
+        URLSCAN_BREADTH_QUOTA_SUBJECT,
+        1,
+    )
+    jobs = {job.name: job for job in build_jobs(database)}
+
+    assert jobs["urlscan-priority"].action() == (1, 0)
+    with pytest.raises(QuotaExceeded):
+        jobs["urlscan"].action()
+    assert calls == ["priority.example"]

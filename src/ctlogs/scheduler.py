@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from ctlogs.database import Database
+from ctlogs.database import Database, QuotaExceeded
 from ctlogs.ingest.backfill import (
     DEFAULT_JOBS,
     DEFAULT_MAX_BYTES,
@@ -24,10 +24,17 @@ from ctlogs.ingest.backfill import (
 from ctlogs.ingest.czds import CzdsClient, run_czds
 from ctlogs.ingest.enrich import (
     DEFAULT_URLSCAN_DAILY_LIMIT,
-    URLSCAN_QUOTA_SUBJECT,
+    DEFAULT_URLSCAN_PRIORITY_DAILY_LIMIT,
+    DEFAULT_URLSCAN_SEARCH_DAILY_LIMIT,
+    URLSCAN_BREADTH_QUOTA_SUBJECT,
+    URLSCAN_PRIORITY_QUOTA_SUBJECT,
+    URLSCAN_TOTAL_QUOTA_SUBJECT,
     UrlscanSource,
     run_source,
+    split_urlscan_budget,
 )
+from ctlogs.ingest.history import run_history
+from ctlogs.worker import _usable_log_urls
 
 LOGGER = logging.getLogger("ctlogs.scheduler")
 DEFAULT_INTERVAL_SECONDS = 24 * 60 * 60
@@ -171,6 +178,39 @@ def _run_urlscan_apex(
     )
 
 
+def _run_urlscan_priority_batch(
+    database: Database,
+    source: UrlscanSource,
+    *,
+    apexes_per_run: int,
+    request_guard: Callable[[], object] | None = None,
+) -> tuple[int, int]:
+    apexes = database.queued_urlscan_history(apexes_per_run)
+    requests = 0
+    hostnames = 0
+    failures = 0
+    for apex in apexes:
+        try:
+            source_requests, source_hostnames = _run_urlscan_apex(
+                database,
+                source,
+                apex,
+                request_guard=request_guard,
+            )
+        except QuotaExceeded:
+            raise
+        except Exception:
+            failures += 1
+            LOGGER.exception("priority urlscan history failed for %s", apex)
+        else:
+            requests += source_requests
+            hostnames += source_hostnames
+        database.finish_urlscan_history_attempt(apex)
+    if apexes and failures == len(apexes):
+        raise RuntimeError("urlscan priority history failed for every queued apex")
+    return requests, hostnames
+
+
 def _run_urlscan_index_batch(
     database: Database,
     source: UrlscanSource,
@@ -207,6 +247,54 @@ def _run_urlscan_index_batch(
             updated_at=datetime.now(UTC).isoformat(),
         )
     return requests, hostnames
+
+
+def _run_ct_history_batch(
+    database: Database,
+    log_urls: list[str],
+    *,
+    logs_per_run: int,
+    batch_size: int,
+    max_batches_per_log: int,
+) -> tuple[int, int]:
+    state_key = "scheduler:ct-history:log-cursor"
+    state = database.get_ingest_state(state_key)
+    cursor = str(state.get("cursor") or "") if state else ""
+    urls = sorted(set(log_urls))
+    selected = [url for url in urls if url > cursor][:logs_per_run]
+    if not selected:
+        database.upsert_ingest_state(
+            state_key,
+            cursor="",
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        return 0, 0
+
+    entries = 0
+    hostnames = 0
+    failures = 0
+    for log_url in selected:
+        try:
+            source_entries, source_hostnames = run_history(
+                database,
+                log_url,
+                batch_size=batch_size,
+                max_batches=max_batches_per_log,
+            )
+        except Exception:
+            failures += 1
+            LOGGER.exception("CT history failed for %s", log_url)
+        else:
+            entries += source_entries
+            hostnames += source_hostnames
+        database.upsert_ingest_state(
+            state_key,
+            cursor=log_url,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+    if failures == len(selected):
+        raise RuntimeError("CT history failed for every selected log")
+    return entries, hostnames
 
 
 def build_jobs(database: Database) -> list[ScheduledJob]:
@@ -281,6 +369,42 @@ def build_jobs(database: Database) -> list[ScheduledJob]:
             )
         )
 
+    if _enabled("CTLOGS_SCHEDULE_CT_HISTORY", False):
+        ct_history_interval = _positive_environment_integer(
+            "CTLOGS_CT_HISTORY_INTERVAL",
+            60,
+        )
+        ct_history_retry = _positive_environment_integer(
+            "CTLOGS_CT_HISTORY_RETRY_INTERVAL",
+            retry,
+        )
+        logs_per_run = _positive_environment_integer(
+            "CTLOGS_CT_HISTORY_LOGS_PER_RUN",
+            1,
+        )
+        history_batch_size = _positive_environment_integer(
+            "CTLOGS_CT_HISTORY_BATCH_SIZE",
+            1024,
+        )
+        history_max_batches = _positive_environment_integer(
+            "CTLOGS_CT_HISTORY_MAX_BATCHES_PER_LOG",
+            8,
+        )
+        jobs.append(
+            ScheduledJob(
+                "ct-history",
+                ct_history_interval,
+                ct_history_retry,
+                lambda: _run_ct_history_batch(
+                    database,
+                    _usable_log_urls(),
+                    logs_per_run=logs_per_run,
+                    batch_size=history_batch_size,
+                    max_batches_per_log=history_max_batches,
+                ),
+            )
+        )
+
     if _enabled("CTLOGS_SCHEDULE_URLSCAN"):
         urlscan_key = os.environ.get("URLSCAN_API_KEY")
         urlscan_apexes = _apexes_from_environment()
@@ -291,10 +415,14 @@ def build_jobs(database: Database) -> list[ScheduledJob]:
     else:
         urlscan_key = None
         urlscan_apexes = []
-    if urlscan_key and urlscan_apexes:
+    if urlscan_key:
         apexes_per_run = _positive_environment_integer(
             "CTLOGS_URLSCAN_APEXES_PER_RUN",
             10,
+        )
+        priority_apexes_per_run = _positive_environment_integer(
+            "CTLOGS_URLSCAN_PRIORITY_APEXES_PER_RUN",
+            14,
         )
         urlscan_interval = _positive_environment_integer(
             "CTLOGS_URLSCAN_INTERVAL",
@@ -308,33 +436,67 @@ def build_jobs(database: Database) -> list[ScheduledJob]:
             "CTLOGS_URLSCAN_DAILY_LIMIT",
             DEFAULT_URLSCAN_DAILY_LIMIT,
         )
-        request_guard = lambda: database.consume_request(
-            URLSCAN_QUOTA_SUBJECT,
+        urlscan_budgets = split_urlscan_budget(
             urlscan_daily_limit,
+            _positive_environment_integer(
+                "CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT",
+                DEFAULT_URLSCAN_SEARCH_DAILY_LIMIT,
+            ),
+            _positive_environment_integer(
+                "CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT",
+                DEFAULT_URLSCAN_PRIORITY_DAILY_LIMIT,
+            ),
         )
-        if urlscan_apexes == [ALL_INDEXED_APEXES]:
-            urlscan_action = lambda: _run_urlscan_index_batch(
-                database,
-                UrlscanSource(urlscan_key, timeout=timeout),
-                apexes_per_run=apexes_per_run,
-                request_guard=request_guard,
+        if urlscan_budgets.priority:
+            priority_guard = lambda: database.consume_partitioned_request(
+                URLSCAN_TOTAL_QUOTA_SUBJECT,
+                urlscan_daily_limit,
+                URLSCAN_PRIORITY_QUOTA_SUBJECT,
+                urlscan_budgets.priority,
             )
-        else:
-            urlscan_action = lambda: _run_urlscan_batch(
-                database,
-                UrlscanSource(urlscan_key, timeout=timeout),
-                urlscan_apexes,
-                apexes_per_run=apexes_per_run,
-                request_guard=request_guard,
+            jobs.append(
+                ScheduledJob(
+                    "urlscan-priority",
+                    urlscan_interval,
+                    urlscan_retry,
+                    lambda: _run_urlscan_priority_batch(
+                        database,
+                        UrlscanSource(urlscan_key, timeout=timeout),
+                        apexes_per_run=priority_apexes_per_run,
+                        request_guard=priority_guard,
+                    ),
+                )
             )
-        jobs.append(
-            ScheduledJob(
-                "urlscan",
-                urlscan_interval,
-                urlscan_retry,
-                urlscan_action,
+        if urlscan_apexes and urlscan_budgets.breadth:
+            breadth_guard = lambda: database.consume_partitioned_request(
+                URLSCAN_TOTAL_QUOTA_SUBJECT,
+                urlscan_daily_limit,
+                URLSCAN_BREADTH_QUOTA_SUBJECT,
+                urlscan_budgets.breadth,
             )
-        )
+            if urlscan_apexes == [ALL_INDEXED_APEXES]:
+                urlscan_action = lambda: _run_urlscan_index_batch(
+                    database,
+                    UrlscanSource(urlscan_key, timeout=timeout),
+                    apexes_per_run=apexes_per_run,
+                    request_guard=breadth_guard,
+                )
+            else:
+                urlscan_action = lambda: _run_urlscan_batch(
+                    database,
+                    UrlscanSource(urlscan_key, timeout=timeout),
+                    urlscan_apexes,
+                    apexes_per_run=apexes_per_run,
+                    request_guard=breadth_guard,
+                )
+            jobs.append(
+                ScheduledJob(
+                    "urlscan",
+                    urlscan_interval,
+                    urlscan_retry,
+                    urlscan_action,
+                )
+            )
     return jobs
 
 
@@ -418,7 +580,9 @@ def main() -> None:
         and os.environ.get("URLSCAN_API_KEY")
         and not os.environ.get("CTLOGS_URLSCAN_APEXES")
     ):
-        LOGGER.warning("urlscan is disabled because CTLOGS_URLSCAN_APEXES is empty")
+        LOGGER.warning(
+            "urlscan breadth is disabled because CTLOGS_URLSCAN_APEXES is empty"
+        )
     if args.list:
         for job in jobs:
             print(f"{job.name}: every {job.interval_seconds}s, retry {job.retry_seconds}s")

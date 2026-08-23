@@ -1,8 +1,9 @@
 # Source catalog
 
 This catalog separates the public query service from bulk indexing jobs. When
-configured, a query searches urlscan's historical records before reading the
-local index. It does not submit a live scan or probe a hostname.
+configured, a query refreshes urlscan's newest indexed records, queues deeper
+history, and then reads the local index. It does not submit a live scan or probe
+a hostname.
 
 ## Default sources without credentials
 
@@ -42,24 +43,26 @@ distinct provenance source IDs.
 
 ## Update cadence
 
-The API container polls Chrome, Apple, RFC 6962, and configured Static CT logs
-continuously. Each cycle starts after the previous cycle and a 60-second wait.
-One scheduler runs IANA, CISA, configured artifacts, and CZDS every 24 hours.
-A separate urlscan scheduler starts its next bounded run 60 seconds after the
-previous run finishes. Search requests also perform one bounded urlscan refresh
-before reading SQLite.
+The API container tails Chrome, Apple, RFC 6962, and configured Static CT logs
+continuously. A separate CT history scheduler rotates across usable RFC 6962
+logs and advances each log from its first entry with an independent cursor. One
+scheduler runs IANA, CISA, configured artifacts, and CZDS every 24 hours. A
+separate urlscan scheduler runs priority and breadth jobs. Search requests also
+perform one bounded urlscan refresh before reading SQLite.
 
 CZDS and urlscan have independent caps. CZDS checks the 25 least-recently
 checked approved zones per run. With `CTLOGS_URLSCAN_APEXES=*`, urlscan walks
 the full local apex index in batches of up to 69. Each apex keeps its own
-`search_after` cursor, so later visits request the next older results page.
-After an apex reaches the end of its history, later visits refresh its newest
-page without resetting the completed history state. API-triggered refreshes
-also leave the scheduler's history cursor unchanged. The 60-second minimum
-interval limits scheduled starts to 99,360 per UTC day. Scheduled and
-API-triggered requests share an atomic 100,000-request daily ceiling. Artifact
-imports each have their own download and parser run, so adding one cannot
-consume another source's slot.
+`search_after` cursor. Search requests add their apex to a persistent FIFO queue
+whose job processes up to 14 apexes per run. Incomplete apexes rotate to the
+back; completed apexes leave the queue. API refreshes do not overwrite those
+cursors.
+
+Automated URLSCAN calls use separate daily classes under one 100,000-request
+ceiling: 10,000 live refreshes, 20,000 queued-history requests, and 70,000
+breadth requests. The class maximums add up to the total, so breadth cannot
+silently consume the priority share. Artifact imports each have their own
+download and parser run, so adding one cannot consume another source's slot.
 
 The `.ee`, `.se`, `.nu`, `.ch`, `.li`, Chaos, Common Crawl, HaGeZi, and Geomys
 adapters do not discover their own upstream files. They run unattended only
