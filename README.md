@@ -104,7 +104,7 @@ those names are servable, so a stray file dropped in `web/` is not reachable.
 
 `ASSETS` are served with `Cache-Control: no-cache`, because the markup and the
 assets it is versioned with ship together and a browser must not pair new
-markup with a cached script. `MEDIA` — the icons — carry no such pairing and
+markup with a cached script. `MEDIA` - the icons - carry no such pairing and
 are cached for a week instead. Brand sources live in [`brand/`](brand/), which
 is not served.
 

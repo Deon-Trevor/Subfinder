@@ -11,7 +11,7 @@ path, one fill, no gradients, no container. It holds at 16px, which is the only
 size that decides whether a mark works.
 
 Geometry is on a 32 grid. Bar thickness 6, gap 3, corner radius 3 on the outer
-turns, sharp on the inner ones, and the two free ends fully round — the outline
+turns, sharp on the inner ones, and the two free ends fully round - the outline
 a 6-wide round-join stroke of the centre line would produce. Nothing here needs
 a font, so the mark renders identically everywhere.
 
@@ -42,7 +42,7 @@ lockup does not need the font installed.
 ## Rules
 
 Keep clear space of one bar height (a sixth of the mark's width) on every side.
-Do not add a container, a shadow, an outline, or a gradient. Do not stretch it —
+Do not add a container, a shadow, an outline, or a gradient. Do not stretch it -
 the mark is square and the lockup has one aspect ratio. On a photograph or any
 ground that is neither clearly light nor clearly dark, use the solid ink or
 paper variant rather than the green.
