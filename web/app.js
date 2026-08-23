@@ -27,6 +27,8 @@ const el = {
   form: document.getElementById("search-form"),
   input: document.getElementById("apex"),
   submit: document.getElementById("search-submit"),
+  topForm: document.getElementById("topsearch-form"),
+  topInput: document.getElementById("topsearch"),
   error: document.getElementById("search-error"),
   quota: document.getElementById("quota"),
   quotaText: document.getElementById("quota-text"),
@@ -300,13 +302,22 @@ function plural(n, word) {
 
 /* Every error path also hides the results section, and reveal() may already
    have put focus on its heading. Sending focus back to the field keeps the
-   keyboard somewhere useful instead of dropping it on <body>. */
+   keyboard somewhere useful instead of dropping it on <body>.
+
+   The message renders under the hero field, so a search run from the bar while
+   scrolled down would put the explanation somewhere the reader cannot see.
+   In that case the page goes back to the field the message belongs to. */
 function showError(headline, detail) {
   el.error.replaceChildren();
   const strong = document.createElement("strong");
   strong.textContent = headline;
   el.error.append(strong, document.createTextNode(` ${detail}`));
   el.error.hidden = false;
+
+  if (!el.topForm.hidden) {
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.form.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "center" });
+  }
   el.input.focus({ preventScroll: true });
 }
 
@@ -568,6 +579,7 @@ el.filter.addEventListener("input", () => {
 
 function renderRegister(apex, rows) {
   current = { apex, rows };
+  syncInputs(apex);
   // A keystroke from the previous result must not re-filter this one.
   clearTimeout(filterTimer);
   el.filter.value = "";
@@ -692,14 +704,46 @@ el.form.addEventListener("submit", (event) => {
   search(el.input.value);
 });
 
+/* ── the search that follows ─────────────────────────────────────── */
+/* A result runs long, and the field that produced it is then thousands of rows
+   behind you. Rather than a button that scrolls back to the search, the search
+   itself comes along: once the hero field passes under the sticky bar, a
+   compact copy takes its place there. Reaching it costs no scrolling, and
+   nothing new is layered over the page to make room for it. */
+
+el.topForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const value = el.topInput.value;
+  el.input.value = value;
+  search(value);
+});
+
+if ("IntersectionObserver" in window) {
+  // The negative top margin is the sticky bar's own height: the hero field is
+  // out of reach the moment it slides under the bar, not when it clears the
+  // viewport, and the swap should happen then.
+  const watcher = new IntersectionObserver(
+    ([entry]) => { el.topForm.hidden = entry.isIntersecting; },
+    { rootMargin: "-60px 0px 0px 0px" },
+  );
+  watcher.observe(el.form);
+}
+
+/* Both fields show the domain that was actually read, so the normalisation a
+   pasted URL goes through is visible rather than silent. */
+function syncInputs(apex) {
+  el.input.value = apex;
+  el.topInput.value = apex;
+}
+
 window.addEventListener("popstate", () => {
   const apex = new URLSearchParams(location.search).get("apex");
   if (!apex) {
     el.register.hidden = true;
-    el.input.value = "";
+    syncInputs("");
     return;
   }
-  el.input.value = apex;
+  syncInputs(apex);
   search(apex, { push: false });
 });
 
@@ -710,8 +754,10 @@ document.addEventListener("keydown", (event) => {
   const active = document.activeElement;
   if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
   event.preventDefault();
-  el.input.focus();
-  el.input.select();
+  // Whichever field is on screen: the hero one near the top, the bar's below it.
+  const field = el.topForm.hidden ? el.input : el.topInput;
+  field.focus();
+  field.select();
 });
 
 /* ── export ──────────────────────────────────────────────────────── */
