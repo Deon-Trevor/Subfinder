@@ -58,6 +58,8 @@
       "operatingSystem": "Any",
       "isPartOf": { "@id": "#website" },
       "description": "Passive subdomain enumeration against a prebuilt index of certificate transparency logs, registry zone data and public crawls. Lookups never probe the domain being searched.",
+      "codeRepository": "https://github.com/Deon-Trevor/Subfinder",
+      "sameAs": "https://github.com/Deon-Trevor/Subfinder",
       "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
       "featureList": [
         "Passive subdomain enumeration with no DNS or HTTP traffic to the domain",
@@ -83,6 +85,21 @@
       <span class="brand-name">Subfinder</span>
     </a>
     <span class="topbar-spacer"></span>
+
+    <!-- Reveals itself once the hero field scrolls out of reach, so the one
+         control that spends the allowance is never more than a glance away. -->
+    <form class="topsearch" id="topsearch-form" autocomplete="off" hidden>
+      <label class="visually-hidden" for="topsearch">Search another domain</label>
+      <input class="topsearch-input mono" id="topsearch" type="text" placeholder="another domain"
+             spellcheck="false" inputmode="url" autocapitalize="off" autocorrect="off"
+             enterkeyhint="search" required>
+      <button class="topsearch-submit" type="submit" aria-label="Enumerate">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5 12h13M12 5l7 7-7 7"></path>
+        </svg>
+      </button>
+    </form>
+
     <span class="ticker" id="ticker" hidden>
       <span class="ticker-dot" id="ticker-dot"></span>
       <span class="ticker-value mono" id="ticker-value">0</span>
@@ -112,7 +129,7 @@
           <div class="search-row">
             <div class="search-field">
               <label class="visually-hidden" for="apex">Domain to enumerate</label>
-              <input class="search-input mono" id="apex" name="apex" type="text" placeholder="syncpundit.io"
+              <input class="search-input mono" id="apex" name="apex" type="text" placeholder="example.com"
                      spellcheck="false" inputmode="url" autocapitalize="off" autocorrect="off"
                      enterkeyhint="search" aria-describedby="search-meta" required>
               <kbd class="search-key" aria-hidden="true">/</kbd>
@@ -282,7 +299,7 @@ curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com&amp;form
     <footer class="footer">
       <span>Subfinder</span>
       <span>passive, no probes</span>
-      <a href="https://github.com/Deon-Trevor/Subfinder" rel="noopener">Source</a>
+      <a href="https://github.com/Deon-Trevor/Subfinder">Source</a>
       <span class="topbar-spacer"></span>
       <span>Sync_Pundit</span>
     </footer>
