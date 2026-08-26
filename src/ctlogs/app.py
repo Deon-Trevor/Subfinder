@@ -1,43 +1,35 @@
 from __future__ import annotations
 
-import contextlib
 import asyncio
+import base64
+import contextlib
 import hashlib
-import logging
+import json
 import os
 import re
 import secrets
+import sqlite3
 import time
-from functools import lru_cache
-from collections.abc import AsyncIterator
+from functools import lru_cache, partial
+from collections.abc import AsyncIterator, Iterable, Iterator
 from pathlib import Path
 from typing import Literal
 
 import tldextract
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel
 
-from ctlogs.database import Database, Quota, QuotaExceeded
-from ctlogs.ingest.enrich import (
-    DEFAULT_URLSCAN_DAILY_LIMIT,
-    DEFAULT_URLSCAN_PRIORITY_DAILY_LIMIT,
-    DEFAULT_URLSCAN_SEARCH_DAILY_LIMIT,
-    URLSCAN_SEARCH_QUOTA_SUBJECT,
-    URLSCAN_TOTAL_QUOTA_SUBJECT,
-    EnrichmentSource,
-    UrlscanSource,
-    run_source,
-    split_urlscan_budget,
-)
+from ctlogs.control import Admission, ControlDatabase, ControlUnavailable
+from ctlogs.database import Database, Quota, QuotaExceeded, SearchCursor, SearchResult
 from ctlogs.web import mount_frontend
 
 DAILY_REQUEST_LIMIT = 1_000
 RECORDS_SCHEMA_VERSION = "subfinder.index-records.v1"
+STREAM_CHUNK_BYTES = 64 * 1024
 LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-LOGGER = logging.getLogger("ctlogs.app")
 EXTRACT = tldextract.TLDExtract(
     suffix_list_urls=(),
     include_psl_private_domains=True,
@@ -74,6 +66,125 @@ def _get_env_int(name: str, default: int) -> int:
     if parsed < 1:
         raise ValueError(f"{name} must be a positive integer")
     return parsed
+
+
+def _get_env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a number") from error
+    if parsed <= 0:
+        raise ValueError(f"{name} must be positive")
+    return parsed
+
+
+def _enabled(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    if value.lower() in {"1", "true", "yes"}:
+        return True
+    if value.lower() in {"0", "false", "no"}:
+        return False
+    raise ValueError(f"{name} must be 0 or 1")
+
+
+def _encode_cursor(apex: str, cursor: SearchCursor) -> str:
+    raw = json.dumps(
+        [apex, cursor.first_seen, cursor.subdomain],
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_cursor(apex: str, value: str) -> SearchCursor:
+    if len(value) > 2_048:
+        raise ValueError("cursor is invalid")
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+    except (ValueError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("cursor is invalid") from error
+    if (
+        not isinstance(payload, list)
+        or len(payload) != 3
+        or payload[0] != apex
+        or (payload[1] is not None and not isinstance(payload[1], str))
+        or not isinstance(payload[2], str)
+    ):
+        raise ValueError("cursor is invalid")
+    return SearchCursor(subdomain=payload[2], first_seen=payload[1])
+
+
+def _stream_search_rows(
+    rows: Iterable[SearchResult],
+    *,
+    output_format: Literal["text", "json"],
+    dates: bool,
+) -> Iterator[bytes]:
+    buffer = bytearray()
+    first = True
+    if output_format == "json":
+        buffer.extend(b"[")
+    for row in rows:
+        if output_format == "json":
+            if not first:
+                buffer.extend(b",")
+            value = (
+                {"first_seen": row.first_seen, "sub": row.subdomain}
+                if dates
+                else {"sub": row.subdomain}
+            )
+            buffer.extend(json.dumps(value, separators=(",", ":")).encode())
+        elif dates:
+            buffer.extend(f"{row.subdomain}\t{row.first_seen or ''}\n".encode())
+        else:
+            buffer.extend(f"{row.subdomain}\n".encode())
+        first = False
+        if len(buffer) >= STREAM_CHUNK_BYTES:
+            yield bytes(buffer)
+            buffer.clear()
+    if output_format == "json":
+        buffer.extend(b"]")
+    if buffer:
+        yield bytes(buffer)
+
+
+async def _cooperative_search_stream(
+    rows: Iterable[SearchResult],
+    *,
+    output_format: Literal["text", "json"],
+    dates: bool,
+    slots: asyncio.Semaphore,
+) -> AsyncIterator[bytes]:
+    """Time-slice CPU-bound serialization instead of contending worker threads."""
+    iterator = _stream_search_rows(
+        rows,
+        output_format=output_format,
+        dates=dates,
+    )
+    exhausted = object()
+    try:
+        while True:
+            async with slots:
+                operation = asyncio.create_task(
+                    asyncio.to_thread(next, iterator, exhausted)
+                )
+                try:
+                    chunk = await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    await operation
+                    raise
+            if chunk is exhausted:
+                return
+            yield chunk
+    finally:
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            await asyncio.to_thread(close)
 
 
 @lru_cache(maxsize=2048)
@@ -126,14 +237,14 @@ def _csv_environment(name: str, defaults: list[str]) -> list[str]:
 def create_app(
     database_path: str | Path | None = None,
     *,
+    control_database_path: str | Path | None = None,
     daily_request_limit: int = DAILY_REQUEST_LIMIT,
     api_tokens: list[str] | None = None,
     token_request_limit: int | None = None,
     allowed_hosts: list[str] | None = None,
     allowed_origins: list[str] | None = None,
-    urlscan_source: EnrichmentSource | None = None,
-    urlscan_daily_limit: int | None = None,
-    urlscan_wait_seconds: float | None = None,
+    read_only_index: bool | None = None,
+    enqueue_refresh: bool | None = None,
 ) -> FastAPI:
     if daily_request_limit < 1:
         raise ValueError("daily_request_limit must be positive")
@@ -152,54 +263,54 @@ def create_app(
     if authenticated_limit < 1:
         raise ValueError("token_request_limit must be positive")
 
-    path = database_path or os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3")
-    database = Database(path)
-    configured_urlscan_wait = (
-        urlscan_wait_seconds
-        if urlscan_wait_seconds is not None
-        else float(_get_env_int("CTLOGS_URLSCAN_SEARCH_TIMEOUT", 5))
+    path = Path(
+        database_path or os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3")
     )
-    if configured_urlscan_wait <= 0:
-        raise ValueError("urlscan_wait_seconds must be positive")
-    configured_urlscan = urlscan_source
-    if configured_urlscan is None:
-        urlscan_key = os.environ.get("URLSCAN_API_KEY")
-        if urlscan_key:
-            configured_urlscan = UrlscanSource(
-                urlscan_key,
-                page_size=_get_env_int("CTLOGS_URLSCAN_SEARCH_PAGE_SIZE", 100),
-                timeout=max(1, int(configured_urlscan_wait)),
-            )
-    configured_urlscan_limit = (
-        urlscan_daily_limit
-        if urlscan_daily_limit is not None
-        else _get_env_int(
-            "CTLOGS_URLSCAN_DAILY_LIMIT",
-            DEFAULT_URLSCAN_DAILY_LIMIT,
+    configured_read_only = (
+        read_only_index
+        if read_only_index is not None
+        else _enabled("CTLOGS_INDEX_READ_ONLY", False)
+    )
+    database = Database(
+        path,
+        read_only=configured_read_only,
+        busy_timeout_ms=_get_env_int("CTLOGS_INDEX_BUSY_TIMEOUT_MS", 500),
+    )
+    control_path = Path(
+        control_database_path
+        or os.environ.get(
+            "CTLOGS_CONTROL_DB_PATH",
+            str(path.with_name(f"{path.stem}-control.sqlite3")),
         )
     )
-    if configured_urlscan_limit < 1:
-        raise ValueError("urlscan_daily_limit must be positive")
-    configured_urlscan_budgets = split_urlscan_budget(
-        configured_urlscan_limit,
-        _get_env_int(
-            "CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT",
-            DEFAULT_URLSCAN_SEARCH_DAILY_LIMIT,
-        ),
-        _get_env_int(
-            "CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT",
-            DEFAULT_URLSCAN_PRIORITY_DAILY_LIMIT,
-        ),
+    control = ControlDatabase(
+        control_path,
+        busy_timeout_ms=_get_env_int("CTLOGS_CONTROL_BUSY_TIMEOUT_MS", 50),
+        max_refresh_queue=_get_env_int("CTLOGS_MAX_REFRESH_QUEUE", 100_000),
     )
+    configured_enqueue_refresh = (
+        enqueue_refresh
+        if enqueue_refresh is not None
+        else _enabled("CTLOGS_ENQUEUE_SEARCH_REFRESH", True)
+    )
+    control_deadline = _get_env_float("CTLOGS_CONTROL_DEADLINE_SECONDS", 0.075)
+    catalog_deadline = _get_env_float("CTLOGS_CATALOG_DEADLINE_SECONDS", 1.0)
+    page_limit = _get_env_int("CTLOGS_MAX_PAGE_SIZE", 5_000)
+    mcp_result_limit = _get_env_int("CTLOGS_MCP_RESULT_LIMIT", 100_000)
+    # SQLite has one writer. Serializing admission in-process avoids turning a
+    # small exact counter update into competing writer retries under a burst.
+    control_slots = asyncio.Semaphore(_get_env_int("CTLOGS_CONTROL_CONCURRENCY", 1))
+    catalog_slots = asyncio.Semaphore(_get_env_int("CTLOGS_CATALOG_CONCURRENCY", 8))
+    stream_slots = asyncio.Semaphore(_get_env_int("CTLOGS_STREAM_CONCURRENCY", 1))
     mcp = MCPServer(
         "Subfinder",
         instructions=(
-            "Refresh urlscan's newest results, queue deeper history, then "
-            "search the passive subdomain index by registrable apex."
+            "Read the committed passive subdomain index by registrable apex, "
+            "then queue passive enrichment without making the caller wait."
         ),
     )
 
-    def consume(client_ip: str, authorization: str | None = None) -> Quota:
+    def quota_subject(client_ip: str, authorization: str | None = None) -> tuple[str, int]:
         if authorization and authorization.startswith("Bearer "):
             candidate = authorization.removeprefix("Bearer ").strip()
             if any(
@@ -207,109 +318,64 @@ def create_app(
                 for token in configured_tokens
             ):
                 subject = "token:" + hashlib.sha256(candidate.encode()).hexdigest()
-                return database.consume_request(subject, authenticated_limit)
-        return database.consume_request(client_ip, daily_request_limit)
+                return subject, authenticated_limit
+        return client_ip, daily_request_limit
 
-    def refresh_urlscan(apex: str) -> str:
-        if configured_urlscan is None:
-            return "disabled"
-        database.enqueue_urlscan_history(apex)
-        try:
-            run_source(
-                database,
-                configured_urlscan,
-                [apex],
-                max_requests=1,
-                refresh=True,
-                persist_state=False,
-                request_guard=lambda: database.consume_partitioned_request(
-                    URLSCAN_TOTAL_QUOTA_SUBJECT,
-                    configured_urlscan_limit,
-                    URLSCAN_SEARCH_QUOTA_SUBJECT,
-                    configured_urlscan_budgets.search,
-                ),
-            )
-        except QuotaExceeded:
-            return "quota-exhausted"
-        except Exception:
-            LOGGER.exception("urlscan search refresh failed for %s", apex)
-            return "error"
-        return "ok"
-
-    async def refresh_urlscan_before_search(apex: str) -> str:
-        try:
+    async def admit(
+        client_ip: str,
+        authorization: str | None,
+        apex: str,
+        *,
+        refresh: bool,
+    ) -> Admission:
+        subject, limit = quota_subject(client_ip, authorization)
+        async with control_slots:
             return await asyncio.wait_for(
-                asyncio.to_thread(refresh_urlscan, apex),
-                timeout=configured_urlscan_wait,
+                asyncio.to_thread(
+                    control.admit,
+                    subject,
+                    limit,
+                    apex,
+                    enqueue_refresh=refresh and configured_enqueue_refresh,
+                ),
+                timeout=control_deadline,
             )
-        except TimeoutError:
-            LOGGER.warning("urlscan search refresh timed out for %s", apex)
-            return "timeout"
 
-    def _run_seed_if_needed() -> None:
-        if os.environ.get("CTLOGS_AUTO_SEED") != "1":
-            return
-
-        try:
-            from ctlogs.seed import seed_if_empty
-        except Exception as error:
-            LOGGER.error("Unable to import seed module: %s", error)
-            return
-
-        try:
-            inserted = seed_if_empty(database)
-        except Exception as error:
-            LOGGER.error("Automatic seed failed: %s", error)
-            return
-
-        if inserted:
-            LOGGER.info("Seeded database with %s rows", inserted)
-        else:
-            LOGGER.debug("Seed skipped: database already has data")
-
-    def _run_worker() -> asyncio.Task[None] | None:
-        if os.environ.get("CTLOGS_ENABLE_LIVE_CT") != "1":
-            return None
-
-        try:
-            from ctlogs.worker import worker_loop
-
-            interval = _get_env_int("CTLOGS_WORKER_INTERVAL", 60)
-            batch = _get_env_int("CTLOGS_WORKER_BATCH_SIZE", 1024)
-            initial_backfill = _get_env_int("CTLOGS_INITIAL_BACKFILL", 1024)
-            max_batches = _get_env_int("CTLOGS_MAX_BATCHES_PER_LOG", 8)
-            return asyncio.create_task(
-                worker_loop(
-                    database,
-                    interval=interval,
-                    batch=batch,
-                    initial_backfill=initial_backfill,
-                    max_batches=max_batches,
-                )
+    async def catalog_call(function, *args, **kwargs):
+        async with catalog_slots:
+            return await asyncio.wait_for(
+                asyncio.to_thread(partial(function, *args, **kwargs)),
+                timeout=catalog_deadline,
             )
-        except Exception as error:
-            LOGGER.error("Unable to start live CT worker: %s", error)
-            return None
 
     @mcp.tool()
     async def search(apex: str, ctx: Context) -> list[str]:
-        """Refresh from urlscan, queue history, then return indexed hostnames.
-
-        This searches existing urlscan records. It does not submit a live scan
-        or probe the apex or any returned hostname. Deeper history continues in
-        the background.
-        """
+        """Return indexed hostnames and queue passive enrichment."""
         canonical = normalize_apex(apex)
         request = ctx.request_context.request
         client = getattr(request, "client", None)
         if client is None:
             raise RuntimeError("client IP is unavailable")
         try:
-            consume(client.host, request.headers.get("authorization"))
+            await admit(
+                client.host,
+                request.headers.get("authorization"),
+                canonical,
+                refresh=True,
+            )
         except QuotaExceeded as error:
             raise ValueError("daily request limit exceeded") from error
-        await refresh_urlscan_before_search(canonical)
-        return [row.subdomain for row in database.search(canonical)]
+        except (ControlUnavailable, TimeoutError) as error:
+            raise RuntimeError("search admission is temporarily unavailable") from error
+        rows, cursor = await catalog_call(
+            database.search_page,
+            canonical,
+            after=None,
+            limit=mcp_result_limit,
+        )
+        if cursor is not None:
+            raise RuntimeError("result exceeds the MCP result limit; use the HTTP API")
+        return [row.subdomain for row in rows]
 
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -338,21 +404,18 @@ def create_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        database.initialize()
-        _run_seed_if_needed()
-        # Background CT poller - polls all usable Chrome/Apple logs (enabled in Docker via ENV=1)
-        worker_task = _run_worker()
+        if database.read_only:
+            database.verify_schema()
+            control.verify_schema()
+        else:
+            database.initialize()
+            control.initialize()
         async with mcp.session_manager.run():
-            try:
-                yield
-            finally:
-                if worker_task is not None:
-                    worker_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await worker_task
+            yield
 
     app = FastAPI(title="Subfinder API", version="1.0.0", lifespan=lifespan)
     app.state.database = database
+    app.state.control_database = control
     app.state.mcp = mcp
 
     @app.get("/health")
@@ -361,7 +424,14 @@ def create_app(
 
     @app.get("/ready")
     async def ready() -> JSONResponse:
-        stats = database.stats()
+        try:
+            stats = await catalog_call(database.stats)
+        except (sqlite3.Error, TimeoutError, RuntimeError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="catalog is not ready",
+                headers={"Retry-After": "1"},
+            ) from error
         return JSONResponse(
             {
                 "status": "ready",
@@ -373,7 +443,14 @@ def create_app(
 
     @app.get("/v1/stats")
     async def index_stats() -> JSONResponse:
-        stats = database.stats()
+        try:
+            stats = await catalog_call(database.stats)
+        except (sqlite3.Error, TimeoutError, RuntimeError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="catalog statistics are temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
         return JSONResponse(
             {
                 "apex_count": stats.apex_count,
@@ -400,9 +477,11 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(error)) from error
 
         try:
-            quota = consume(
+            admission = await admit(
                 _client_ip(request),
                 request.headers.get("authorization"),
+                canonical,
+                refresh=False,
             )
         except QuotaExceeded as error:
             raise HTTPException(
@@ -410,28 +489,45 @@ def create_app(
                 detail="daily request limit exceeded",
                 headers=_retry_headers(error.quota),
             ) from error
+        except (ControlUnavailable, TimeoutError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="search admission is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
 
-        response.headers.update(_quota_headers(quota))
+        response.headers.update(_quota_headers(admission.quota))
         response.headers["Cache-Control"] = "no-cache"
         response.headers["X-Subfinder-Schema-Version"] = RECORDS_SCHEMA_VERSION
-        return IndexRecordsResponse(
-            apex=canonical,
-            records=[
-                HostnameRecord(
-                    hostname=record.hostname,
-                    first_seen=record.first_seen,
-                    sources=[
-                        SourceRecord(
-                            source=source.source,
-                            first_seen=source.first_seen,
-                            last_seen=source.last_seen,
-                        )
-                        for source in record.sources
-                    ],
-                )
-                for record in database.records(canonical)
-            ],
-        )
+
+        def build_records() -> IndexRecordsResponse:
+            return IndexRecordsResponse(
+                apex=canonical,
+                records=[
+                    HostnameRecord(
+                        hostname=record.hostname,
+                        first_seen=record.first_seen,
+                        sources=[
+                            SourceRecord(
+                                source=source.source,
+                                first_seen=source.first_seen,
+                                last_seen=source.last_seen,
+                            )
+                            for source in record.sources
+                        ],
+                    )
+                    for record in database.records(canonical)
+                ],
+            )
+
+        try:
+            return await catalog_call(build_records)
+        except (sqlite3.Error, TimeoutError, RuntimeError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="catalog is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
 
     @app.get("/v1/search")
     async def search_api(
@@ -439,16 +535,28 @@ def create_app(
         apex: str,
         output_format: Literal["text", "json"] = Query(default="text", alias="format"),
         dates: int = Query(default=0, ge=0, le=1),
+        limit: int | None = Query(default=None, ge=1, le=page_limit),
+        cursor: str | None = Query(default=None),
     ) -> Response:
+        started = time.perf_counter()
         try:
             canonical = normalize_apex(apex)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-
+        if cursor is not None and limit is None:
+            raise HTTPException(status_code=400, detail="cursor requires limit")
         try:
-            quota = consume(
+            after = _decode_cursor(canonical, cursor) if cursor is not None else None
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+        admission_started = time.perf_counter()
+        try:
+            admission = await admit(
                 _client_ip(request),
                 request.headers.get("authorization"),
+                canonical,
+                refresh=True,
             )
         except QuotaExceeded as error:
             raise HTTPException(
@@ -456,29 +564,85 @@ def create_app(
                 detail="daily request limit exceeded",
                 headers=_retry_headers(error.quota),
             ) from error
+        except (ControlUnavailable, TimeoutError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="search admission is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        admission_ms = (time.perf_counter() - admission_started) * 1_000
 
-        urlscan_status = await refresh_urlscan_before_search(canonical)
-        rows = database.search(canonical)
-        headers = _quota_headers(quota)
-        headers["X-URLScan-Status"] = urlscan_status
-        if output_format == "json":
-            if dates:
-                body = [
-                    {"first_seen": row.first_seen, "sub": row.subdomain}
-                    for row in rows
-                ]
-            else:
-                body = [{"sub": row.subdomain} for row in rows]
-            return JSONResponse(body, headers=headers)
+        try:
+            watermark = await catalog_call(database.watermark)
+        except (sqlite3.Error, TimeoutError, RuntimeError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="catalog is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
 
-        if dates:
-            body = "".join(
-                f"{row.subdomain}\t{row.first_seen or ''}\n"
-                for row in rows
+        headers = _quota_headers(admission.quota)
+        headers["Cache-Control"] = "no-store"
+        headers["X-Refresh-Status"] = admission.refresh_status
+        headers["X-URLScan-Status"] = admission.refresh_status
+        headers["X-Request-ID"] = secrets.token_hex(8)
+        if watermark is not None:
+            headers["X-Index-As-Of"] = watermark
+
+        if limit is not None:
+            query_started = time.perf_counter()
+            try:
+                rows, next_cursor = await catalog_call(
+                    database.search_page,
+                    canonical,
+                    after=after,
+                    limit=limit,
+                )
+                body = await catalog_call(
+                    lambda: b"".join(
+                        _stream_search_rows(
+                            rows,
+                            output_format=output_format,
+                            dates=bool(dates),
+                        )
+                    )
+                )
+            except (sqlite3.Error, TimeoutError, RuntimeError) as error:
+                raise HTTPException(
+                    status_code=503,
+                    detail="catalog is temporarily unavailable",
+                    headers={"Retry-After": "1"},
+                ) from error
+            query_ms = (time.perf_counter() - query_started) * 1_000
+            headers["X-Result-Page-Size"] = str(len(rows))
+            headers["X-Result-Truncated"] = str(next_cursor is not None).lower()
+            if next_cursor is not None:
+                encoded = _encode_cursor(canonical, next_cursor)
+                headers["X-Next-Cursor"] = encoded
+                next_url = request.url.include_query_params(limit=limit, cursor=encoded)
+                headers["Link"] = f'<{next_url}>; rel="next"'
+            total_ms = (time.perf_counter() - started) * 1_000
+            headers["Server-Timing"] = (
+                f"admission;dur={admission_ms:.3f}, "
+                f"catalog;dur={query_ms:.3f}, total;dur={total_ms:.3f}"
             )
-        else:
-            body = "".join(f"{row.subdomain}\n" for row in rows)
-        return PlainTextResponse(body, headers=headers)
+            media_type = "application/json" if output_format == "json" else "text/plain"
+            return Response(content=body, media_type=media_type, headers=headers)
+
+        headers["X-Result-Truncated"] = "false"
+        headers["Server-Timing"] = f"admission;dur={admission_ms:.3f}"
+        rows = database.iter_search(canonical)
+        media_type = "application/json" if output_format == "json" else "text/plain"
+        return StreamingResponse(
+            _cooperative_search_stream(
+                rows,
+                output_format=output_format,
+                dates=bool(dates),
+                slots=stream_slots,
+            ),
+            media_type=media_type,
+            headers=headers,
+        )
 
     # The root mount preserves the MCP SDK's exact /mcp route. FastAPI routes
     # are registered first because a root mount catches every remaining path.

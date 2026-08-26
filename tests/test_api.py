@@ -3,17 +3,16 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from pathlib import Path
 import asyncio
+import sqlite3
+import threading
 import time
 
 import httpx
 import pytest
 
 from ctlogs.app import create_app, normalize_apex
-from ctlogs.ingest.enrich import (
-    SourcePage,
-    URLSCAN_SEARCH_QUOTA_SUBJECT,
-    URLSCAN_TOTAL_QUOTA_SUBJECT,
-)
+from ctlogs.control import ControlDatabase
+from ctlogs.database import Database
 
 
 @pytest.fixture
@@ -95,18 +94,8 @@ async def test_json_without_dates_only_returns_sub(client: httpx.AsyncClient) ->
 async def test_records_api_returns_local_provenance_without_discovery(
     tmp_path: Path,
 ) -> None:
-    calls: list[str] = []
-
-    class Source:
-        name = "urlscan"
-
-        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
-            calls.append(apex)
-            raise AssertionError("the records API must not call providers")
-
     app = create_app(
         tmp_path / "records.sqlite3",
-        urlscan_source=Source(),
         allowed_hosts=["testserver"],
         allowed_origins=[],
     )
@@ -151,176 +140,199 @@ async def test_records_api_returns_local_provenance_without_discovery(
             }
         ],
     }
-    assert calls == []
+    assert app.state.control_database.queued_refreshes(1) == []
     assert "x-urlscan-status" not in response.headers
 
 
 @pytest.mark.anyio
-async def test_search_refreshes_urlscan_before_reading_the_local_index(
+async def test_search_returns_the_local_index_and_coalesces_refresh_work(
     tmp_path: Path,
 ) -> None:
-    events: list[str] = []
-
-    class Source:
-        name = "urlscan"
-
-        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
-            events.append("urlscan")
-            return SourcePage(
-                [(f"fresh.{apex}", "2026-08-23T10:00:00Z")],
-                None,
-                10,
-            )
-
     app = create_app(
         tmp_path / "urlscan.sqlite3",
-        urlscan_source=Source(),
         allowed_hosts=["testserver"],
         allowed_origins=[],
     )
     async with app.router.lifespan_context(app):
-        app.state.database.upsert_ingest_state(
-            "enrich:urlscan:example.com",
-            cursor="older-page",
-            updated_at="2026-08-23T00:00:00Z",
+        app.state.database.upsert_subdomains(
+            "example.com",
+            [("cached.example.com", "2026-08-23T10:00:00Z")],
         )
-        original_search = app.state.database.search
-
-        def tracked_search(apex: str):
-            events.append("local")
-            return original_search(apex)
-
-        app.state.database.search = tracked_search
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://testserver",
         ) as test_client:
-            response = await test_client.get(
+            first = await test_client.get(
+                "/v1/search",
+                params={"apex": "example.com", "format": "json"},
+            )
+            second = await test_client.get(
                 "/v1/search",
                 params={"apex": "example.com", "format": "json"},
             )
 
-    assert response.status_code == 200
-    assert response.headers["x-urlscan-status"] == "ok"
-    assert response.json() == [{"sub": "fresh.example.com"}]
-    assert events == ["urlscan", "local"]
-    assert app.state.database.get_ingest_state("enrich:urlscan:example.com")[
-        "cursor"
-    ] == "older-page"
-    assert app.state.database.queued_urlscan_history(1) == ["example.com"]
+    assert first.status_code == 200
+    assert first.headers["x-refresh-status"] == "queued"
+    assert first.headers["x-urlscan-status"] == "queued"
+    assert first.json() == [{"sub": "cached.example.com"}]
+    assert second.headers["x-refresh-status"] == "already-pending"
+    assert app.state.control_database.queued_refreshes(1) == ["example.com"]
 
 
 @pytest.mark.anyio
-async def test_search_falls_back_to_local_when_urlscan_fails(tmp_path: Path) -> None:
-    class Source:
-        name = "urlscan"
-
-        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
-            raise OSError("provider unavailable")
-
-    app = create_app(
-        tmp_path / "fallback.sqlite3",
-        urlscan_source=Source(),
-        allowed_hosts=["testserver"],
-        allowed_origins=[],
-    )
+async def test_optional_cursor_pages_preserve_the_legacy_body_shape(tmp_path: Path) -> None:
+    app = create_app(tmp_path / "page.sqlite3", allowed_hosts=["testserver"], allowed_origins=[])
     async with app.router.lifespan_context(app):
         app.state.database.upsert_subdomains(
             "example.com",
-            [("cached.example.com", None)],
+            [
+                ("a.example.com", "2024-01-01T00:00:00Z"),
+                ("b.example.com", "2025-01-01T00:00:00Z"),
+                ("z.example.com", None),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://testserver",
         ) as test_client:
-            response = await test_client.get(
+            first = await test_client.get(
                 "/v1/search",
-                params={"apex": "example.com"},
+                params={"apex": "example.com", "format": "json", "dates": 1, "limit": 2},
+            )
+            second = await test_client.get(
+                "/v1/search",
+                params={
+                    "apex": "example.com",
+                    "format": "json",
+                    "dates": 1,
+                    "limit": 2,
+                    "cursor": first.headers["x-next-cursor"],
+                },
             )
 
-    assert response.status_code == 200
-    assert response.headers["x-urlscan-status"] == "error"
-    assert response.text == "cached.example.com\n"
+    assert first.json() == [
+        {"first_seen": "2024-01-01T00:00:00Z", "sub": "a.example.com"},
+        {"first_seen": "2025-01-01T00:00:00Z", "sub": "b.example.com"},
+    ]
+    assert first.headers["x-result-truncated"] == "true"
+    assert 'rel="next"' in first.headers["link"]
+    assert second.json() == [{"first_seen": None, "sub": "z.example.com"}]
+    assert second.headers["x-result-truncated"] == "false"
 
 
 @pytest.mark.anyio
-async def test_search_has_a_wall_clock_urlscan_limit(tmp_path: Path) -> None:
-    class Source:
-        name = "urlscan"
-
-        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
-            time.sleep(0.2)
-            return SourcePage([], None, 1)
-
+async def test_cursor_cannot_be_reused_for_another_apex(tmp_path: Path) -> None:
     app = create_app(
-        tmp_path / "timeout.sqlite3",
-        urlscan_source=Source(),
-        urlscan_wait_seconds=0.01,
+        tmp_path / "cursor.sqlite3",
         allowed_hosts=["testserver"],
         allowed_origins=[],
     )
     async with app.router.lifespan_context(app):
         app.state.database.upsert_subdomains(
             "example.com",
-            [("cached.example.com", None)],
+            [("a.example.com", None), ("b.example.com", None)],
         )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            first = await client.get(
+                "/v1/search",
+                params={"apex": "example.com", "limit": 1},
+            )
+            response = await client.get(
+                "/v1/search",
+                params={
+                    "apex": "example.org",
+                    "limit": 1,
+                    "cursor": first.headers["x-next-cursor"],
+                },
+            )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "cursor is invalid"}
+
+
+@pytest.mark.anyio
+async def test_catalog_writer_does_not_stall_search_health_or_static_routes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "catalog.sqlite3"
+    writer = Database(path)
+    writer.initialize()
+    writer.upsert_subdomains("example.com", [("cached.example.com", None)])
+    ControlDatabase(tmp_path / "control.sqlite3").initialize()
+    app = create_app(
+        path,
+        control_database_path=tmp_path / "control.sqlite3",
+        read_only_index=True,
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_writer() -> None:
+        with writer.write_transaction() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO ingest_state(source, cursor) VALUES('held', '1')"
+            )
+            entered.set()
+            release.wait(timeout=2)
+
+    thread = threading.Thread(target=hold_writer)
+    thread.start()
+    assert entered.wait(timeout=1)
+    async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://testserver",
         ) as test_client:
             started = time.monotonic()
-            response = await test_client.get(
-                "/v1/search",
-                params={"apex": "example.com"},
+            search, health, homepage = await asyncio.gather(
+                test_client.get("/v1/search", params={"apex": "example.com"}),
+                test_client.get("/health"),
+                test_client.get("/"),
             )
             elapsed = time.monotonic() - started
-            await asyncio.sleep(0.21)
+    release.set()
+    thread.join(timeout=2)
 
-    assert response.headers["x-urlscan-status"] == "timeout"
-    assert response.text == "cached.example.com\n"
-    assert elapsed < 0.15
-    assert app.state.database.queued_urlscan_history(1) == ["example.com"]
+    assert search.text == "cached.example.com\n"
+    assert health.status_code == 200
+    assert homepage.status_code == 200
+    assert elapsed < 0.5
 
 
 @pytest.mark.anyio
-async def test_api_honors_the_shared_urlscan_daily_ceiling(
-    tmp_path: Path,
-) -> None:
-    calls: list[str] = []
-
-    class Source:
-        name = "urlscan"
-
-        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
-            calls.append(apex)
-            return SourcePage([], None, 2)
-
+async def test_control_lock_fails_search_quickly_without_blocking_health(tmp_path: Path) -> None:
     app = create_app(
-        tmp_path / "provider-quota.sqlite3",
-        urlscan_source=Source(),
-        urlscan_daily_limit=1,
+        tmp_path / "catalog.sqlite3",
+        control_database_path=tmp_path / "control.sqlite3",
         allowed_hosts=["testserver"],
         allowed_origins=[],
     )
-    async with (
-        app.router.lifespan_context(app),
-        httpx.AsyncClient(
+    async with app.router.lifespan_context(app):
+        blocker = sqlite3.connect(tmp_path / "control.sqlite3")
+        blocker.execute("BEGIN IMMEDIATE")
+        async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://testserver",
-        ) as test_client,
-    ):
-        app.state.database.consume_partitioned_request(
-            URLSCAN_TOTAL_QUOTA_SUBJECT,
-            1,
-            URLSCAN_SEARCH_QUOTA_SUBJECT,
-            1,
-        )
-        response = await test_client.get(
-            "/v1/search", params={"apex": "example.net"}
-        )
+        ) as test_client:
+            started = time.monotonic()
+            search, health = await asyncio.gather(
+                test_client.get("/v1/search", params={"apex": "example.net"}),
+                test_client.get("/health"),
+            )
+            elapsed = time.monotonic() - started
+        blocker.rollback()
+        blocker.close()
 
-    assert response.headers["x-urlscan-status"] == "quota-exhausted"
-    assert calls == []
+    assert search.status_code == 503
+    assert search.headers["retry-after"] == "1"
+    assert health.status_code == 200
+    assert elapsed < 0.5
 
 
 @pytest.mark.parametrize(

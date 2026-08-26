@@ -13,6 +13,7 @@ from ctlogs.database import (
     Database,
     IndexedRecord,
     QuotaExceeded,
+    SearchCursor,
     SourceObservation,
 )
 
@@ -102,6 +103,43 @@ def test_upsert_keeps_the_earliest_first_seen(tmp_path: Path) -> None:
     assert database.search("example.com")[0].first_seen == "2024-03-01T00:00:00Z"
 
 
+def test_search_pages_preserve_order_without_duplicates(tmp_path: Path) -> None:
+    database = Database(tmp_path / "page.sqlite3")
+    database.initialize()
+    database.upsert_subdomains(
+        "example.com",
+        [
+            ("a.example.com", "2025-01-01T00:00:00Z"),
+            ("b.example.com", "2025-01-01T00:00:00Z"),
+            ("c.example.com", "2026-01-01T00:00:00Z"),
+            ("z.example.com", None),
+        ],
+    )
+
+    first, cursor = database.search_page("example.com", after=None, limit=2)
+    assert [row.subdomain for row in first] == ["a.example.com", "b.example.com"]
+    assert cursor == SearchCursor("b.example.com", "2025-01-01T00:00:00Z")
+
+    second, cursor = database.search_page("example.com", after=cursor, limit=2)
+    assert [row.subdomain for row in second] == ["c.example.com", "z.example.com"]
+    assert cursor is None
+
+
+def test_read_only_database_rejects_writes_and_verifies_schema(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.sqlite3"
+    writable = Database(path)
+    writable.initialize()
+    writable.upsert_subdomains("example.com", [("example.com", None)])
+
+    read_only = Database(path, read_only=True)
+    read_only.verify_schema()
+    assert [row.subdomain for row in read_only.search("example.com")] == [
+        "example.com"
+    ]
+    with pytest.raises(RuntimeError, match="read-only"):
+        read_only.upsert_subdomains("example.com", [("www.example.com", None)])
+
+
 def test_apexes_after_pages_unique_apexes_in_index_order(tmp_path: Path) -> None:
     database = Database(tmp_path / "apexes.sqlite3")
     database.initialize()
@@ -114,41 +152,6 @@ def test_apexes_after_pages_unique_apexes_in_index_order(tmp_path: Path) -> None
 
     assert database.apexes_after("", 2) == ["one.example", "three.example"]
     assert database.apexes_after("three.example", 2) == ["two.example"]
-
-
-def test_urlscan_history_queue_is_fifo_and_drops_completed_apexes(
-    tmp_path: Path,
-) -> None:
-    database = Database(tmp_path / "queue.sqlite3")
-    database.initialize()
-    database.enqueue_urlscan_history(
-        "one.example",
-        requested_at="2026-08-24T00:00:00Z",
-    )
-    database.enqueue_urlscan_history(
-        "two.example",
-        requested_at="2026-08-24T00:00:01Z",
-    )
-    database.enqueue_urlscan_history(
-        "one.example",
-        requested_at="2026-08-24T00:00:02Z",
-    )
-
-    assert database.queued_urlscan_history(2) == ["one.example", "two.example"]
-
-    database.finish_urlscan_history_attempt(
-        "one.example",
-        attempted_at="2026-08-24T00:00:03Z",
-    )
-    assert database.queued_urlscan_history(2) == ["two.example", "one.example"]
-
-    database.upsert_ingest_state(
-        "enrich:urlscan:two.example",
-        cursor="complete",
-    )
-    database.finish_urlscan_history_attempt("two.example")
-    database.enqueue_urlscan_history("two.example")
-    assert database.queued_urlscan_history(2) == ["one.example"]
 
 
 def test_quota_resets_on_the_next_utc_day(tmp_path: Path) -> None:
@@ -390,6 +393,7 @@ def test_stats_materialize_unique_ct_names_and_logs(tmp_path: Path) -> None:
     stats = database.stats()
     assert stats.ct_hostname_count == 2
     assert stats.ct_log_count == 2
+    assert stats.source_count == 3
 
     with database.write_transaction() as connection:
         connection.execute(
@@ -400,6 +404,7 @@ def test_stats_materialize_unique_ct_names_and_logs(tmp_path: Path) -> None:
     stats = database.stats()
     assert stats.ct_hostname_count == 1
     assert stats.ct_log_count == 1
+    assert stats.source_count == 2
 
 
 def test_initialize_builds_totals_for_an_existing_database(tmp_path: Path) -> None:

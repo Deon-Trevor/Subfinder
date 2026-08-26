@@ -16,6 +16,12 @@ class SearchResult:
 
 
 @dataclass(frozen=True)
+class SearchCursor:
+    subdomain: str
+    first_seen: str | None
+
+
+@dataclass(frozen=True)
 class SourceObservation:
     source: str
     first_seen: str | None
@@ -54,14 +60,34 @@ class QuotaExceeded(Exception):
 
 
 class Database:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        read_only: bool = False,
+        busy_timeout_ms: int = 1_000,
+    ) -> None:
+        if busy_timeout_ms < 1:
+            raise ValueError("busy_timeout_ms must be positive")
         self.path = Path(path)
+        self.read_only = read_only
+        self.busy_timeout_ms = busy_timeout_ms
 
     def _open_connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=60)
+        target: str | Path = self.path
+        uri = False
+        if self.read_only:
+            target = f"{self.path.resolve().as_uri()}?mode=ro"
+            uri = True
+        connection = sqlite3.connect(
+            target,
+            timeout=self.busy_timeout_ms / 1000,
+            uri=uri,
+            check_same_thread=False,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 60000")
+        connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
         return connection
 
     def connect(self) -> sqlite3.Connection:
@@ -73,6 +99,8 @@ class Database:
     @contextmanager
     def write_transaction(self) -> Iterator[sqlite3.Connection]:
         """Run one mutation while excluding writers in every service process."""
+        if self.read_only:
+            raise RuntimeError("the catalog is read-only in this process")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_name(f"{self.path.name}.write.lock")
         with lock_path.open("a+") as lock:
@@ -89,6 +117,10 @@ class Database:
         with self.write_transaction() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
+            needs_source_backfill = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'index_sources'"
+            ).fetchone() is None
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS subdomains (
@@ -148,15 +180,9 @@ class Database:
                     dated_hostname_count INTEGER NOT NULL
                 );
 
-                INSERT OR IGNORE INTO index_totals (
-                    singleton, apex_count, hostname_count, dated_hostname_count
-                )
-                SELECT
-                    1,
-                    COUNT(DISTINCT apex),
-                    COUNT(*),
-                    COUNT(first_seen)
-                FROM subdomains;
+                CREATE TABLE IF NOT EXISTS index_sources (
+                    source TEXT PRIMARY KEY
+                ) WITHOUT ROWID;
 
                 CREATE TRIGGER IF NOT EXISTS stats_subdomain_insert
                 AFTER INSERT ON subdomains
@@ -198,6 +224,25 @@ class Database:
                 END;
                 """
             )
+
+            if needs_source_backfill:
+                connection.execute(
+                    "INSERT INTO index_sources(source) "
+                    "SELECT DISTINCT source FROM subdomain_sources"
+                )
+
+            if connection.execute(
+                "SELECT 1 FROM index_totals WHERE singleton = 1"
+            ).fetchone() is None:
+                connection.execute(
+                    """
+                    INSERT INTO index_totals (
+                        singleton, apex_count, hostname_count, dated_hostname_count
+                    )
+                    SELECT 1, COUNT(DISTINCT apex), COUNT(*), COUNT(first_seen)
+                    FROM subdomains
+                    """
+                )
 
             total_columns = {
                 row["name"]
@@ -246,6 +291,23 @@ class Database:
 
             connection.executescript(
                 """
+                CREATE TRIGGER IF NOT EXISTS stats_source_insert
+                AFTER INSERT ON subdomain_sources
+                BEGIN
+                    INSERT OR IGNORE INTO index_sources(source) VALUES(NEW.source);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS stats_source_delete
+                AFTER DELETE ON subdomain_sources
+                BEGIN
+                    DELETE FROM index_sources
+                    WHERE source = OLD.source
+                      AND NOT EXISTS (
+                          SELECT 1 FROM subdomain_sources
+                          WHERE source = OLD.source
+                      );
+                END;
+
                 CREATE TRIGGER IF NOT EXISTS stats_ct_source_insert
                 AFTER INSERT ON subdomain_sources
                 WHEN NEW.source LIKE 'direct_ct:%'
@@ -304,6 +366,46 @@ class Database:
                 "DELETE FROM request_counts WHERE day < date('now', '-2 days')"
             )
 
+    def verify_schema(self) -> None:
+        """Perform bounded startup checks without mutating or scanning the catalog."""
+        required_tables = {
+            "subdomains",
+            "subdomain_sources",
+            "index_totals",
+            "index_sources",
+            "ingest_runs",
+        }
+        with self.connect() as connection:
+            present = {
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            missing = required_tables - present
+            if missing:
+                raise RuntimeError(
+                    "catalog migration required; missing tables: "
+                    + ", ".join(sorted(missing))
+                )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(index_totals)")
+            }
+            required_columns = {
+                "apex_count",
+                "hostname_count",
+                "dated_hostname_count",
+                "ct_hostname_count",
+                "ct_log_count",
+            }
+            if required_columns - columns:
+                raise RuntimeError("catalog migration required; index totals are stale")
+            if connection.execute(
+                "SELECT 1 FROM index_totals WHERE singleton = 1"
+            ).fetchone() is None:
+                raise RuntimeError("catalog migration required; index totals are missing")
+
     def search(self, apex: str) -> list[SearchResult]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -316,6 +418,94 @@ class Database:
                 (apex,),
             ).fetchall()
         return [SearchResult(row["subdomain"], row["first_seen"]) for row in rows]
+
+    def iter_search(
+        self,
+        apex: str,
+        *,
+        after: SearchCursor | None = None,
+        limit: int | None = None,
+        fetch_size: int = 1_000,
+    ) -> Iterator[SearchResult]:
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive")
+        if fetch_size < 1:
+            raise ValueError("fetch_size must be positive")
+
+        where = "WHERE apex = ?"
+        parameters: list[object] = [apex]
+        if after is not None:
+            null_rank = 1 if after.first_seen is None else 0
+            where += """
+                AND (
+                    (first_seen IS NULL) > ?
+                    OR (
+                        (first_seen IS NULL) = ?
+                        AND (
+                            (? = 0 AND (
+                                first_seen > ?
+                                OR (first_seen = ? AND subdomain > ?)
+                            ))
+                            OR (? = 1 AND subdomain > ?)
+                        )
+                    )
+                )
+            """
+            parameters.extend(
+                [
+                    null_rank,
+                    null_rank,
+                    null_rank,
+                    after.first_seen,
+                    after.first_seen,
+                    after.subdomain,
+                    null_rank,
+                    after.subdomain,
+                ]
+            )
+
+        sql = f"""
+            SELECT subdomain, first_seen
+            FROM subdomains
+            {where}
+            ORDER BY first_seen IS NULL, first_seen, subdomain
+        """
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters.append(limit)
+
+        with self.connect() as connection:
+            cursor = connection.execute(sql, parameters)
+            while rows := cursor.fetchmany(fetch_size):
+                for row in rows:
+                    yield SearchResult(str(row["subdomain"]), row["first_seen"])
+
+    def search_page(
+        self,
+        apex: str,
+        *,
+        after: SearchCursor | None,
+        limit: int,
+    ) -> tuple[list[SearchResult], SearchCursor | None]:
+        rows = list(self.iter_search(apex, after=after, limit=limit + 1))
+        if len(rows) <= limit:
+            return rows, None
+        page = rows[:limit]
+        tail = page[-1]
+        return page, SearchCursor(tail.subdomain, tail.first_seen)
+
+    def watermark(self) -> str | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT finished_at
+                FROM ingest_runs
+                WHERE finished_at IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return str(row["finished_at"]) if row else None
 
     def records(self, apex: str) -> list[IndexedRecord]:
         with self.connect() as connection:
@@ -380,74 +570,6 @@ class Database:
                 (cursor, limit),
             ).fetchall()
         return [str(row["apex"]) for row in rows]
-
-    def enqueue_urlscan_history(
-        self,
-        apex: str,
-        *,
-        requested_at: str | None = None,
-    ) -> None:
-        requested_at = requested_at or datetime.now(UTC).isoformat()
-        with self.write_transaction() as connection:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO ingest_state (
-                    source, cursor, updated_at
-                )
-                SELECT ?, 'pending', ?
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM ingest_state
-                    WHERE source = ? AND cursor = 'complete'
-                )
-                """,
-                (
-                    f"queue:urlscan:{apex}",
-                    requested_at,
-                    f"enrich:urlscan:{apex}",
-                ),
-            )
-
-    def queued_urlscan_history(self, limit: int) -> list[str]:
-        if limit < 1:
-            raise ValueError("limit must be positive")
-        prefix = "queue:urlscan:"
-        with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT substr(source, ?) AS apex
-                FROM ingest_state
-                WHERE source >= 'queue:urlscan:' AND source < 'queue:urlscan;'
-                ORDER BY updated_at, source
-                LIMIT ?
-                """,
-                (len(prefix) + 1, limit),
-            ).fetchall()
-        return [str(row["apex"]) for row in rows]
-
-    def finish_urlscan_history_attempt(
-        self,
-        apex: str,
-        *,
-        attempted_at: str | None = None,
-    ) -> None:
-        attempted_at = attempted_at or datetime.now(UTC).isoformat()
-        queue_key = f"queue:urlscan:{apex}"
-        with self.write_transaction() as connection:
-            state = connection.execute(
-                "SELECT cursor FROM ingest_state WHERE source = ?",
-                (f"enrich:urlscan:{apex}",),
-            ).fetchone()
-            if state and state["cursor"] == "complete":
-                connection.execute(
-                    "DELETE FROM ingest_state WHERE source = ?",
-                    (queue_key,),
-                )
-            else:
-                connection.execute(
-                    "UPDATE ingest_state SET updated_at = ? WHERE source = ?",
-                    (attempted_at, queue_key),
-                )
 
     def upsert_subdomains(
         self,
@@ -570,7 +692,7 @@ class Database:
                     totals.dated_hostname_count,
                     totals.ct_hostname_count,
                     totals.ct_log_count,
-                    (SELECT COUNT(DISTINCT source) FROM subdomain_sources)
+                    (SELECT COUNT(*) FROM index_sources)
                         AS source_count,
                     (SELECT MAX(finished_at) FROM ingest_runs) AS last_ingest_at
                 FROM index_totals AS totals

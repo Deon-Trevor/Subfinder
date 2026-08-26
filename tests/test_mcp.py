@@ -10,7 +10,6 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp_types.version import LATEST_MODERN_VERSION
 
 from ctlogs.app import create_app
-from ctlogs.ingest.enrich import SourcePage
 
 
 @pytest.mark.anyio
@@ -66,38 +65,28 @@ async def test_mcp_search_uses_the_same_ip_budget_as_http(tmp_path: Path) -> Non
 
 
 @pytest.mark.anyio
-async def test_mcp_search_refreshes_urlscan_before_reading_the_index(
+async def test_mcp_search_reads_the_index_and_queues_refresh_work(
     tmp_path: Path,
 ) -> None:
-    calls: list[str] = []
-
-    class Source:
-        name = "urlscan"
-
-        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
-            calls.append(apex)
-            return SourcePage([(f"fresh.{apex}", None)], None, 1)
-
     app = create_app(
         tmp_path / "mcp-urlscan.sqlite3",
-        urlscan_source=Source(),
         allowed_hosts=["testserver"],
         allowed_origins=[],
     )
-    async with (
-        app.router.lifespan_context(app),
-        httpx2.AsyncClient(
+    async with app.router.lifespan_context(app):
+        app.state.database.upsert_subdomains(
+            "example.com", [("cached.example.com", None)]
+        )
+        async with httpx2.AsyncClient(
             transport=httpx2.ASGITransport(app=app),
             base_url="http://testserver",
-        ) as mcp_http_client,
-    ):
-        transport = streamable_http_client(
-            "http://testserver/mcp",
-            http_client=mcp_http_client,
-        )
-        async with Client(transport, mode=LATEST_MODERN_VERSION) as mcp_client:
-            result = await mcp_client.call_tool("search", {"apex": "example.com"})
+        ) as mcp_http_client:
+            transport = streamable_http_client(
+                "http://testserver/mcp",
+                http_client=mcp_http_client,
+            )
+            async with Client(transport, mode=LATEST_MODERN_VERSION) as mcp_client:
+                result = await mcp_client.call_tool("search", {"apex": "example.com"})
 
-    assert result.structured_content == {"result": ["fresh.example.com"]}
-    assert calls == ["example.com"]
-    assert app.state.database.queued_urlscan_history(1) == ["example.com"]
+    assert result.structured_content == {"result": ["cached.example.com"]}
+    assert app.state.control_database.queued_refreshes(1) == ["example.com"]
