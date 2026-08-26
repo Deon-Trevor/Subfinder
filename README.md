@@ -18,7 +18,8 @@ requested apex or the hostnames they return.
 
 Build and run with Compose. A one-shot migration prepares the catalog and small
 control database before the read-only API and the single catalog-writer
-scheduler start.
+scheduler start. The published loopback port belongs to a bounded NGINX edge;
+the API itself is reachable only from Docker networks.
 
 ```bash
 docker network create syncpundit-data-plane
@@ -28,9 +29,10 @@ docker compose up -d --build
 The API runs `uvicorn ctlogs.app:app --host 0.0.0.0 --port 8200`. The hostname
 catalog is persisted in `ctlogs-data`; quotas and the deduplicated refresh queue
 are persisted separately in `ctlogs-control`.
-Compose publishes port 8200 only on host loopback for NGINX and attaches only
-the API container to the external `syncpundit-data-plane` network under the
-`subfinder-index` alias. Create that network once before the first deployment.
+Compose publishes the edge on port 8200 only on host loopback for the host
+NGINX and attaches only the API container to the external
+`syncpundit-data-plane` network under the `subfinder-index` alias. Create that
+network once before the first deployment.
 The API opens the catalog read-only. The migration and scheduler services are
 the only Compose services that can mutate it.
 
@@ -126,9 +128,21 @@ as the quota identity.
 
 ### Bound request load
 
-The API accepts at most 80 public requests and 16 requests with a valid service
-token at one time. These limits cover the complete response, including a
-streamed response. A full class returns `503`, `Retry-After: 1`, and
+The Compose edge admits an initial global burst of 80 public requests, then
+limits sustained traffic to 10 requests per second. It also applies an
+80-request per-client burst with a 10 request-per-second sustained rate and
+bounds active proxied requests to 96 globally and 80 per client. Excess edge
+traffic returns `503`, `Retry-After: 1`, and
+`X-Overload-Reason: edge-capacity`. `/health` bypasses these public limits but
+is available only to direct local probes; a request carrying the sanitized
+client header from host NGINX receives `404`. The limits live in
+`deploy/nginx.conf`; keep the host NGINX connection and request limits as an
+additional outer boundary.
+
+Behind that edge, the API accepts at most 80 public requests and 16 requests
+with a valid service token at one time. These limits cover the complete
+response, including a streamed response. A full class returns `503`,
+`Retry-After: 1`, and
 `X-Overload-Reason: public-capacity` or `service-capacity`. A request rejected
 at this boundary does not consume quota. Quota exhaustion remains a distinct
 `429` response with the exact limit, remaining count, reset time, and retry
@@ -147,10 +161,11 @@ Canceled requests leave the batch before transaction selection. After a
 request enters a control transaction, its exact quota outcome is final even if
 the client disconnects before it receives the response.
 
-Run one Uvicorn worker. The in-process request limits apply per worker. Put a
-global connection and request-rate limit in NGINX before you add workers.
-Keep `/health` outside those limits so an overloaded instance remains
-observable.
+Run one Uvicorn worker. The in-process request limits apply per worker. Keep
+`/health` outside public edge limits so an overloaded instance remains
+observable. Threat Hunter should call `http://subfinder-index:8200` over the
+private data network with its service token; it must not loop through the
+public edge, where public DoS protection intentionally sheds excess traffic.
 
 ### Configure trusted client addresses
 
@@ -164,11 +179,12 @@ proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-Proto $scheme;
 ```
 
-Set `CTLOGS_FORWARDED_ALLOW_IPS` to the exact socket peer that Uvicorn sees for
-NGINX. The safe default is `127.0.0.1`. A host NGINX that connects through a
-Docker-published port usually appears as the gateway address of the container
-network, not as `127.0.0.1`. Do not use `*`. Another container on the private
-data network could then forge a public client address and avoid its quota.
+The Compose API has no published host port, so its default
+`CTLOGS_FORWARDED_ALLOW_IPS=*` trusts the edge and other private-network peers.
+Only trusted services may join those networks. When the deployment assigns a
+stable edge address or subnet, set `CTLOGS_FORWARDED_ALLOW_IPS` to that narrower
+value. Do not use the wildcard if any untrusted container can reach port 8200;
+it could forge a public client address and avoid its quota.
 
 If a CDN connects to NGINX, configure the NGINX real-IP module with only the
 CDN's published address ranges. NGINX must resolve the client address before

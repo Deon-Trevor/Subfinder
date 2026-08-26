@@ -4,12 +4,15 @@ import argparse
 import asyncio
 import ipaddress
 import json
+import multiprocessing
 import random
 import statistics
 import time
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -37,6 +40,8 @@ class Sample:
     total_ms: float
     bytes_read: int
     refresh_status: str | None
+    overload_reason: str | None
+    retry_after: str | None
     server_timing: str | None
     error: str | None
 
@@ -151,10 +156,17 @@ def acceptance_failures(result: dict[str, Any], args: argparse.Namespace) -> lis
         failures.append(f"service requests did not all succeed: {status_counts['service']}")
     if args.require_public_overload:
         public_statuses = status_counts["public"]
-        if int(public_statuses.get("503", 0)) == 0:
+        overload_count = int(public_statuses.get("503", 0))
+        if overload_count == 0:
             failures.append("public overload did not shed any request with 503")
         if set(public_statuses) - {"200", "503"}:
             failures.append(f"public overload returned unexpected statuses: {public_statuses}")
+        reasons = result.get("overload_reason_counts", {})
+        if set(reasons) - {"edge-capacity", "public-capacity"}:
+            failures.append(f"public overload returned invalid reasons: {reasons}")
+        retries = result.get("overload_retry_after_counts", {})
+        if retries != ({"1": overload_count} if overload_count else {}):
+            failures.append(f"public overload returned invalid retry headers: {retries}")
     for argument, role, metric in (
         ("max_public_p95_ms", "public", "total_p95"),
         ("max_service_p95_ms", "service", "total_p95"),
@@ -248,9 +260,9 @@ async def sample(
     *,
     service_token: str | None,
     page_limit: int,
-    start_gate: asyncio.Event,
+    start_at: float,
 ) -> Sample:
-    await start_gate.wait()
+    await asyncio.sleep(max(0.0, start_at - time.perf_counter()))
     if item.delay_seconds:
         await asyncio.sleep(item.delay_seconds)
     params: dict[str, str | int] = {}
@@ -298,6 +310,10 @@ async def sample(
         refresh_status=(
             response_headers.get("X-Refresh-Status") if response_headers else None
         ),
+        overload_reason=(
+            response_headers.get("X-Overload-Reason") if response_headers else None
+        ),
+        retry_after=(response_headers.get("Retry-After") if response_headers else None),
         server_timing=(
             response_headers.get("Server-Timing") if response_headers else None
         ),
@@ -309,11 +325,11 @@ async def sample_health(
     client: httpx.AsyncClient,
     base_url: str,
     done: asyncio.Event,
-    start_gate: asyncio.Event,
+    start_at: float,
     interval: float,
 ) -> list[Sample]:
     samples: list[Sample] = []
-    await start_gate.wait()
+    await asyncio.sleep(max(0.0, start_at - time.perf_counter()))
     while not done.is_set():
         item = WorkItem("health", "", "/health", 0, None)
         samples.append(
@@ -323,11 +339,50 @@ async def sample_health(
                 item,
                 service_token=None,
                 page_limit=1,
-                start_gate=start_gate,
+                start_at=start_at,
             )
         )
         await asyncio.sleep(interval)
     return samples
+
+
+async def sample_role(
+    work: list[WorkItem],
+    base_url: str,
+    *,
+    service_token: str | None,
+    page_limit: int,
+    concurrency: int,
+    timeout_seconds: float,
+    start_at: float,
+) -> list[Sample]:
+    if not work:
+        return []
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout_seconds),
+        limits=httpx.Limits(
+            max_connections=concurrency,
+            max_keepalive_connections=concurrency,
+        ),
+    ) as client:
+        return await asyncio.gather(
+            *(
+                sample(
+                    client,
+                    base_url,
+                    item,
+                    service_token=service_token,
+                    page_limit=page_limit,
+                    start_at=start_at,
+                )
+                for item in work
+            )
+        )
+
+
+def sample_role_in_isolated_process(*args: Any, **kwargs: Any) -> list[Sample]:
+    """Keep a public rejection flood out of the private-lane client process."""
+    return asyncio.run(sample_role(*args, **kwargs))
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -351,53 +406,50 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     concurrency = args.client_concurrency or len(work)
     public_concurrency = min(concurrency, max(1, len(public)))
     service_concurrency = min(concurrency, max(1, len(service)))
-    timeout = httpx.Timeout(args.timeout)
-    start_gate = asyncio.Event()
     done = asyncio.Event()
     started = time.perf_counter()
-    async with (
-        httpx.AsyncClient(
-            timeout=timeout,
-            limits=httpx.Limits(
-                max_connections=public_concurrency,
-                max_keepalive_connections=public_concurrency,
-            ),
-        ) as public_client,
-        httpx.AsyncClient(
-            timeout=timeout,
-            limits=httpx.Limits(
-                max_connections=service_concurrency,
-                max_keepalive_connections=service_concurrency,
-            ),
-        ) as service_client,
-        httpx.AsyncClient(timeout=timeout, limits=httpx.Limits(max_connections=4)) as health_client,
-    ):
-        health_task = asyncio.create_task(
-            sample_health(
-                health_client,
+    start_at = started + 0.75
+    process_context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=1, mp_context=process_context) as executor:
+        public_task = asyncio.get_running_loop().run_in_executor(
+            executor,
+            partial(
+                sample_role_in_isolated_process,
+                public,
                 args.url,
-                done,
-                start_gate,
-                args.health_interval,
-            )
+                service_token=None,
+                page_limit=args.page_limit,
+                concurrency=public_concurrency,
+                timeout_seconds=args.timeout,
+                start_at=start_at,
+            ),
         )
-        tasks = [
-            asyncio.create_task(
-                sample(
-                    service_client if item.role == "service" else public_client,
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(args.timeout),
+            limits=httpx.Limits(max_connections=4),
+        ) as health_client:
+            health_task = asyncio.create_task(
+                sample_health(
+                    health_client,
                     args.url,
-                    item,
-                    service_token=args.service_token,
-                    page_limit=args.page_limit,
-                    start_gate=start_gate,
+                    done,
+                    start_at,
+                    args.health_interval,
                 )
             )
-            for item in work
-        ]
-        start_gate.set()
-        samples = await asyncio.gather(*tasks)
-        done.set()
-        health = await health_task
+            service_samples = await sample_role(
+                service,
+                args.service_url,
+                service_token=args.service_token,
+                page_limit=args.page_limit,
+                concurrency=service_concurrency,
+                timeout_seconds=args.timeout,
+                start_at=start_at,
+            )
+            public_samples = await public_task
+            done.set()
+            health = await health_task
+    samples = service_samples + public_samples
     duration_ms = (time.perf_counter() - started) * 1_000
 
     by_role = {
@@ -408,6 +460,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         "started_at": datetime.now(UTC).isoformat(),
         "request": {
             "url": args.url,
+            "service_url": args.service_url,
             "scenario": args.scenario,
             "public_requests": args.public_requests,
             "service_requests": args.service_requests,
@@ -428,6 +481,24 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 Counter(
                     item.refresh_status or "absent"
                     for item in by_role["public"]
+                ).items()
+            )
+        ),
+        "overload_reason_counts": dict(
+            sorted(
+                Counter(
+                    item.overload_reason or "absent"
+                    for item in by_role["public"]
+                    if item.status == 503
+                ).items()
+            )
+        ),
+        "overload_retry_after_counts": dict(
+            sorted(
+                Counter(
+                    item.retry_after or "absent"
+                    for item in by_role["public"]
+                    if item.status == 503
                 ).items()
             )
         ),
@@ -462,6 +533,10 @@ def main() -> None:
         description="Exercise mixed public and service bursts against Subfinder"
     )
     parser.add_argument("--url", default="http://127.0.0.1:8200")
+    parser.add_argument(
+        "--service-url",
+        help="Optional loopback URL for the private authenticated-service lane",
+    )
     parser.add_argument("--domains", type=Path, required=True)
     parser.add_argument(
         "--scenario", choices=("same-apex", "distinct", "bursts"), required=True
@@ -494,6 +569,8 @@ def main() -> None:
     args = parser.parse_args()
     try:
         require_loopback_url(args.url)
+        args.service_url = args.service_url or args.url
+        require_loopback_url(args.service_url)
     except ValueError as error:
         parser.error(str(error))
     for name in (

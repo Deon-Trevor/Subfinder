@@ -91,6 +91,13 @@ def test_burst_harness_refuses_non_loopback_targets() -> None:
         require_loopback_url("https://subfinder.syncpundit.io")
 
 
+def test_private_service_lane_must_also_be_loopback_in_local_load_tests() -> None:
+    require_loopback_url("http://127.0.0.1:18721")
+
+    with pytest.raises(ValueError, match="loopback"):
+        require_loopback_url("http://subfinder-index:8200")
+
+
 def test_load_test_identities_are_stable_and_separate_by_class() -> None:
     assert load_test_identity(0) == "198.18.0.1"
     assert load_test_identity(499) == "198.18.1.244"
@@ -125,7 +132,39 @@ def test_acceptance_gate_distinguishes_supported_load_from_overload() -> None:
     args.require_service_success = True
     args.require_public_overload = True
     result["status_counts"]["public"] = {"200": 80, "503": 420}
+    result["overload_reason_counts"] = {"edge-capacity": 420}
+    result["overload_retry_after_counts"] = {"1": 420}
     assert acceptance_failures(result, args) == []
+
+
+def test_overload_gate_requires_machine_readable_retry_contract() -> None:
+    result = {
+        "status_counts": {"public": {"200": 80, "503": 20}, "service": {}},
+        "health_status_counts": {"200": 20},
+        "errors": [],
+        "latency_ms": {
+            "public": {"total_p95": 100.0},
+            "service": {"total_p95": None},
+            "health": {"total_p99": 1.0},
+        },
+        "overload_reason_counts": {"absent": 20},
+        "overload_retry_after_counts": {"absent": 20},
+    }
+    args = SimpleNamespace(
+        public_requests=100,
+        service_requests=0,
+        require_all_success=False,
+        require_service_success=False,
+        require_public_overload=True,
+        max_public_p95_ms=None,
+        max_service_p95_ms=None,
+        max_health_p99_ms=None,
+    )
+
+    failures = acceptance_failures(result, args)
+
+    assert "public overload returned invalid reasons: {'absent': 20}" in failures
+    assert "public overload returned invalid retry headers: {'absent': 20}" in failures
 
 
 def test_acceptance_gate_requires_enough_health_samples_for_a_tail_limit() -> None:
