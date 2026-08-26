@@ -9,7 +9,9 @@ import time
 
 import httpx
 import pytest
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+import ctlogs.app as app_module
 from ctlogs.app import create_app, normalize_apex
 from ctlogs.control import ControlDatabase
 from ctlogs.database import Database
@@ -119,6 +121,7 @@ async def test_records_api_returns_local_provenance_without_discovery(
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["server-timing"].startswith("admission;dur=")
     assert response.headers["x-subfinder-schema-version"] == (
         "subfinder.index-records.v1"
     )
@@ -335,6 +338,292 @@ async def test_control_lock_fails_search_quickly_without_blocking_health(tmp_pat
     assert search.headers["retry-after"] == "1"
     assert health.status_code == 200
     assert elapsed < 0.5
+
+
+@pytest.mark.anyio
+async def test_overload_rejects_before_quota_and_reserves_service_capacity(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        tmp_path / "capacity.sqlite3",
+        api_tokens=["service-secret"],
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+        public_inflight_limit=1,
+        service_inflight_limit=1,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original_admit_many = app.state.control_database.admit_many
+
+    def blocking_admit_many(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=2)
+        return original_admit_many(*args, **kwargs)
+
+    app.state.control_database.admit_many = blocking_admit_many
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        first = asyncio.create_task(
+            test_client.get("/v1/search", params={"apex": "example.com", "limit": 1})
+        )
+        assert await asyncio.to_thread(entered.wait, 1)
+
+        overloaded, forged, health = await asyncio.gather(
+            test_client.get("/v1/search", params={"apex": "example.net"}),
+            test_client.get(
+                "/v1/records",
+                params={"apex": "example.org"},
+                headers={"Authorization": "Bearer invalid"},
+            ),
+            test_client.get("/health"),
+        )
+        service = asyncio.create_task(
+            test_client.get(
+                "/v1/records",
+                params={"apex": "example.org"},
+                headers={"Authorization": "Bearer service-secret"},
+            )
+        )
+        await asyncio.sleep(0.01)
+
+        assert app.state.public_request_capacity.in_flight == 1
+        assert app.state.service_request_capacity.in_flight == 1
+        release.set()
+        first_response, service_response = await asyncio.gather(first, service)
+
+    assert first_response.status_code == 200
+    assert service_response.status_code == 200
+    assert overloaded.status_code == 503
+    assert overloaded.headers["retry-after"] == "1"
+    assert overloaded.headers["x-overload-reason"] == "public-capacity"
+    assert forged.status_code == 503
+    assert forged.headers["x-overload-reason"] == "public-capacity"
+    assert health.status_code == 200
+
+    with sqlite3.connect(tmp_path / "capacity-control.sqlite3") as connection:
+        counts = connection.execute(
+            "SELECT subject, used FROM request_counts ORDER BY subject"
+        ).fetchall()
+    assert sorted(used for _subject, used in counts) == [1, 1]
+
+
+@pytest.mark.anyio
+async def test_public_capacity_is_held_until_a_streamed_response_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_stream(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        yield b"example.com\n"
+
+    monkeypatch.setattr(app_module, "_cooperative_search_stream", blocking_stream)
+    app = create_app(
+        tmp_path / "stream-capacity.sqlite3",
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+        public_inflight_limit=1,
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        first = asyncio.create_task(
+            test_client.get("/v1/search", params={"apex": "example.com"})
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        overloaded = await test_client.get(
+            "/v1/search", params={"apex": "example.net"}
+        )
+        assert app.state.public_request_capacity.in_flight == 1
+
+        release.set()
+        streamed = await first
+
+    assert overloaded.status_code == 503
+    assert streamed.status_code == 200
+    assert streamed.text == "example.com\n"
+    assert app.state.public_request_capacity.in_flight == 0
+
+
+@pytest.mark.anyio
+async def test_forwarded_client_identity_requires_a_trusted_socket_peer() -> None:
+    observed: list[str] = []
+
+    async def capture_client(scope, _receive, _send) -> None:
+        observed.append(scope["client"][0])
+
+    middleware = ProxyHeadersMiddleware(capture_client, trusted_hosts=["127.0.0.1"])
+
+    async def receive() -> dict:
+        return {"type": "http.disconnect"}
+
+    async def send(_message: dict) -> None:
+        return None
+
+    base_scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/v1/search",
+        "headers": [(b"x-forwarded-for", b"198.18.0.1")],
+        "scheme": "http",
+        "server": ("testserver", 80),
+    }
+    await middleware(
+        {**base_scope, "client": ("127.0.0.1", 40000)}, receive, send
+    )
+    await middleware(
+        {**base_scope, "client": ("10.0.0.8", 40000)}, receive, send
+    )
+
+    assert observed == ["198.18.0.1", "10.0.0.8"]
+
+
+@pytest.mark.parametrize(
+    ("path", "protected"),
+    [
+        ("/v1/search", True),
+        ("/v1/records", True),
+        ("/mcp", True),
+        ("/mcp/", True),
+        ("/mcp/messages", True),
+        ("/health", False),
+        ("/ready", False),
+        ("/v1/stats", False),
+        ("/", False),
+    ],
+)
+def test_capacity_boundary_covers_only_costly_request_paths(
+    path: str,
+    protected: bool,
+) -> None:
+    assert app_module._RequestCapacityMiddleware._protected_path(path) is protected
+
+
+@pytest.mark.anyio
+async def test_concurrent_admissions_share_control_transactions(tmp_path: Path) -> None:
+    app = create_app(
+        tmp_path / "batched-api.sqlite3",
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    batch_sizes: list[int] = []
+    original_admit_many = app.state.control_database.admit_many
+
+    def record_batch(requests, **kwargs):
+        batch_sizes.append(len(requests))
+        return original_admit_many(requests, **kwargs)
+
+    app.state.control_database.admit_many = record_batch
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        responses = await asyncio.gather(
+            *(
+                test_client.get(
+                    "/v1/search",
+                    params={"apex": "example.com", "limit": 1},
+                )
+                for _index in range(20)
+            )
+        )
+
+    assert {response.status_code for response in responses} == {200}
+    assert sum(batch_sizes) == 20
+    assert max(batch_sizes) > 1
+
+
+@pytest.mark.anyio
+async def test_cancellation_before_batch_selection_does_not_consume_quota(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CTLOGS_CONTROL_BATCH_WINDOW_SECONDS", "0.05")
+    app = create_app(
+        tmp_path / "cancel-before.sqlite3",
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        request = asyncio.create_task(
+            test_client.get("/v1/search", params={"apex": "example.com"})
+        )
+        await asyncio.sleep(0.005)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        await asyncio.sleep(0.06)
+
+    with sqlite3.connect(tmp_path / "cancel-before-control.sqlite3") as connection:
+        count = connection.execute("SELECT COUNT(*) FROM request_counts").fetchone()[0]
+    assert count == 0
+
+
+@pytest.mark.anyio
+async def test_cancellation_after_batch_selection_keeps_committed_quota(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        tmp_path / "cancel-after.sqlite3",
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    selected = threading.Event()
+    release = threading.Event()
+    committed = threading.Event()
+    original_admit_many = app.state.control_database.admit_many
+
+    def blocking_admit_many(*args, **kwargs):
+        selected.set()
+        release.wait(timeout=2)
+        outcomes = original_admit_many(*args, **kwargs)
+        committed.set()
+        return outcomes
+
+    app.state.control_database.admit_many = blocking_admit_many
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        request = asyncio.create_task(
+            test_client.get("/v1/search", params={"apex": "example.com"})
+        )
+        assert await asyncio.to_thread(selected.wait, 1)
+        request.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert await asyncio.to_thread(committed.wait, 1)
+
+    with sqlite3.connect(tmp_path / "cancel-after-control.sqlite3") as connection:
+        used = connection.execute("SELECT SUM(used) FROM request_counts").fetchone()[0]
+    assert used == 1
 
 
 @pytest.mark.parametrize(

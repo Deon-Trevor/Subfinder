@@ -60,6 +60,22 @@ def test_burst_workloads_are_reproducible_and_cover_the_cohort() -> None:
     ])
 
 
+def test_shared_identity_mode_models_one_client_burst() -> None:
+    domains = read_domains(COHORT)
+
+    work, _ = build_public_work(
+        "distinct",
+        domains,
+        70,
+        seed=20260826,
+        burst_size=10,
+        burst_gap=0.1,
+        identity_mode="shared",
+    )
+
+    assert {item.identity for item in work} == {"198.18.0.1"}
+
+
 def test_server_timing_parser_ignores_malformed_values() -> None:
     assert parse_server_timing(
         "admission;dur=6.136, cache;desc=hit, catalog;dur=3.006, bad;dur=nope"
@@ -110,3 +126,31 @@ def test_acceptance_gate_distinguishes_supported_load_from_overload() -> None:
     args.require_public_overload = True
     result["status_counts"]["public"] = {"200": 80, "503": 420}
     assert acceptance_failures(result, args) == []
+
+
+def test_acceptance_gate_requires_enough_health_samples_for_a_tail_limit() -> None:
+    result = {
+        "status_counts": {"public": {"200": 70}, "service": {"200": 10}},
+        "health_status_counts": {"200": 1},
+        "errors": [],
+        "latency_ms": {
+            "public": {"total_p95": 100.0},
+            "service": {"total_p95": 50.0},
+            "health": {"total_p99": 1.0},
+        },
+    }
+    args = SimpleNamespace(
+        public_requests=70,
+        service_requests=10,
+        require_all_success=True,
+        require_service_success=False,
+        require_public_overload=False,
+        max_public_p95_ms=250.0,
+        max_service_p95_ms=250.0,
+        max_health_p99_ms=50.0,
+        min_health_samples=20,
+    )
+
+    assert acceptance_failures(result, args) == [
+        "health sample count 1 was below 20"
+    ]

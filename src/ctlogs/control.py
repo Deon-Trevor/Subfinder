@@ -18,6 +18,14 @@ class Admission:
     refresh_status: str
 
 
+@dataclass(frozen=True)
+class AdmissionRequest:
+    subject: str
+    limit: int
+    apex: str
+    enqueue_refresh: bool = True
+
+
 class ControlDatabase:
     """Small mutable state that must not share the catalog's writer lock."""
 
@@ -155,7 +163,23 @@ class ControlDatabase:
         enqueue_refresh: bool = True,
         now: datetime | None = None,
     ) -> Admission:
-        if limit < 1:
+        outcome = self.admit_many(
+            [AdmissionRequest(subject, limit, apex, enqueue_refresh)],
+            now=now,
+        )[0]
+        if isinstance(outcome, QuotaExceeded):
+            raise outcome
+        return outcome
+
+    def admit_many(
+        self,
+        requests: list[AdmissionRequest],
+        *,
+        now: datetime | None = None,
+    ) -> list[Admission | QuotaExceeded]:
+        if not requests:
+            return []
+        if any(request.limit < 1 for request in requests):
             raise ValueError("limit must be positive")
         current = now or datetime.now(UTC)
         if current.tzinfo is None:
@@ -167,6 +191,7 @@ class ControlDatabase:
         prune_before_day = (current.date() - timedelta(days=2)).isoformat()
         prune_before_refresh = (current - timedelta(days=7)).isoformat()
         should_prune = self._last_prune_day != day
+        outcomes: list[Admission | QuotaExceeded] = []
 
         try:
             with self._connect() as connection:
@@ -180,44 +205,53 @@ class ControlDatabase:
                         "DELETE FROM refresh_requests WHERE requested_at < ?",
                         (prune_before_refresh,),
                     )
-                row = connection.execute(
-                    """
-                    INSERT INTO request_counts (day, subject, used)
-                    VALUES (?, ?, 1)
-                    ON CONFLICT (day, subject) DO UPDATE SET used = used + 1
-                    WHERE used < ?
-                    RETURNING used
-                    """,
-                    (day, subject, limit),
-                ).fetchone()
-                if row is None:
-                    raise QuotaExceeded(
-                        Quota(limit=limit, remaining=0, reset_at=int(reset.timestamp()))
-                    )
+                for request in requests:
+                    row = connection.execute(
+                        """
+                        INSERT INTO request_counts (day, subject, used)
+                        VALUES (?, ?, 1)
+                        ON CONFLICT (day, subject) DO UPDATE SET used = used + 1
+                        WHERE used < ?
+                        RETURNING used
+                        """,
+                        (day, request.subject, request.limit),
+                    ).fetchone()
+                    if row is None:
+                        outcomes.append(
+                            QuotaExceeded(
+                                Quota(
+                                    limit=request.limit,
+                                    remaining=0,
+                                    reset_at=int(reset.timestamp()),
+                                )
+                            )
+                        )
+                        continue
 
-                refresh_status = "disabled"
-                if enqueue_refresh:
-                    refresh_status = self._enqueue_refresh(
-                        connection,
-                        apex,
-                        requested_at,
+                    refresh_status = "disabled"
+                    if request.enqueue_refresh:
+                        refresh_status = self._enqueue_refresh(
+                            connection,
+                            request.apex,
+                            requested_at,
+                        )
+                    used = int(row["used"])
+                    outcomes.append(
+                        Admission(
+                            quota=Quota(
+                                limit=request.limit,
+                                remaining=max(0, request.limit - used),
+                                reset_at=int(reset.timestamp()),
+                            ),
+                            refresh_status=refresh_status,
+                        )
                     )
-        except QuotaExceeded:
-            raise
         except sqlite3.Error as error:
             raise ControlUnavailable("control database admission failed") from error
 
         if should_prune:
             self._last_prune_day = day
-        used = int(row["used"])
-        return Admission(
-            quota=Quota(
-                limit=limit,
-                remaining=max(0, limit - used),
-                reset_at=int(reset.timestamp()),
-            ),
-            refresh_status=refresh_status,
-        )
+        return outcomes
 
     def queued_refreshes(self, limit: int) -> list[str]:
         if limit < 1:

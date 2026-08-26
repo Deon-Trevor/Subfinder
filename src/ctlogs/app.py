@@ -10,9 +10,11 @@ import re
 import secrets
 import sqlite3
 import time
+from dataclasses import dataclass
 from functools import lru_cache, partial
 from collections.abc import AsyncIterator, Iterable, Iterator
 from pathlib import Path
+from threading import Lock
 from typing import Literal
 
 import tldextract
@@ -22,7 +24,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel
 
-from ctlogs.control import Admission, ControlDatabase, ControlUnavailable
+from ctlogs.control import Admission, AdmissionRequest, ControlDatabase, ControlUnavailable
 from ctlogs.database import Database, Quota, QuotaExceeded, SearchCursor, SearchResult
 from ctlogs.web import mount_frontend
 
@@ -53,6 +55,142 @@ class IndexRecordsResponse(BaseModel):
     schema_version: Literal["subfinder.index-records.v1"] = RECORDS_SCHEMA_VERSION
     apex: str
     records: list[HostnameRecord]
+
+
+class _ImmediateCapacity:
+    """Bound total in-flight requests without creating another wait queue."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self._available = limit
+        self._lock = Lock()
+
+    def try_acquire(self) -> bool:
+        with self._lock:
+            if self._available == 0:
+                return False
+            self._available -= 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            if self._available >= self.limit:
+                raise RuntimeError("request capacity released without acquisition")
+            self._available += 1
+
+    @property
+    def in_flight(self) -> int:
+        with self._lock:
+            return self.limit - self._available
+
+
+class _RequestCapacityMiddleware:
+    """Reserve independent public and authenticated-service request capacity."""
+
+    def __init__(
+        self,
+        app,
+        *,
+        public_capacity: _ImmediateCapacity,
+        service_capacity: _ImmediateCapacity,
+        api_tokens: tuple[str, ...],
+    ) -> None:
+        self.app = app
+        self.public_capacity = public_capacity
+        self.service_capacity = service_capacity
+        self.api_tokens = api_tokens
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or not self._protected_path(scope["path"]):
+            await self.app(scope, receive, send)
+            return
+
+        authorization = next(
+            (
+                value.decode("latin-1")
+                for name, value in scope.get("headers", ())
+                if name.lower() == b"authorization"
+            ),
+            None,
+        )
+        service = _valid_bearer_token(authorization, self.api_tokens)
+        capacity = self.service_capacity if service else self.public_capacity
+        request_class = "service" if service else "public"
+        if not capacity.try_acquire():
+            response = JSONResponse(
+                status_code=503,
+                content={"detail": "request capacity is temporarily unavailable"},
+                headers={
+                    "Cache-Control": "no-store",
+                    "Retry-After": "1",
+                    "X-Overload-Reason": f"{request_class}-capacity",
+                },
+            )
+            await response(scope, receive, send)
+            return
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            capacity.release()
+
+    @staticmethod
+    def _protected_path(path: str) -> bool:
+        return path in {"/v1/search", "/v1/records", "/mcp"} or path.startswith(
+            "/mcp/"
+        )
+
+
+@dataclass(frozen=True)
+class _PendingAdmission:
+    request: AdmissionRequest
+    future: asyncio.Future[Admission]
+
+
+class _ControlBatcher:
+    """Commit concurrent exact quota outcomes in one control transaction."""
+
+    def __init__(self, control: ControlDatabase, window_seconds: float) -> None:
+        self.control = control
+        self.window_seconds = window_seconds
+        self._pending: list[_PendingAdmission] = []
+        self._drain_task: asyncio.Task[None] | None = None
+
+    async def admit(self, request: AdmissionRequest) -> Admission:
+        future = asyncio.get_running_loop().create_future()
+        self._pending.append(_PendingAdmission(request, future))
+        if self._drain_task is None:
+            self._drain_task = asyncio.create_task(self._drain())
+        return await future
+
+    async def _drain(self) -> None:
+        try:
+            while self._pending:
+                await asyncio.sleep(self.window_seconds)
+                selected = [item for item in self._pending if not item.future.cancelled()]
+                self._pending.clear()
+                if not selected:
+                    continue
+                try:
+                    outcomes = await asyncio.to_thread(
+                        self.control.admit_many,
+                        [item.request for item in selected],
+                    )
+                except Exception as error:
+                    for item in selected:
+                        if not item.future.cancelled():
+                            item.future.set_exception(error)
+                    continue
+                for item, outcome in zip(selected, outcomes, strict=True):
+                    if item.future.cancelled():
+                        continue
+                    if isinstance(outcome, Exception):
+                        item.future.set_exception(outcome)
+                    else:
+                        item.future.set_result(outcome)
+        finally:
+            self._drain_task = None
+            if self._pending:
+                self._drain_task = asyncio.create_task(self._drain())
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -234,6 +372,18 @@ def _csv_environment(name: str, defaults: list[str]) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _valid_bearer_token(
+    authorization: str | None,
+    configured_tokens: Iterable[str],
+) -> bool:
+    if not authorization or not authorization.startswith("Bearer "):
+        return False
+    candidate = authorization.removeprefix("Bearer ").strip()
+    return bool(candidate) and any(
+        secrets.compare_digest(candidate, token) for token in configured_tokens
+    )
+
+
 def create_app(
     database_path: str | Path | None = None,
     *,
@@ -245,6 +395,8 @@ def create_app(
     allowed_origins: list[str] | None = None,
     read_only_index: bool | None = None,
     enqueue_refresh: bool | None = None,
+    public_inflight_limit: int | None = None,
+    service_inflight_limit: int | None = None,
 ) -> FastAPI:
     if daily_request_limit < 1:
         raise ValueError("daily_request_limit must be positive")
@@ -255,6 +407,18 @@ def create_app(
         else _csv_environment("CTLOGS_API_TOKENS", [])
     )
     configured_tokens = [token for token in configured_tokens if token]
+    public_capacity_limit = (
+        public_inflight_limit
+        if public_inflight_limit is not None
+        else _get_env_int("CTLOGS_PUBLIC_INFLIGHT_LIMIT", 80)
+    )
+    service_capacity_limit = (
+        service_inflight_limit
+        if service_inflight_limit is not None
+        else _get_env_int("CTLOGS_SERVICE_INFLIGHT_LIMIT", 16)
+    )
+    if public_capacity_limit < 1 or service_capacity_limit < 1:
+        raise ValueError("request in-flight limits must be positive")
     authenticated_limit = (
         token_request_limit
         if token_request_limit is not None
@@ -293,14 +457,18 @@ def create_app(
         if enqueue_refresh is not None
         else _enabled("CTLOGS_ENQUEUE_SEARCH_REFRESH", True)
     )
-    control_deadline = _get_env_float("CTLOGS_CONTROL_DEADLINE_SECONDS", 0.075)
+    control_batch_window = _get_env_float(
+        "CTLOGS_CONTROL_BATCH_WINDOW_SECONDS", 0.002
+    )
+    if control_batch_window < 0:
+        raise ValueError("control batch window must not be negative")
     catalog_deadline = _get_env_float("CTLOGS_CATALOG_DEADLINE_SECONDS", 1.0)
     page_limit = _get_env_int("CTLOGS_MAX_PAGE_SIZE", 5_000)
     mcp_result_limit = _get_env_int("CTLOGS_MCP_RESULT_LIMIT", 100_000)
-    # SQLite has one writer. Serializing admission in-process avoids turning a
-    # small exact counter update into competing writer retries under a burst.
-    control_slots = asyncio.Semaphore(_get_env_int("CTLOGS_CONTROL_CONCURRENCY", 1))
-    catalog_slots = asyncio.Semaphore(_get_env_int("CTLOGS_CATALOG_CONCURRENCY", 8))
+    control_batcher = _ControlBatcher(control, control_batch_window)
+    # The read path is small and CPU-heavy enough that concurrent SQLite
+    # readers lose badly to one serialized reader under a synchronized burst.
+    catalog_slots = asyncio.Semaphore(_get_env_int("CTLOGS_CATALOG_CONCURRENCY", 1))
     stream_slots = asyncio.Semaphore(_get_env_int("CTLOGS_STREAM_CONCURRENCY", 1))
     mcp = MCPServer(
         "Subfinder",
@@ -311,14 +479,11 @@ def create_app(
     )
 
     def quota_subject(client_ip: str, authorization: str | None = None) -> tuple[str, int]:
-        if authorization and authorization.startswith("Bearer "):
+        if _valid_bearer_token(authorization, configured_tokens):
+            assert authorization is not None
             candidate = authorization.removeprefix("Bearer ").strip()
-            if any(
-                secrets.compare_digest(candidate, token)
-                for token in configured_tokens
-            ):
-                subject = "token:" + hashlib.sha256(candidate.encode()).hexdigest()
-                return subject, authenticated_limit
+            subject = "token:" + hashlib.sha256(candidate.encode()).hexdigest()
+            return subject, authenticated_limit
         return client_ip, daily_request_limit
 
     async def admit(
@@ -329,24 +494,21 @@ def create_app(
         refresh: bool,
     ) -> Admission:
         subject, limit = quota_subject(client_ip, authorization)
-        async with control_slots:
-            return await asyncio.wait_for(
-                asyncio.to_thread(
-                    control.admit,
-                    subject,
-                    limit,
-                    apex,
-                    enqueue_refresh=refresh and configured_enqueue_refresh,
-                ),
-                timeout=control_deadline,
+        return await control_batcher.admit(
+            AdmissionRequest(
+                subject,
+                limit,
+                apex,
+                enqueue_refresh=refresh and configured_enqueue_refresh,
             )
+        )
 
     async def catalog_call(function, *args, **kwargs):
-        async with catalog_slots:
-            return await asyncio.wait_for(
-                asyncio.to_thread(partial(function, *args, **kwargs)),
-                timeout=catalog_deadline,
-            )
+        await asyncio.wait_for(catalog_slots.acquire(), timeout=catalog_deadline)
+        try:
+            return await asyncio.to_thread(partial(function, *args, **kwargs))
+        finally:
+            catalog_slots.release()
 
     @mcp.tool()
     async def search(apex: str, ctx: Context) -> list[str]:
@@ -414,9 +576,19 @@ def create_app(
             yield
 
     app = FastAPI(title="Subfinder API", version="1.0.0", lifespan=lifespan)
+    public_capacity = _ImmediateCapacity(public_capacity_limit)
+    service_capacity = _ImmediateCapacity(service_capacity_limit)
+    app.add_middleware(
+        _RequestCapacityMiddleware,
+        public_capacity=public_capacity,
+        service_capacity=service_capacity,
+        api_tokens=tuple(configured_tokens),
+    )
     app.state.database = database
     app.state.control_database = control
     app.state.mcp = mcp
+    app.state.public_request_capacity = public_capacity
+    app.state.service_request_capacity = service_capacity
 
     @app.get("/health")
     async def health() -> PlainTextResponse:
@@ -471,11 +643,13 @@ def create_app(
         apex: str,
     ) -> IndexRecordsResponse:
         """Read local index records and source provenance without discovery."""
+        started = time.perf_counter()
         try:
             canonical = normalize_apex(apex)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
+        admission_started = time.perf_counter()
         try:
             admission = await admit(
                 _client_ip(request),
@@ -495,6 +669,7 @@ def create_app(
                 detail="search admission is temporarily unavailable",
                 headers={"Retry-After": "1"},
             ) from error
+        admission_ms = (time.perf_counter() - admission_started) * 1_000
 
         response.headers.update(_quota_headers(admission.quota))
         response.headers["Cache-Control"] = "no-cache"
@@ -520,14 +695,22 @@ def create_app(
                 ],
             )
 
+        catalog_started = time.perf_counter()
         try:
-            return await catalog_call(build_records)
+            records = await catalog_call(build_records)
         except (sqlite3.Error, TimeoutError, RuntimeError) as error:
             raise HTTPException(
                 status_code=503,
                 detail="catalog is temporarily unavailable",
                 headers={"Retry-After": "1"},
             ) from error
+        catalog_ms = (time.perf_counter() - catalog_started) * 1_000
+        total_ms = (time.perf_counter() - started) * 1_000
+        response.headers["Server-Timing"] = (
+            f"admission;dur={admission_ms:.3f}, "
+            f"catalog;dur={catalog_ms:.3f}, total;dur={total_ms:.3f}"
+        )
+        return records
 
     @app.get("/v1/search")
     async def search_api(

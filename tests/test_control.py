@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from ctlogs.control import ControlDatabase, ControlUnavailable
+from ctlogs.control import (
+    Admission,
+    AdmissionRequest,
+    ControlDatabase,
+    ControlUnavailable,
+)
 from ctlogs.database import QuotaExceeded
 
 
@@ -51,6 +56,36 @@ def test_admission_is_atomic_across_threads(tmp_path: Path) -> None:
 
     assert accepted.count(True) == 20
     assert accepted.count(False) == 30
+
+
+def test_batched_admission_preserves_order_quota_and_refresh_deduplication(
+    tmp_path: Path,
+) -> None:
+    control = ControlDatabase(tmp_path / "batch.sqlite3")
+    control.initialize()
+    now = datetime(2026, 8, 26, tzinfo=UTC)
+
+    outcomes = control.admit_many(
+        [
+            AdmissionRequest("one", 2, "example.com"),
+            AdmissionRequest("one", 2, "example.com"),
+            AdmissionRequest("one", 2, "other.example"),
+            AdmissionRequest("two", 1, "other.example", enqueue_refresh=False),
+        ],
+        now=now,
+    )
+
+    assert isinstance(outcomes[0], Admission)
+    assert outcomes[0].quota.remaining == 1
+    assert outcomes[0].refresh_status == "queued"
+    assert isinstance(outcomes[1], Admission)
+    assert outcomes[1].quota.remaining == 0
+    assert outcomes[1].refresh_status == "already-pending"
+    assert isinstance(outcomes[2], QuotaExceeded)
+    assert isinstance(outcomes[3], Admission)
+    assert outcomes[3].quota.remaining == 0
+    assert outcomes[3].refresh_status == "disabled"
+    assert control.queued_refreshes(10) == ["example.com"]
 
 
 def test_refresh_queue_is_bounded_and_rotates_incomplete_work(tmp_path: Path) -> None:

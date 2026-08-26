@@ -114,13 +114,65 @@ or a WAL-backed index read.
 
 MCP exposes one Streamable HTTP tool `search` (`{ "apex": "example.com" }` → `string[]`).
 
-`GET /v1/search` and `POST /mcp` share one atomic allowance of 1,000 successful searches per client IP per UTC day (`request_counts`). Configure the reverse proxy to pass the real peer address to Uvicorn. Do not trust a client-supplied forwarding header.
+`GET /v1/search`, `GET /v1/records`, and `POST /mcp` share one atomic
+allowance of 1,000 successful searches per client IP per UTC day
+(`request_counts`).
 
 Deployment operators can issue optional bearer tokens with a separate daily
 allowance. Configure accepted tokens with `CTLOGS_API_TOKENS` and the limit for
 each token with
 `CTLOGS_TOKEN_REQUEST_LIMIT`. The database stores only a SHA-256 token digest
 as the quota identity.
+
+### Bound request load
+
+The API accepts at most 80 public requests and 16 requests with a valid service
+token at one time. These limits cover the complete response, including a
+streamed response. A full class returns `503`, `Retry-After: 1`, and
+`X-Overload-Reason: public-capacity` or `service-capacity`. A request rejected
+at this boundary does not consume quota. Quota exhaustion remains a distinct
+`429` response with the exact limit, remaining count, reset time, and retry
+time.
+
+Set `CTLOGS_PUBLIC_INFLIGHT_LIMIT` and `CTLOGS_SERVICE_INFLIGHT_LIMIT` to
+change the two limits. The default catalog concurrency is one. Local burst
+tests show that 70 reads take about 55 ms sequentially and about 379 ms with
+eight reader threads. Keep `CTLOGS_CATALOG_CONCURRENCY=1` unless a benchmark
+on the deployment host proves that a different value is faster.
+
+Concurrent quota checks wait 2 ms so the control database can commit them in
+one ordered transaction. `CTLOGS_CONTROL_BATCH_WINDOW_SECONDS` changes that
+window. The 80-public and 16-service request limits bound the batch queue.
+Canceled requests leave the batch before transaction selection. After a
+request enters a control transaction, its exact quota outcome is final even if
+the client disconnects before it receives the response.
+
+Run one Uvicorn worker. The in-process request limits apply per worker. Put a
+global connection and request-rate limit in NGINX before you add workers.
+Keep `/health` outside those limits so an overloaded instance remains
+observable.
+
+### Configure trusted client addresses
+
+NGINX must replace client-supplied forwarding headers. Do not append an
+untrusted chain.
+
+```nginx
+proxy_set_header Forwarded "";
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+Set `CTLOGS_FORWARDED_ALLOW_IPS` to the exact socket peer that Uvicorn sees for
+NGINX. The safe default is `127.0.0.1`. A host NGINX that connects through a
+Docker-published port usually appears as the gateway address of the container
+network, not as `127.0.0.1`. Do not use `*`. Another container on the private
+data network could then forge a public client address and avoid its quota.
+
+If a CDN connects to NGINX, configure the NGINX real-IP module with only the
+CDN's published address ranges. NGINX must resolve the client address before
+it sets `X-Forwarded-For` for Subfinder.
 
 `GET /v1/stats` returns whole-index counts (`apex_count`, `hostname_count`,
 `dated_hostname_count`, `source_count`), the certificate transparency subset
@@ -254,6 +306,30 @@ python scripts/benchmark_search.py --url http://127.0.0.1:8200 \
   --apex zerofox.com --requests 100 --concurrency 8 \
   --max-ttfb-p95-ms 25 --max-total-p95-ms 30
 ```
+
+Run the mixed public and Threat Hunter burst gate only against a loopback URL.
+The script refuses any other target. The committed 70-domain cohort comes from
+the final archived Alexa Top Sites data and pins the source commit in the
+fixture header.
+
+```bash
+python scripts/benchmark_bursts.py \
+  --url http://127.0.0.1:8200 \
+  --domains tests/fixtures/alexa_top_70_2023-02-07.txt \
+  --scenario distinct \
+  --service-token "$CTLOGS_TEST_SERVICE_TOKEN" \
+  --require-all-success \
+  --max-public-p95-ms 250 \
+  --max-service-p95-ms 250 \
+  --max-health-p99-ms 50
+```
+
+Use `--scenario same-apex` for the repeated-apex case. Use `--scenario bursts`
+for seven groups of ten public requests separated by 100 ms. By default, the
+harness sends one benchmark-network client address per public request through
+`X-Forwarded-For`. Add `--identity-mode shared` to model one client issuing the
+entire public workload. Uvicorn accepts either form only when the loopback test
+peer is trusted.
 
 Import configured global artifacts immediately when an unscheduled run is
 needed. Repeating the same file or ETag is a no-op.

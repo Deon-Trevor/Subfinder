@@ -164,6 +164,12 @@ def acceptance_failures(result: dict[str, Any], args: argparse.Namespace) -> lis
         observed = result["latency_ms"][role][metric]
         if limit is not None and (observed is None or observed > limit):
             failures.append(f"{role} {metric} {observed} exceeded {limit} ms")
+    health_samples = sum(result["health_status_counts"].values())
+    minimum_health_samples = getattr(args, "min_health_samples", 20)
+    if args.max_health_p99_ms is not None and health_samples < minimum_health_samples:
+        failures.append(
+            f"health sample count {health_samples} was below {minimum_health_samples}"
+        )
     return failures
 
 
@@ -175,6 +181,7 @@ def build_public_work(
     seed: int,
     burst_size: int,
     burst_gap: float,
+    identity_mode: str = "unique",
 ) -> tuple[list[WorkItem], dict[str, Any]]:
     rng = random.Random(seed)
     metadata: dict[str, Any] = {}
@@ -207,7 +214,7 @@ def build_public_work(
             apex,
             "/v1/search",
             delay,
-            load_test_identity(index),
+            load_test_identity(0 if identity_mode == "shared" else index),
         )
         for index, (apex, delay) in enumerate(zip(apexes, delays, strict=True))
     ], metadata
@@ -332,8 +339,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         seed=args.seed,
         burst_size=args.burst_size,
         burst_gap=args.burst_gap,
+        identity_mode=args.identity_mode,
     )
-    spread = max(0.1, max((item.delay_seconds for item in public), default=0.0))
+    spread = max((item.delay_seconds for item in public), default=0.0)
     service = build_service_work(
         domains,
         args.service_requests,
@@ -407,8 +415,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "page_limit": args.page_limit,
             "seed": args.seed,
             "forwarded_identities": True,
+            "identity_mode": args.identity_mode,
         },
-        "workload": metadata,
+        "workload": {**metadata, "service_spread_seconds": spread},
         "duration_ms": duration_ms,
         "status_counts": {
             role: dict(sorted(Counter(str(item.status) for item in role_samples).items()))
@@ -464,9 +473,16 @@ def main() -> None:
     parser.add_argument("--page-limit", type=int, default=500)
     parser.add_argument("--burst-size", type=int, default=10)
     parser.add_argument("--burst-gap", type=float, default=0.1)
-    parser.add_argument("--health-interval", type=float, default=0.005)
+    parser.add_argument("--health-interval", type=float, default=0.001)
+    parser.add_argument("--min-health-samples", type=int, default=20)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=20260826)
+    parser.add_argument(
+        "--identity-mode",
+        choices=("unique", "shared"),
+        default="unique",
+        help="Use a distinct public client identity per request or one shared identity",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--require-all-success", action="store_true")
@@ -489,6 +505,8 @@ def main() -> None:
             parser.error(f"{name.replace('_', '-')} must be positive")
     if args.service_requests < 0 or args.client_concurrency < 0:
         parser.error("service-requests and client-concurrency cannot be negative")
+    if args.min_health_samples < 1:
+        parser.error("min-health-samples must be positive")
     if args.burst_gap < 0 or args.health_interval <= 0 or args.timeout <= 0:
         parser.error("timing values must be positive (burst-gap may be zero)")
     for name in ("max_public_p95_ms", "max_service_p95_ms", "max_health_p99_ms"):
