@@ -243,7 +243,23 @@
       <div class="shape-axis" id="shape-axis" aria-hidden="true"></div>
     </div>
 
-    <div class="ledger" id="ledger"></div>
+    <!-- The record sits behind glass. What shows is the head of the register -
+         the oldest names on file - and the rest is one click away in the shelf
+         rather than thousands of rows further down this page. -->
+    <div class="case" id="case">
+      <div class="ledger" id="ledger"></div>
+
+      <div class="case-lip" id="case-lip" hidden>
+        <button class="case-open" id="case-open" type="button" aria-haspopup="dialog">
+          <span class="case-open-label">Open the full record</span>
+          <span class="case-open-more mono" id="case-more"></span>
+          <svg class="case-open-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 19V5M5 12l7-7 7 7"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+
     <div id="register-state" role="status" aria-live="polite"></div>
   </section>
 
@@ -305,6 +321,61 @@ curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com&amp;form
     </footer>
   </div>
 </main>
+
+<!-- The shelf: the whole register, lifted off the page rather than poured
+     into it. A modal <dialog> is what makes it behave - the page behind goes
+     inert, Escape closes it, and focus cannot wander out the back. Rows are
+     rendered into it on open and dropped on close, so a result running to tens
+     of thousands of names is never held in the document twice. -->
+<dialog class="shelf" id="shelf" aria-labelledby="shelf-heading">
+  <div class="shelf-panel">
+    <div class="shelf-grip" aria-hidden="true"></div>
+
+    <header class="shelf-head">
+      <div class="shelf-head-main">
+        <p class="eyebrow">The full record</p>
+        <h2 class="shelf-title" id="shelf-heading" tabindex="-1"><span class="apex mono" id="shelf-apex"></span></h2>
+        <p class="shelf-count mono" id="shelf-count"></p>
+      </div>
+
+      <div class="shelf-head-tools">
+        <div class="filter">
+          <label class="visually-hidden" for="shelf-filter">Filter these names</label>
+          <input class="filter-input mono" id="shelf-filter" type="search" placeholder="filter names"
+                 spellcheck="false" autocomplete="off" autocapitalize="off">
+        </div>
+        <div class="register-tools">
+          <span class="tool-group">
+            <span class="tool-group-label">Copy</span>
+            <button class="tool" type="button" data-copy="text">list</button>
+            <button class="tool" type="button" data-copy="json">JSON</button>
+          </span>
+          <span class="tool-group">
+            <span class="tool-group-label">Download</span>
+            <button class="tool" type="button" data-download="text">.txt</button>
+            <button class="tool" type="button" data-download="json">.json</button>
+          </span>
+        </div>
+      </div>
+
+      <button class="shelf-close" id="shelf-close" type="button" aria-label="Close the record">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18"></path>
+        </svg>
+      </button>
+    </header>
+
+    <!-- Years as a jump rail rather than a legend: the bar carries the volume
+         the histogram above carries, and pressing it moves the scroll to that
+         year instead of asking the reader to hunt for it. -->
+    <div class="shelf-rail" id="shelf-rail" aria-label="Jump to a year" hidden></div>
+
+    <div class="shelf-body" id="shelf-body">
+      <div class="ledger" id="shelf-ledger"></div>
+      <div id="shelf-state" role="status" aria-live="polite"></div>
+    </div>
+  </div>
+</dialog>
 
 <!-- Outside the results section, which is hidden until a search: a live region
      inside a hidden ancestor is a live region nothing announces. -->

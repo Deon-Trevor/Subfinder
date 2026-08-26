@@ -22,6 +22,12 @@ const POLL_MAX_MS = 5 * 60_000;
 const FETCH_TIMEOUT_MS = 15_000;
 const FILTER_DEBOUNCE_MS = 120;
 const SUBMIT_LABEL = "Enumerate";
+/* How much of the register the page itself shows. Rows arrive oldest first, so
+   what sits behind the glass is the head of the record - the names that have
+   been on file longest - and the rest is in the shelf. Keeping the page to a
+   fixed slice is also what stops a 40,000-name apex from turning the landing
+   page into a scroll it takes a minute to get out of. */
+const TEASER_ROWS = 18;
 
 const el = {
   form: document.getElementById("search-form"),
@@ -42,6 +48,20 @@ const el = {
   filter: document.getElementById("filter"),
   toolStatus: document.getElementById("tool-status"),
   ledger: document.getElementById("ledger"),
+  case: document.getElementById("case"),
+  caseLip: document.getElementById("case-lip"),
+  caseOpen: document.getElementById("case-open"),
+  caseMore: document.getElementById("case-more"),
+  shelf: document.getElementById("shelf"),
+  shelfHeading: document.getElementById("shelf-heading"),
+  shelfApex: document.getElementById("shelf-apex"),
+  shelfCount: document.getElementById("shelf-count"),
+  shelfFilter: document.getElementById("shelf-filter"),
+  shelfRail: document.getElementById("shelf-rail"),
+  shelfBody: document.getElementById("shelf-body"),
+  shelfLedger: document.getElementById("shelf-ledger"),
+  shelfState: document.getElementById("shelf-state"),
+  shelfClose: document.getElementById("shelf-close"),
   shape: document.getElementById("shape"),
   shapeBars: document.getElementById("shape-bars"),
   shapeAxis: document.getElementById("shape-axis"),
@@ -419,14 +439,30 @@ function renderShape(rows) {
   el.shape.hidden = false;
 }
 
-function renderLedger(apex, rows) {
+/* Renders into whichever surface is live - the page's case or the shelf - and
+   returns how many rows it actually drew, which is what the lip reports as
+   still being behind the glass. `limit` cuts the list off after a whole number
+   of rows; the year it lands in keeps its true count in the gutter, because
+   that year does hold that many names whether or not this pane lists them. */
+function renderLedger(apex, rows, target, limit = Infinity) {
   // rows arrive oldest-first with undated names last, so a single pass groups them
   const groups = [];
+  let drawn = 0;
   for (const row of rows) {
+    if (drawn >= limit) break;
     const year = yearOf(row.first_seen);
     const tail = groups[groups.length - 1];
     if (!tail || tail.year !== year) groups.push({ year, rows: [row] });
     else tail.rows.push(row);
+    drawn += 1;
+  }
+
+  // Second pass for the totals, so a truncated final year still reports the
+  // whole year rather than the slice that fitted.
+  const totals = new Map();
+  for (const row of rows) {
+    const key = yearOf(row.first_seen);
+    totals.set(key, (totals.get(key) || 0) + 1);
   }
 
   const suffix = `.${apex}`;
@@ -438,6 +474,11 @@ function renderLedger(apex, rows) {
   for (const group of groups) {
     const section = document.createElement("section");
     section.className = "ledger-year";
+    // The rail jumps by this, so every year has to be addressable by name.
+    section.dataset.year = group.year === null ? "undated" : String(group.year);
+    // What the section stands in at while it is scrolled out of view. See
+    // contain-intrinsic-size in the stylesheet.
+    section.style.setProperty("--rows", String(group.rows.length));
 
     const gutter = document.createElement("div");
     gutter.className = "ledger-gutter";
@@ -453,7 +494,7 @@ function renderLedger(apex, rows) {
 
     const count = document.createElement("div");
     count.className = "ledger-gutter-count";
-    count.textContent = plural(group.rows.length, "name");
+    count.textContent = plural(totals.get(group.year) || group.rows.length, "name");
     gutter.append(label, count);
 
     const list = document.createElement("div");
@@ -492,10 +533,11 @@ function renderLedger(apex, rows) {
     fragment.append(section);
   }
 
-  el.ledger.replaceChildren(fragment);
+  target.replaceChildren(fragment);
+  return drawn;
 }
 
-function renderEmpty(apex) {
+function renderEmpty(apex, target) {
   const box = document.createElement("div");
   box.className = "state";
   const title = document.createElement("p");
@@ -505,10 +547,10 @@ function renderEmpty(apex) {
   body.className = "state-body";
   body.textContent = `The index holds no name under ${apex}. That is an answer, not an error, and the domain was not contacted to produce it.`;
   box.append(title, body);
-  el.registerState.replaceChildren(box);
+  target.replaceChildren(box);
 }
 
-function renderNoMatches(term) {
+function renderNoMatches(term, target) {
   const box = document.createElement("div");
   box.className = "state";
   const title = document.createElement("p");
@@ -518,7 +560,7 @@ function renderNoMatches(term) {
   body.className = "state-body";
   body.textContent = `Nothing in this result contains "${term}". Clearing the filter brings the whole list back; it never returns to the API.`;
   box.append(title, body);
-  el.registerState.replaceChildren(box);
+  target.replaceChildren(box);
 }
 
 function renderLoading() {
@@ -533,11 +575,11 @@ function renderLoading() {
   el.registerState.replaceChildren(box);
 }
 
-function setCount(total, visible, dated) {
-  el.registerCount.replaceChildren();
+function setCount(node, total, visible, dated) {
+  node.replaceChildren();
   if (!total) return;
 
-  el.registerCount.append(document.createTextNode(
+  node.append(document.createTextNode(
     `${plural(total, "name")} · ${dated.toLocaleString("en")} dated`,
   ));
   if (visible === total) return;
@@ -545,7 +587,7 @@ function setCount(total, visible, dated) {
   const filtered = document.createElement("span");
   filtered.className = "is-filtered";
   filtered.textContent = ` · ${visible.toLocaleString("en")} shown`;
-  el.registerCount.append(filtered);
+  node.append(filtered);
 }
 
 /* Filtering works on rows already in hand, so it costs nothing against the
@@ -556,25 +598,254 @@ function visibleRows() {
   return { rows: current.rows.filter((row) => row.sub.includes(term)), term };
 }
 
-function applyFilter() {
+/* One draw of both surfaces. The page keeps its slice whether the shelf is up
+   or not - eighteen rows cost nothing to keep, and leaving them in place is
+   what stops the ground from shifting under the shelf and jumping when it
+   closes. The shelf holds the whole result, and only while it is open. */
+function paint() {
   const { rows, term } = visibleRows();
   const dated = current.rows.reduce((n, row) => n + (row.first_seen ? 1 : 0), 0);
-  setCount(current.rows.length, rows.length, dated);
+  const open = el.shelf.open;
+
+  setCount(el.registerCount, current.rows.length, rows.length, dated);
+  setCount(el.shelfCount, current.rows.length, rows.length, dated);
+
+  // The message goes to the live region of the surface being read. Announcing
+  // it in both would say it twice to a screen reader.
+  const state = open ? el.shelfState : el.registerState;
+  (open ? el.registerState : el.shelfState).replaceChildren();
 
   if (!rows.length) {
     el.ledger.replaceChildren();
-    renderNoMatches(term);
+    el.shelfLedger.replaceChildren();
+    uncase();
+    renderNoMatches(term, state);
     return;
   }
 
-  el.registerState.replaceChildren();
-  renderLedger(current.apex, rows);
+  state.replaceChildren();
+
+  const drawn = renderLedger(current.apex, rows, el.ledger, TEASER_ROWS);
+  const behind = rows.length - drawn;
+  el.case.classList.toggle("is-cased", behind > 0);
+  el.caseLip.hidden = behind === 0;
+  if (behind > 0) el.caseMore.textContent = `+${commas(behind)} more`;
+
+  if (open) {
+    renderLedger(current.apex, rows, el.shelfLedger);
+    renderRail(rows);
+  } else {
+    // Tens of thousands of rows go back to the collector the moment the shelf
+    // is closed rather than sitting in a hidden dialog for the rest of the visit.
+    el.shelfLedger.replaceChildren();
+    el.shelfRail.replaceChildren();
+    el.shelfRail.hidden = true;
+  }
 }
 
+/* Back to a bare list: no frame, no fade, no lip, no rail. What is on screen
+   is the whole of what there is, so nothing should suggest more behind it. */
+function uncase() {
+  el.case.classList.remove("is-cased");
+  el.caseLip.hidden = true;
+  el.shelfRail.replaceChildren();
+  el.shelfRail.hidden = true;
+}
+
+/* Both fields carry the same term, so whichever one is on screen is the one
+   that filters, and the shelf opens onto the filter the page already had. */
 let filterTimer = null;
-el.filter.addEventListener("input", () => {
-  clearTimeout(filterTimer);
-  filterTimer = setTimeout(applyFilter, FILTER_DEBOUNCE_MS);
+function bindFilter(input, mirror) {
+  input.addEventListener("input", () => {
+    mirror.value = input.value;
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(paint, FILTER_DEBOUNCE_MS);
+  });
+}
+
+bindFilter(el.filter, el.shelfFilter);
+bindFilter(el.shelfFilter, el.filter);
+
+/* ── the year rail ───────────────────────────────────────────────── */
+/* The histogram on the page says how the record is shaped; in the shelf that
+   same shape is the way through it. One key per year in the result, sized to
+   that year's share of it, and pressing one moves the scroll to that year. */
+let railFrame = 0;
+let railSettle = null;
+
+function renderRail(rows) {
+  const counts = new Map();
+  for (const row of rows) {
+    const year = yearOf(row.first_seen);
+    counts.set(year, (counts.get(year) || 0) + 1);
+  }
+
+  // A single year is not a rail; it is a label the ledger already carries.
+  if (counts.size < 2) {
+    el.shelfRail.replaceChildren();
+    el.shelfRail.hidden = true;
+    return;
+  }
+
+  let peak = 0;
+  for (const count of counts.values()) if (count > peak) peak = count;
+
+  const fragment = document.createDocumentFragment();
+  for (const [year, count] of counts) {
+    const key = year === null ? "undated" : String(year);
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "rail-year";
+    button.dataset.jump = key;
+    button.title = `${year === null ? "Undated" : year}: ${plural(count, "name")}`;
+
+    const track = document.createElement("span");
+    track.className = "rail-track";
+    const bar = document.createElement("span");
+    bar.className = "rail-bar";
+    // A floor of 8% so a year holding one name is still a target you can hit.
+    bar.style.setProperty("--h", `${Math.max(8, (count / peak) * 100)}%`);
+    track.append(bar);
+
+    const label = document.createElement("span");
+    label.className = "rail-label";
+    label.textContent = year === null ? "n/d" : `'${key.slice(2)}`;
+
+    button.append(track, label);
+    fragment.append(button);
+  }
+
+  el.shelfRail.replaceChildren(fragment);
+  el.shelfRail.hidden = false;
+  markYear();
+}
+
+/* Lights the key for the year currently at the top of the scroll, so the rail
+   reports where you are as well as taking you somewhere. Read from the scroll
+   position rather than observed: the sections are content-visibility boxes
+   whose measured size only resolves as they are reached, and an intersection
+   observer over them loses the year on a jump that skips a decade. Twenty-odd
+   sections measured once a frame is cheap, and it is always right. */
+function markYear() {
+  railFrame = 0;
+  const band = el.shelfBody.getBoundingClientRect().top + 8;
+  let key = el.shelfLedger.firstElementChild?.dataset.year ?? null;
+
+  // Sections are in document order, so the last one that has passed the band
+  // is the one being read.
+  for (const section of el.shelfLedger.children) {
+    if (section.getBoundingClientRect().top > band) break;
+    key = section.dataset.year;
+  }
+
+  for (const button of el.shelfRail.children) {
+    button.classList.toggle("is-here", button.dataset.jump === key);
+  }
+}
+
+el.shelfBody.addEventListener("scroll", () => {
+  if (!railFrame) railFrame = requestAnimationFrame(markYear);
+  // Sections resolve their real heights as they are reached, which can settle
+  // after the frame the scroll event was raised in. A second read once things
+  // have stopped moving is what keeps the rail from lighting the year the
+  // estimate said you were in.
+  clearTimeout(railSettle);
+  railSettle = setTimeout(markYear, 140);
+}, { passive: true });
+
+/* Instant, not smooth. A jump across twenty years of a busy apex is twenty
+   thousand pixels, which is a long ride to sit through, and the rows on the
+   way are content-visibility sections whose real heights only resolve as they
+   are reached - a smooth run retargets under itself and stalls short.
+   One write is not enough for the same reason: the first landing is computed
+   from estimated heights, so it settles a little off. Reading scrollTop back
+   forces the layout that the write invalidated, which resolves the sections
+   just passed, and the next pass corrects against their real heights. Three
+   or four passes converge; the loop also stops the moment the scroller
+   refuses to move, which is how it gives up at either end. */
+function jumpTo(section) {
+  let stuck = -1;
+  for (let pass = 0; pass < 16; pass += 1) {
+    const delta = section.getBoundingClientRect().top - el.shelfBody.getBoundingClientRect().top;
+    if (Math.abs(delta) < 2) break;
+
+    const before = el.shelfBody.scrollTop;
+    el.shelfBody.scrollTop = before + delta;
+    const after = el.shelfBody.scrollTop;
+
+    // A write that lands short is not a dead end. Until a section has been
+    // rendered once it stands in at its estimated height, so the scroller is
+    // shorter than the list really is and the write clamps - but the clamp
+    // still renders everything it passed, which grows the scroller and lets
+    // the next pass reach further. Only a pass that moves nothing twice
+    // running means there is genuinely nothing left to give.
+    if (after === before && after === stuck) break;
+    stuck = before;
+  }
+  markYear();
+}
+
+el.shelfRail.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-jump]");
+  if (!button) return;
+  const section = el.shelfLedger.querySelector(`[data-year="${button.dataset.jump}"]`);
+  if (section) jumpTo(section);
+});
+
+/* ── opening and closing the shelf ───────────────────────────────── */
+/* showModal is what earns the shelf its behaviour: the page behind it goes
+   inert, Escape closes it, focus cannot tab out the back, and ::backdrop is a
+   real layer rather than a div pretending to be one. */
+function openShelf() {
+  if (!current.rows.length || el.shelf.open) return;
+  el.shelfApex.textContent = current.apex;
+  el.shelf.showModal();
+  paint();
+  el.shelfBody.scrollTop = 0;
+  // The heading, not the filter: autofocusing a text field would throw up the
+  // keyboard on a phone and cover the record the reader just asked to see.
+  el.shelfHeading.focus({ preventScroll: true });
+}
+
+/* Every way out of the shelf lands here: the close button, a click on the
+   backdrop, and Escape - which the dialog handles itself and reports through
+   its close event. Dropping the rows is the point. A result that ran to tens
+   of thousands of names would otherwise sit in a hidden dialog for the rest of
+   the visit, and the page behind is already showing its own slice. */
+function closeShelf() {
+  // Already put away: nothing to close, no rows to drop, no focus to move.
+  if (!el.shelf.open && !el.shelfLedger.firstChild) return;
+  if (el.shelf.open) el.shelf.close();
+
+  cancelAnimationFrame(railFrame);
+  clearTimeout(railSettle);
+  railFrame = 0;
+  paint();
+
+  // Back to the control that opened it. If a filter has since shrunk the
+  // result below the glass there is no lip to return to, so the heading takes
+  // it rather than dropping focus on <body>.
+  const home = el.caseLip.hidden ? el.registerHeading : el.caseOpen;
+  home.focus({ preventScroll: true });
+}
+
+el.caseOpen.addEventListener("click", openShelf);
+el.shelfClose.addEventListener("click", closeShelf);
+el.shelf.addEventListener("close", closeShelf);
+
+/* Clicking off the shelf puts it away. The panel is the dialog's only child,
+   so a click landing on the dialog landed outside the panel - but the press
+   has to have started there too, or dragging a selection out of the list and
+   releasing on the backdrop would close it mid-copy. */
+let pressedOff = false;
+el.shelf.addEventListener("pointerdown", (event) => {
+  pressedOff = event.target === el.shelf;
+});
+
+el.shelf.addEventListener("click", (event) => {
+  if (pressedOff && event.target === el.shelf) closeShelf();
+  pressedOff = false;
 });
 
 function renderRegister(apex, rows) {
@@ -583,26 +854,31 @@ function renderRegister(apex, rows) {
   // A keystroke from the previous result must not re-filter this one.
   clearTimeout(filterTimer);
   el.filter.value = "";
+  el.shelfFilter.value = "";
   el.register.hidden = false;
   el.register.removeAttribute("aria-busy");
   el.registerApex.textContent = apex;
+  el.shelfApex.textContent = apex;
   el.registerState.replaceChildren();
-
-  const dated = rows.reduce((n, row) => n + (row.first_seen ? 1 : 0), 0);
-  setCount(rows.length, rows.length, dated);
+  el.shelfState.replaceChildren();
 
   el.apiLink.href = `${API_BASE}/v1/search?apex=${encodeURIComponent(apex)}&format=json&dates=1`;
   el.filterWrap.hidden = rows.length < 2;
 
   if (!rows.length) {
+    const dated = 0;
+    setCount(el.registerCount, 0, 0, dated);
+    setCount(el.shelfCount, 0, 0, dated);
     el.ledger.replaceChildren();
+    el.shelfLedger.replaceChildren();
+    uncase();
     el.shape.hidden = true;
-    renderEmpty(apex);
+    renderEmpty(apex, el.registerState);
     return;
   }
 
   renderShape(rows);
-  renderLedger(apex, rows);
+  paint();
 }
 
 function reveal() {
@@ -649,6 +925,8 @@ async function search(raw, { push = true } = {}) {
   el.register.setAttribute("aria-busy", "true");
   el.registerApex.textContent = apex;
   el.ledger.replaceChildren();
+  el.shelfLedger.replaceChildren();
+  uncase();
   el.shape.hidden = true;
   el.filterWrap.hidden = true;
   el.registerCount.replaceChildren();
@@ -737,6 +1015,9 @@ function syncInputs(apex) {
 }
 
 window.addEventListener("popstate", () => {
+  // A back step that changes the result must not leave the shelf up over it,
+  // holding the rows of the domain you just left.
+  closeShelf();
   const apex = new URLSearchParams(location.search).get("apex");
   if (!apex) {
     el.register.hidden = true;
@@ -754,6 +1035,13 @@ document.addEventListener("keydown", (event) => {
   const active = document.activeElement;
   if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
   event.preventDefault();
+  // With the shelf up, "/" belongs to the field inside it: the search fields on
+  // the page are inert and focusing one would do nothing visible.
+  if (el.shelf.open) {
+    el.shelfFilter.focus();
+    el.shelfFilter.select();
+    return;
+  }
   // Whichever field is on screen: the hero one near the top, the bar's below it.
   const field = el.topForm.hidden ? el.input : el.topInput;
   field.focus();
