@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import BaseModel
 
 from ctlogs.database import Database, Quota, QuotaExceeded
 from ctlogs.ingest.enrich import (
@@ -34,6 +35,7 @@ from ctlogs.ingest.enrich import (
 from ctlogs.web import mount_frontend
 
 DAILY_REQUEST_LIMIT = 1_000
+RECORDS_SCHEMA_VERSION = "subfinder.index-records.v1"
 LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 LOGGER = logging.getLogger("ctlogs.app")
 EXTRACT = tldextract.TLDExtract(
@@ -41,6 +43,24 @@ EXTRACT = tldextract.TLDExtract(
     include_psl_private_domains=True,
     cache_dir=None,
 )
+
+
+class SourceRecord(BaseModel):
+    source: str
+    first_seen: str | None
+    last_seen: str
+
+
+class HostnameRecord(BaseModel):
+    hostname: str
+    first_seen: str | None
+    sources: list[SourceRecord]
+
+
+class IndexRecordsResponse(BaseModel):
+    schema_version: Literal["subfinder.index-records.v1"] = RECORDS_SCHEMA_VERSION
+    apex: str
+    records: list[HostnameRecord]
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -365,6 +385,52 @@ def create_app(
                 "source_count": stats.source_count,
             },
             headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.get("/v1/records", response_model=IndexRecordsResponse)
+    async def index_records(
+        request: Request,
+        response: Response,
+        apex: str,
+    ) -> IndexRecordsResponse:
+        """Read local index records and source provenance without discovery."""
+        try:
+            canonical = normalize_apex(apex)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+        try:
+            quota = consume(
+                _client_ip(request),
+                request.headers.get("authorization"),
+            )
+        except QuotaExceeded as error:
+            raise HTTPException(
+                status_code=429,
+                detail="daily request limit exceeded",
+                headers=_retry_headers(error.quota),
+            ) from error
+
+        response.headers.update(_quota_headers(quota))
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["X-Subfinder-Schema-Version"] = RECORDS_SCHEMA_VERSION
+        return IndexRecordsResponse(
+            apex=canonical,
+            records=[
+                HostnameRecord(
+                    hostname=record.hostname,
+                    first_seen=record.first_seen,
+                    sources=[
+                        SourceRecord(
+                            source=source.source,
+                            first_seen=source.first_seen,
+                            last_seen=source.last_seen,
+                        )
+                        for source in record.sources
+                    ],
+                )
+                for record in database.records(canonical)
+            ],
         )
 
     @app.get("/v1/search")

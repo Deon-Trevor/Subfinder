@@ -22,12 +22,26 @@ entries. Docker Compose also starts the recurring non-CT scheduler. A standalone
 
 ```bash
 docker build -t ctlogs:latest .
-docker run -d -p 8200:8200 --name ctlogs ctlogs:latest
+docker run -d -p 127.0.0.1:8200:8200 --name ctlogs ctlogs:latest
 # or
+docker network create syncpundit-data-plane
 docker compose up -d --build
 ```
 
-The image runs `uvicorn ctlogs.app:app --host 0.0.0.0 --port 8200` with `CTLOGS_DB_PATH=/data/ctlogs.sqlite3` persisted in the `ctlogs-data` volume. Production auto-seeding is disabled. Set `CTLOGS_AUTO_SEED=1` only for a local fixture database.
+The image runs `uvicorn ctlogs.app:app --host 0.0.0.0 --port 8200` with
+`CTLOGS_DB_PATH=/data/ctlogs.sqlite3` persisted in the `ctlogs-data` volume.
+Compose publishes port 8200 only on host loopback for NGINX and attaches only
+the API container to the external `syncpundit-data-plane` network under the
+`subfinder-index` alias. Create that network once before the first deployment.
+Production auto-seeding is disabled. Set `CTLOGS_AUTO_SEED=1` only for a local
+fixture database.
+
+The first deployment of the serialized-writer release must stop every old API
+and scheduler container before starting the new set. Old processes do not know
+about the writer lock and must not overlap the replacement. `docker compose
+down` preserves the named data volume unless `--volumes` is supplied; after it
+finishes, run `docker compose up -d --build`. Later releases can use the normal
+Compose recreate path because every running writer then honors the same lock.
 
 Healthcheck: `curl -fsS http://127.0.0.1:8200/health`
 
@@ -53,6 +67,7 @@ GET /v1/search?apex=example.com
 GET /v1/search?apex=example.com&format=json
 GET /v1/search?apex=example.com&dates=1
 GET /v1/search?apex=example.com&format=json&dates=1
+GET /v1/records?apex=example.com
 GET /v1/stats
 GET /ready
 GET /health
@@ -68,6 +83,21 @@ GET /favicon.ico         and favicon.svg, apple-touch-icon.png,
 ```
 
 Plain text is one hostname per line unless `format=json` is requested. `dates=1` adds `first_seen`. Empty index returns `200` with empty body/array, not `404`.
+
+`GET /v1/records` is the stable local-index interface for service consumers.
+It never contacts an upstream provider. Its JSON response identifies
+`schema_version` as `subfinder.index-records.v1` and returns each hostname's
+earliest observation plus the source-specific `source`, `first_seen`, and
+`last_seen` records. It consumes the same search allowance as `/v1/search` and
+returns `X-Subfinder-Schema-Version` so consumers can reject an unsupported
+contract before parsing the body.
+
+For another Compose project, attach only its API or worker that needs these
+facts to `syncpundit-data-plane` and call
+`http://subfinder-index:8200/v1/records?apex=example.com`. Do not mount the
+Subfinder SQLite volume into another application. Subfinder owns neutral index
+facts and provenance; classifications, scores, and application-specific
+enrichments belong in the consuming application's state store.
 
 `GET /v1/search` reports the refresh result in `X-URLScan-Status`: `ok`,
 `disabled`, `quota-exhausted`, `timeout`, or `error`. Provider failure does not
@@ -157,8 +187,11 @@ services run recurring ingestion without web traffic. The first runs IANA root
 and CISA `.gov` imports every 24 hours. When CZDS credentials are present, it
 also checks up to 25 least-recently-checked zones per day. The second handles
 urlscan breadth and searched-apex history. The third replays bounded prefixes
-of usable RFC 6962 logs from their first entries. Separate volume locks prevent
-duplicate processes, and SQLite stores each job's next run time.
+of usable RFC 6962 logs from their first entries. Each scheduler's volume lock
+prevents duplicate copies of that scheduler. A database-derived writer lock
+also serializes every SQLite mutation across the API, live CT worker,
+schedulers, and manual jobs while WAL readers remain concurrent. SQLite stores
+each job's next run time.
 
 Set `CTLOGS_URLSCAN_APEXES` to a comma-separated allowlist, or set it to `*` to
 walk every apex already in the local index. The all-index mode keeps both its

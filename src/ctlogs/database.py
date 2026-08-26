@@ -1,16 +1,32 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
+import fcntl
 from pathlib import Path
-from typing import Iterable
 
 
 @dataclass(frozen=True)
 class SearchResult:
     subdomain: str
     first_seen: str | None
+
+
+@dataclass(frozen=True)
+class SourceObservation:
+    source: str
+    first_seen: str | None
+    last_seen: str
+
+
+@dataclass(frozen=True)
+class IndexedRecord:
+    hostname: str
+    first_seen: str | None
+    sources: tuple[SourceObservation, ...]
 
 
 @dataclass(frozen=True)
@@ -41,16 +57,36 @@ class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
 
-    def connect(self) -> sqlite3.Connection:
+    def _open_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=60)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 60000")
         return connection
 
-    def initialize(self) -> None:
+    def connect(self) -> sqlite3.Connection:
+        """Open a read-only application connection."""
+        connection = self._open_connection()
+        connection.execute("PRAGMA query_only = ON")
+        return connection
+
+    @contextmanager
+    def write_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Run one mutation while excluding writers in every service process."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as connection:
+        lock_path = self.path.with_name(f"{self.path.name}.write.lock")
+        with lock_path.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            connection = self._open_connection()
+            try:
+                with connection:
+                    yield connection
+            finally:
+                connection.close()
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def initialize(self) -> None:
+        with self.write_transaction() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.executescript(
@@ -281,6 +317,54 @@ class Database:
             ).fetchall()
         return [SearchResult(row["subdomain"], row["first_seen"]) for row in rows]
 
+    def records(self, apex: str) -> list[IndexedRecord]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    names.subdomain,
+                    names.first_seen AS hostname_first_seen,
+                    evidence.source,
+                    evidence.first_seen AS source_first_seen,
+                    evidence.last_seen
+                FROM subdomains AS names
+                LEFT JOIN subdomain_sources AS evidence
+                    ON evidence.apex = names.apex
+                   AND evidence.subdomain = names.subdomain
+                WHERE names.apex = ?
+                ORDER BY
+                    names.first_seen IS NULL,
+                    names.first_seen,
+                    names.subdomain,
+                    evidence.source
+                """,
+                (apex,),
+            ).fetchall()
+
+        records: list[IndexedRecord] = []
+        sources: list[SourceObservation] = []
+        hostname: str | None = None
+        first_seen: str | None = None
+        for row in rows:
+            row_hostname = str(row["subdomain"])
+            if hostname is not None and row_hostname != hostname:
+                records.append(IndexedRecord(hostname, first_seen, tuple(sources)))
+                sources = []
+            if row_hostname != hostname:
+                hostname = row_hostname
+                first_seen = row["hostname_first_seen"]
+            if row["source"] is not None:
+                sources.append(
+                    SourceObservation(
+                        source=str(row["source"]),
+                        first_seen=row["source_first_seen"],
+                        last_seen=str(row["last_seen"]),
+                    )
+                )
+        if hostname is not None:
+            records.append(IndexedRecord(hostname, first_seen, tuple(sources)))
+        return records
+
     def apexes_after(self, cursor: str, limit: int) -> list[str]:
         if limit < 1:
             raise ValueError("limit must be positive")
@@ -304,7 +388,7 @@ class Database:
         requested_at: str | None = None,
     ) -> None:
         requested_at = requested_at or datetime.now(UTC).isoformat()
-        with self.connect() as connection:
+        with self.write_transaction() as connection:
             connection.execute(
                 """
                 INSERT OR IGNORE INTO ingest_state (
@@ -349,7 +433,7 @@ class Database:
     ) -> None:
         attempted_at = attempted_at or datetime.now(UTC).isoformat()
         queue_key = f"queue:urlscan:{apex}"
-        with self.connect() as connection:
+        with self.write_transaction() as connection:
             state = connection.execute(
                 "SELECT cursor FROM ingest_state WHERE source = ?",
                 (f"enrich:urlscan:{apex}",),
@@ -386,7 +470,7 @@ class Database:
                 raise ValueError("source must not be empty")
             observed_at = observed_at or datetime.now(UTC).isoformat()
 
-        with self.connect() as connection:
+        with self.write_transaction() as connection:
             connection.executemany(
                 """
                 INSERT INTO subdomains (apex, subdomain, first_seen)
@@ -443,7 +527,7 @@ class Database:
             raise ValueError("source must not be empty")
         observed_at = observed_at or datetime.now(UTC).isoformat()
         values = [(hostname, hostname, first_seen) for hostname, first_seen in rows]
-        with self.connect() as connection:
+        with self.write_transaction() as connection:
             connection.executemany(
                 """
                 INSERT INTO subdomains (apex, subdomain, first_seen)
@@ -518,7 +602,7 @@ class Database:
         day = current.date().isoformat()
         reset = datetime.combine(current.date() + timedelta(days=1), time.min, UTC)
 
-        with self.connect() as connection:
+        with self.write_transaction() as connection:
             row = connection.execute(
                 """
                 INSERT INTO request_counts (day, client_ip, used)
@@ -568,7 +652,7 @@ class Database:
         reset = datetime.combine(current.date() + timedelta(days=1), time.min, UTC)
         reset_at = int(reset.timestamp())
 
-        with self.connect() as connection:
+        with self.write_transaction() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
@@ -613,7 +697,7 @@ class Database:
         duration_ms: int | None = None,
         bytes_read: int | None = None,
     ) -> int:
-        with self.connect() as connection:
+        with self.write_transaction() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO ingest_runs (source, started_at, finished_at, apex_count, hostname_count, duration_ms, bytes_read)
@@ -638,7 +722,7 @@ class Database:
         etag: str | None = None,
         updated_at: str | None = None,
     ) -> None:
-        with self.connect() as connection:
+        with self.write_transaction() as connection:
             connection.execute(
                 """
                 INSERT INTO ingest_state (source, cursor, etag, updated_at)

@@ -49,7 +49,7 @@ def backup_database(database: Database, destination: Path) -> None:
 
 def remove_legacy_fixture_rows(database: Database) -> int:
     matches = find_legacy_fixture_rows(database)
-    with database.connect() as connection:
+    with database.write_transaction() as connection:
         cursor = connection.executemany(
             """
             DELETE FROM subdomains AS names

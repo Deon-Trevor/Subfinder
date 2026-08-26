@@ -2,12 +2,89 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from multiprocessing import get_context
 from pathlib import Path
 import sqlite3
+from typing import Any
 
 import pytest
 
-from ctlogs.database import Database, QuotaExceeded
+from ctlogs.database import (
+    Database,
+    IndexedRecord,
+    QuotaExceeded,
+    SourceObservation,
+)
+
+
+def _hold_writer(path: str, entered: Any, release: Any) -> None:
+    with Database(path).write_transaction():
+        entered.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("writer release was not signalled")
+
+
+def _enter_writer(path: str, entered: Any) -> None:
+    with Database(path).write_transaction():
+        entered.set()
+
+
+def test_write_transactions_serialize_service_processes(tmp_path: Path) -> None:
+    path = tmp_path / "serialized.sqlite3"
+    Database(path).initialize()
+    processes = get_context("spawn")
+    first_entered = processes.Event()
+    release_first = processes.Event()
+    second_entered = processes.Event()
+    first_process = processes.Process(
+        target=_hold_writer,
+        args=(str(path), first_entered, release_first),
+    )
+    second_process = processes.Process(
+        target=_enter_writer,
+        args=(str(path), second_entered),
+    )
+    first_process.start()
+    assert first_entered.wait(timeout=2)
+    second_process.start()
+
+    assert not second_entered.wait(timeout=0.1)
+    release_first.set()
+    first_process.join(timeout=5)
+    second_process.join(timeout=5)
+
+    assert first_process.exitcode == 0
+    assert second_process.exitcode == 0
+    assert second_entered.is_set()
+
+
+def test_write_transaction_releases_lock_after_failure(tmp_path: Path) -> None:
+    path = tmp_path / "failed-write.sqlite3"
+    first = Database(path)
+    second = Database(path)
+    first.initialize()
+
+    with pytest.raises(RuntimeError, match="failed mutation"):
+        with first.write_transaction():
+            raise RuntimeError("failed mutation")
+
+    with second.write_transaction() as connection:
+        connection.execute(
+            "INSERT INTO ingest_state (source, cursor) VALUES ('test', 'ok')"
+        )
+
+    assert second.get_ingest_state("test")["cursor"] == "ok"
+
+
+def test_read_connections_reject_mutations(tmp_path: Path) -> None:
+    database = Database(tmp_path / "read-only.sqlite3")
+    database.initialize()
+
+    with database.connect() as connection:
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute(
+                "INSERT INTO ingest_state (source, cursor) VALUES ('test', 'bad')"
+            )
 
 
 def test_upsert_keeps_the_earliest_first_seen(tmp_path: Path) -> None:
@@ -228,6 +305,42 @@ def test_sources_consolidate_without_duplicating_search_rows(
     ]
 
 
+def test_records_return_neutral_hostname_provenance(tmp_path: Path) -> None:
+    database = Database(tmp_path / "records.sqlite3")
+    database.initialize()
+    database.upsert_subdomains(
+        "example.com",
+        [("www.example.com", "2025-01-02T00:00:00Z")],
+        source="direct_ct:https://ct.example",
+        observed_at="2026-08-21T00:00:00Z",
+    )
+    database.upsert_subdomains(
+        "example.com",
+        [("www.example.com", "2024-01-02T00:00:00Z")],
+        source="urlscan",
+        observed_at="2026-08-22T00:00:00Z",
+    )
+
+    assert database.records("example.com") == [
+        IndexedRecord(
+            hostname="www.example.com",
+            first_seen="2024-01-02T00:00:00Z",
+            sources=(
+                SourceObservation(
+                    source="direct_ct:https://ct.example",
+                    first_seen="2025-01-02T00:00:00Z",
+                    last_seen="2026-08-21T00:00:00Z",
+                ),
+                SourceObservation(
+                    source="urlscan",
+                    first_seen="2024-01-02T00:00:00Z",
+                    last_seen="2026-08-22T00:00:00Z",
+                ),
+            ),
+        )
+    ]
+
+
 def test_stats_report_index_and_provenance_counts(tmp_path: Path) -> None:
     database = Database(tmp_path / "stats.sqlite3")
     database.initialize()
@@ -278,7 +391,7 @@ def test_stats_materialize_unique_ct_names_and_logs(tmp_path: Path) -> None:
     assert stats.ct_hostname_count == 2
     assert stats.ct_log_count == 2
 
-    with database.connect() as connection:
+    with database.write_transaction() as connection:
         connection.execute(
             "DELETE FROM subdomain_sources WHERE source = ?",
             ("direct_ct:https://log-one.example",),

@@ -3,7 +3,7 @@ services:
     build: .
     image: ctlogs:latest
     ports:
-      - "8200:8200"
+      - "127.0.0.1:8200:8200"
     volumes:
       - ctlogs-data:/data
     environment:
@@ -11,7 +11,7 @@ services:
       CTLOGS_AUTO_SEED: "0"
       CTLOGS_ENABLE_LIVE_CT: "1"
       CTLOGS_STATIC_CT_URLS: "https://mon.willow.ct.letsencrypt.org/2026h2"
-      CTLOGS_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,[::1]:*"
+      CTLOGS_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,[::1]:*,subfinder-index:*"
       CTLOGS_ALLOWED_ORIGINS: "http://127.0.0.1:*,http://localhost:*"
       CTLOGS_URLSCAN_DAILY_LIMIT: "100000"
       CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT: "10000"
@@ -30,6 +30,11 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+    networks:
+      default:
+      data-plane:
+        aliases:
+          - subfinder-index
     restart: unless-stopped
 
   jobs:
@@ -118,3 +123,8 @@ services:
 volumes:
   ctlogs-data:
     name: ${CTLOGS_DATA_VOLUME:-subfinder_ctlogs-data}
+
+networks:
+  data-plane:
+    name: ${CTLOGS_DATA_NETWORK:-syncpundit-data-plane}
+    external: true

@@ -92,6 +92,70 @@ async def test_json_without_dates_only_returns_sub(client: httpx.AsyncClient) ->
 
 
 @pytest.mark.anyio
+async def test_records_api_returns_local_provenance_without_discovery(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    class Source:
+        name = "urlscan"
+
+        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
+            calls.append(apex)
+            raise AssertionError("the records API must not call providers")
+
+    app = create_app(
+        tmp_path / "records.sqlite3",
+        urlscan_source=Source(),
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        app.state.database.upsert_subdomains(
+            "example.com",
+            [("www.example.com", "2025-02-03T04:05:06Z")],
+            source="direct_ct:https://ct.example",
+            observed_at="2026-08-21T00:00:00Z",
+        )
+        response = await test_client.get(
+            "/v1/records",
+            params={"apex": "example.com"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-subfinder-schema-version"] == (
+        "subfinder.index-records.v1"
+    )
+    assert response.headers["x-ratelimit-remaining"] == "999"
+    assert response.json() == {
+        "schema_version": "subfinder.index-records.v1",
+        "apex": "example.com",
+        "records": [
+            {
+                "hostname": "www.example.com",
+                "first_seen": "2025-02-03T04:05:06Z",
+                "sources": [
+                    {
+                        "source": "direct_ct:https://ct.example",
+                        "first_seen": "2025-02-03T04:05:06Z",
+                        "last_seen": "2026-08-21T00:00:00Z",
+                    }
+                ],
+            }
+        ],
+    }
+    assert calls == []
+    assert "x-urlscan-status" not in response.headers
+
+
+@pytest.mark.anyio
 async def test_search_refreshes_urlscan_before_reading_the_local_index(
     tmp_path: Path,
 ) -> None:
