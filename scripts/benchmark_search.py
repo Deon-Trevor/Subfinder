@@ -28,14 +28,22 @@ async def sample(
     client: httpx.AsyncClient,
     url: str,
     apex: str,
+    limit: int | None,
 ) -> Sample:
     started = time.perf_counter()
     first_byte_at: float | None = None
     bytes_read = 0
+    params: dict[str, str | int] = {
+        "apex": apex,
+        "format": "json",
+        "dates": 1,
+    }
+    if limit is not None:
+        params["limit"] = limit
     async with client.stream(
         "GET",
         f"{url.rstrip('/')}/v1/search",
-        params={"apex": apex, "format": "json", "dates": 1},
+        params=params,
     ) as response:
         async for chunk in response.aiter_bytes():
             if first_byte_at is None:
@@ -58,11 +66,11 @@ async def run(args: argparse.Namespace) -> list[Sample]:
     )
     async with httpx.AsyncClient(timeout=args.timeout, limits=limits) as client:
         for _ in range(args.warmup):
-            await sample(client, args.url, args.apex)
+            await sample(client, args.url, args.apex, args.limit)
 
         async def bounded_sample() -> Sample:
             async with semaphore:
-                return await sample(client, args.url, args.apex)
+                return await sample(client, args.url, args.apex, args.limit)
 
         return await asyncio.gather(
             *(bounded_sample() for _ in range(args.requests))
@@ -76,12 +84,15 @@ def main() -> None:
     parser.add_argument("--requests", type=int, default=100)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--limit", type=int)
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--max-ttfb-p95-ms", type=float)
     parser.add_argument("--max-total-p95-ms", type=float)
     args = parser.parse_args()
     if args.requests < 1 or args.concurrency < 1 or args.warmup < 0:
         parser.error("requests and concurrency must be positive; warmup cannot be negative")
+    if args.limit is not None and args.limit < 1:
+        parser.error("limit must be positive")
 
     samples = asyncio.run(run(args))
     first_byte = [item.first_byte_ms for item in samples]
@@ -95,6 +106,7 @@ def main() -> None:
             "requests": args.requests,
             "concurrency": args.concurrency,
             "warmup": args.warmup,
+            "limit": args.limit,
         },
         "status_counts": {
             str(status): sum(item.status == status for item in samples)

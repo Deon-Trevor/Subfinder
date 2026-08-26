@@ -154,6 +154,25 @@ def test_apexes_after_pages_unique_apexes_in_index_order(tmp_path: Path) -> None
     assert database.apexes_after("three.example", 2) == ["two.example"]
 
 
+def test_search_counts_are_index_scoped(tmp_path: Path) -> None:
+    database = Database(tmp_path / "counts.sqlite3")
+    database.initialize()
+    database.upsert_subdomains(
+        "example.com",
+        [("dated.example.com", "2026-01-01T00:00:00Z"), ("unknown.example.com", None)],
+    )
+    database.upsert_subdomains("example.net", [("example.net", None)])
+
+    assert database.search_counts("example.com") == (2, 1)
+
+    page, cursor, total, dated = database.search_page_with_counts(
+        "example.com", after=None, limit=1
+    )
+    assert [row.subdomain for row in page] == ["dated.example.com"]
+    assert cursor == SearchCursor("dated.example.com", "2026-01-01T00:00:00Z")
+    assert (total, dated) == (2, 1)
+
+
 def test_quota_resets_on_the_next_utc_day(tmp_path: Path) -> None:
     database = Database(tmp_path / "quota.sqlite3")
     database.initialize()

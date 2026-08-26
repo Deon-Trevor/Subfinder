@@ -427,10 +427,25 @@ class Database:
         limit: int | None = None,
         fetch_size: int = 1_000,
     ) -> Iterator[SearchResult]:
-        if limit is not None and limit < 1:
-            raise ValueError("limit must be positive")
         if fetch_size < 1:
             raise ValueError("fetch_size must be positive")
+
+        sql, parameters = self._search_query(apex, after=after, limit=limit)
+        with self.connect() as connection:
+            cursor = connection.execute(sql, parameters)
+            while rows := cursor.fetchmany(fetch_size):
+                for row in rows:
+                    yield SearchResult(str(row["subdomain"]), row["first_seen"])
+
+    @staticmethod
+    def _search_query(
+        apex: str,
+        *,
+        after: SearchCursor | None,
+        limit: int | None,
+    ) -> tuple[str, list[object]]:
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive")
 
         where = "WHERE apex = ?"
         parameters: list[object] = [apex]
@@ -473,12 +488,7 @@ class Database:
         if limit is not None:
             sql += " LIMIT ?"
             parameters.append(limit)
-
-        with self.connect() as connection:
-            cursor = connection.execute(sql, parameters)
-            while rows := cursor.fetchmany(fetch_size):
-                for row in rows:
-                    yield SearchResult(str(row["subdomain"]), row["first_seen"])
+        return sql, parameters
 
     def search_page(
         self,
@@ -493,6 +503,46 @@ class Database:
         page = rows[:limit]
         tail = page[-1]
         return page, SearchCursor(tail.subdomain, tail.first_seen)
+
+    def search_counts(self, apex: str) -> tuple[int, int]:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS total, COUNT(first_seen) AS dated
+                FROM subdomains
+                WHERE apex = ?
+                """,
+                (apex,),
+            ).fetchone()
+        return int(row["total"]), int(row["dated"])
+
+    def search_page_with_counts(
+        self,
+        apex: str,
+        *,
+        after: SearchCursor | None,
+        limit: int,
+    ) -> tuple[list[SearchResult], SearchCursor | None, int, int]:
+        sql, parameters = self._search_query(apex, after=after, limit=limit + 1)
+        with self.connect() as connection:
+            connection.execute("BEGIN")
+            count_row = connection.execute(
+                "SELECT COUNT(*) AS total, COUNT(first_seen) AS dated "
+                "FROM subdomains WHERE apex = ?",
+                (apex,),
+            ).fetchone()
+            result_rows = connection.execute(sql, parameters).fetchall()
+
+        rows = [
+            SearchResult(str(row["subdomain"]), row["first_seen"])
+            for row in result_rows
+        ]
+        next_cursor = None
+        if len(rows) > limit:
+            rows = rows[:limit]
+            tail = rows[-1]
+            next_cursor = SearchCursor(tail.subdomain, tail.first_seen)
+        return rows, next_cursor, int(count_row["total"]), int(count_row["dated"])
 
     def watermark(self) -> str | None:
         with self.connect() as connection:

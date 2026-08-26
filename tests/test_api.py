@@ -215,6 +215,8 @@ async def test_optional_cursor_pages_preserve_the_legacy_body_shape(tmp_path: Pa
         {"first_seen": "2025-01-01T00:00:00Z", "sub": "b.example.com"},
     ]
     assert first.headers["x-result-truncated"] == "true"
+    assert first.headers["x-result-total"] == "3"
+    assert first.headers["x-result-dated-total"] == "2"
     assert 'rel="next"' in first.headers["link"]
     assert second.json() == [{"first_seen": None, "sub": "z.example.com"}]
     assert second.headers["x-result-truncated"] == "false"

@@ -592,8 +592,8 @@ def create_app(
         if limit is not None:
             query_started = time.perf_counter()
             try:
-                rows, next_cursor = await catalog_call(
-                    database.search_page,
+                rows, next_cursor, total, dated_total = await catalog_call(
+                    database.search_page_with_counts,
                     canonical,
                     after=after,
                     limit=limit,
@@ -615,6 +615,8 @@ def create_app(
                 ) from error
             query_ms = (time.perf_counter() - query_started) * 1_000
             headers["X-Result-Page-Size"] = str(len(rows))
+            headers["X-Result-Total"] = str(total)
+            headers["X-Result-Dated-Total"] = str(dated_total)
             headers["X-Result-Truncated"] = str(next_cursor is not None).lower()
             if next_cursor is not None:
                 encoded = _encode_cursor(canonical, next_cursor)
