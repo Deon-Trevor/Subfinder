@@ -12,7 +12,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Subfinder">
 <meta property="og:title" content="Subfinder - passive subdomain enumeration">
-<meta property="og:description" content="Type a domain, get every hostname on record under it, with first-seen dates. Each lookup refreshes passive urlscan records, then reads the combined index without probing the domain.">
+<meta property="og:description" content="Type a domain, browse every hostname on record under it, with first-seen dates. Each lookup reads the committed passive index without probing the domain.">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Subfinder - passive subdomain enumeration">
 <meta name="twitter:description" content="Every subdomain on record for a domain, in one request. Zero packets to the target.">
@@ -123,7 +123,7 @@
       <div>
         <p class="eyebrow">Passive subdomain enumeration</p>
         <h1 class="hero-title">Every subdomain on record. <em>Zero packets to the target.</em></h1>
-        <p class="hero-lede">Type a domain and get back every hostname the index has seen under it, oldest first, with the date each name first appeared. A lookup refreshes passive urlscan records, then queues deeper history in the background. The domain you look up is never probed and never learns you looked.</p>
+        <p class="hero-lede">Type a domain and browse every hostname the index has seen under it, oldest first, with the date each name first appeared. A lookup reads the committed local index immediately and queues passive enrichment in the background. The domain you look up is never probed and never learns you looked.</p>
 
         <form class="search" id="search-form" autocomplete="off">
           <div class="search-row">
@@ -223,12 +223,12 @@
         </div>
         <div class="register-tools">
           <span class="tool-group">
-            <span class="tool-group-label">Copy</span>
+            <span class="tool-group-label">Copy page</span>
             <button class="tool" type="button" data-copy="text">list</button>
             <button class="tool" type="button" data-copy="json">JSON</button>
           </span>
           <span class="tool-group">
-            <span class="tool-group-label">Download</span>
+            <span class="tool-group-label">Download page</span>
             <button class="tool" type="button" data-download="text">.txt</button>
             <button class="tool" type="button" data-download="json">.json</button>
           </span>
@@ -251,7 +251,7 @@
 
       <div class="case-lip" id="case-lip" hidden>
         <button class="case-open" id="case-open" type="button" aria-haspopup="dialog">
-          <span class="case-open-label">Open the full record</span>
+          <span class="case-open-label">Browse the record</span>
           <span class="case-open-more mono" id="case-more"></span>
           <svg class="case-open-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 19V5M5 12l7-7 7 7"></path>
@@ -322,18 +322,16 @@ curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com&amp;form
   </div>
 </main>
 
-<!-- The shelf: the whole register, lifted off the page rather than poured
-     into it. A modal <dialog> is what makes it behave - the page behind goes
-     inert, Escape closes it, and focus cannot wander out the back. Rows are
-     rendered into it on open and dropped on close, so a result running to tens
-     of thousands of names is never held in the document twice. -->
+<!-- The shelf: a bounded page of the register, lifted off the page rather than
+     poured into it. A modal <dialog> is what makes it behave - the page behind
+     goes inert, Escape closes it, and focus cannot wander out the back. -->
 <dialog class="shelf" id="shelf" aria-labelledby="shelf-heading">
   <div class="shelf-panel">
     <div class="shelf-grip" aria-hidden="true"></div>
 
     <header class="shelf-head">
       <div class="shelf-head-main">
-        <p class="eyebrow">The full record</p>
+        <p class="eyebrow">The record</p>
         <h2 class="shelf-title" id="shelf-heading" tabindex="-1"><span class="apex mono" id="shelf-apex"></span></h2>
         <p class="shelf-count mono" id="shelf-count"></p>
       </div>
@@ -346,12 +344,12 @@ curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com&amp;form
         </div>
         <div class="register-tools">
           <span class="tool-group">
-            <span class="tool-group-label">Copy</span>
+            <span class="tool-group-label">Copy page</span>
             <button class="tool" type="button" data-copy="text">list</button>
             <button class="tool" type="button" data-copy="json">JSON</button>
           </span>
           <span class="tool-group">
-            <span class="tool-group-label">Download</span>
+            <span class="tool-group-label">Download page</span>
             <button class="tool" type="button" data-download="text">.txt</button>
             <button class="tool" type="button" data-download="json">.json</button>
           </span>
@@ -374,6 +372,14 @@ curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com&amp;form
       <div class="ledger" id="shelf-ledger"></div>
       <div id="shelf-state" role="status" aria-live="polite"></div>
     </div>
+
+    <nav class="shelf-pager" aria-label="Record pages">
+      <button class="tool shelf-page-button" id="shelf-prev" type="button"
+              title="Show the previous page already read in this tab">Previous</button>
+      <span class="shelf-range mono" id="shelf-range" aria-live="polite"></span>
+      <button class="tool shelf-page-button" id="shelf-next" type="button"
+              title="Read the next 500 names (uses one lookup)">Next</button>
+    </nav>
   </div>
 </dialog>
 

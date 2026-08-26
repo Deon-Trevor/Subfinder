@@ -40,6 +40,18 @@ def test_frontend_never_calls_itself_this_service() -> None:
         assert "this service" not in path.read_text().lower(), path
 
 
+def test_browser_uses_bounded_cursor_pages_for_large_records() -> None:
+    script = Path("web/app.js").read_text()
+    markup = Path("web/index.html").read_text()
+
+    assert "const PAGE_SIZE = 500" in script
+    assert 'limit: String(PAGE_SIZE)' in script
+    assert 'response.headers.get("X-Next-Cursor")' in script
+    assert 'id="shelf-prev"' in markup
+    assert 'id="shelf-next"' in markup
+    assert "refreshes passive urlscan" not in markup.lower()
+
+
 @pytest.fixture
 async def client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

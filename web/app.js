@@ -22,6 +22,7 @@ const POLL_MAX_MS = 5 * 60_000;
 const FETCH_TIMEOUT_MS = 15_000;
 const FILTER_DEBOUNCE_MS = 120;
 const SUBMIT_LABEL = "Enumerate";
+const PAGE_SIZE = 500;
 /* How much of the register the page itself shows. Rows arrive oldest first, so
    what sits behind the glass is the head of the record - the names that have
    been on file longest - and the rest is in the shelf. Keeping the page to a
@@ -62,6 +63,9 @@ const el = {
   shelfLedger: document.getElementById("shelf-ledger"),
   shelfState: document.getElementById("shelf-state"),
   shelfClose: document.getElementById("shelf-close"),
+  shelfPrev: document.getElementById("shelf-prev"),
+  shelfNext: document.getElementById("shelf-next"),
+  shelfRange: document.getElementById("shelf-range"),
   shape: document.getElementById("shape"),
   shapeBars: document.getElementById("shape-bars"),
   shapeAxis: document.getElementById("shape-axis"),
@@ -83,7 +87,16 @@ const el = {
   statIngestNote: document.getElementById("stat-ingest-note"),
 };
 
-let current = { apex: "", rows: [] };
+let current = {
+  apex: "",
+  rows: [],
+  total: 0,
+  datedTotal: 0,
+  cursor: null,
+  nextCursor: null,
+  start: 0,
+  back: [],
+};
 
 /* Older engines miss AbortSignal.timeout, and a hung fetch would otherwise
    stall the poll chain behind it forever. */
@@ -558,7 +571,7 @@ function renderNoMatches(term, target) {
   title.textContent = "No name matches that filter.";
   const body = document.createElement("p");
   body.className = "state-body";
-  body.textContent = `Nothing in this result contains "${term}". Clearing the filter brings the whole list back; it never returns to the API.`;
+  body.textContent = `Nothing on this page contains "${term}". Clearing the filter brings the page back; it never returns to the API.`;
   box.append(title, body);
   target.replaceChildren(box);
 }
@@ -590,8 +603,8 @@ function setCount(node, total, visible, dated) {
   node.append(filtered);
 }
 
-/* Filtering works on rows already in hand, so it costs nothing against the
-   allowance no matter how often it runs. */
+/* Filtering works on the current page already in hand, so it costs nothing
+   against the allowance no matter how often it runs. */
 function visibleRows() {
   const term = el.filter.value.trim().toLowerCase();
   if (!term) return { rows: current.rows, term: "" };
@@ -599,16 +612,15 @@ function visibleRows() {
 }
 
 /* One draw of both surfaces. The page keeps its slice whether the shelf is up
-   or not - eighteen rows cost nothing to keep, and leaving them in place is
-   what stops the ground from shifting under the shelf and jumping when it
-   closes. The shelf holds the whole result, and only while it is open. */
+   or not. The shelf renders only the current bounded API page; large records
+   are traversed with the pager rather than duplicated into the document. */
 function paint() {
   const { rows, term } = visibleRows();
-  const dated = current.rows.reduce((n, row) => n + (row.first_seen ? 1 : 0), 0);
   const open = el.shelf.open;
 
-  setCount(el.registerCount, current.rows.length, rows.length, dated);
-  setCount(el.shelfCount, current.rows.length, rows.length, dated);
+  setCount(el.registerCount, current.total, rows.length, current.datedTotal);
+  setCount(el.shelfCount, current.total, rows.length, current.datedTotal);
+  syncPager();
 
   // The message goes to the live region of the surface being read. Announcing
   // it in both would say it twice to a screen reader.
@@ -626,7 +638,7 @@ function paint() {
   state.replaceChildren();
 
   const drawn = renderLedger(current.apex, rows, el.ledger, TEASER_ROWS);
-  const behind = rows.length - drawn;
+  const behind = Math.max(0, current.total - current.start - drawn);
   el.case.classList.toggle("is-cased", behind > 0);
   el.caseLip.hidden = behind === 0;
   if (behind > 0) el.caseMore.textContent = `+${commas(behind)} more`;
@@ -635,8 +647,7 @@ function paint() {
     renderLedger(current.apex, rows, el.shelfLedger);
     renderRail(rows);
   } else {
-    // Tens of thousands of rows go back to the collector the moment the shelf
-    // is closed rather than sitting in a hidden dialog for the rest of the visit.
+    // Page rows stay in memory for back navigation, but not in the hidden DOM.
     el.shelfLedger.replaceChildren();
     el.shelfRail.replaceChildren();
     el.shelfRail.hidden = true;
@@ -793,6 +804,116 @@ el.shelfRail.addEventListener("click", (event) => {
   if (section) jumpTo(section);
 });
 
+function syncPager() {
+  const first = current.total ? current.start + 1 : 0;
+  const last = current.start + current.rows.length;
+  el.shelfRange.textContent = current.total
+    ? `${commas(first)}-${commas(last)} of ${commas(current.total)}`
+    : "No names on file";
+  el.shelfPrev.disabled = current.loading || current.back.length === 0;
+  el.shelfNext.disabled = current.loading || !current.nextCursor;
+}
+
+function pageUrl(apex, cursor = null) {
+  const params = new URLSearchParams({
+    apex,
+    format: "json",
+    dates: "1",
+    limit: String(PAGE_SIZE),
+  });
+  if (cursor) params.set("cursor", cursor);
+  return `${API_BASE}/v1/search?${params}`;
+}
+
+function integerHeader(headers, name, fallback) {
+  const value = Number.parseInt(headers.get(name) ?? "", 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+async function readPage(apex, cursor = null) {
+  const response = await fetch(pageUrl(apex, cursor), {
+    headers: { Accept: "application/json" },
+    signal: timeoutSignal(FETCH_TIMEOUT_MS),
+  });
+  setQuota(response.headers);
+  if (!response.ok) {
+    const error = new Error(`read failed (${response.status})`);
+    error.status = response.status;
+    error.retryAfter = response.headers.get("Retry-After");
+    throw error;
+  }
+  const rows = await response.json();
+  return {
+    rows,
+    total: integerHeader(response.headers, "X-Result-Total", rows.length),
+    datedTotal: integerHeader(
+      response.headers,
+      "X-Result-Dated-Total",
+      rows.reduce((count, row) => count + (row.first_seen ? 1 : 0), 0),
+    ),
+    nextCursor: response.headers.get("X-Next-Cursor"),
+  };
+}
+
+function clearPageFilter() {
+  clearTimeout(filterTimer);
+  el.filter.value = "";
+  el.shelfFilter.value = "";
+}
+
+async function nextPage() {
+  if (current.loading || !current.nextCursor) return;
+  const cursor = current.nextCursor;
+  const previous = {
+    rows: current.rows,
+    cursor: current.cursor,
+    nextCursor: current.nextCursor,
+    start: current.start,
+  };
+  current.loading = true;
+  syncPager();
+  el.shelfState.textContent = "Reading the next page...";
+  try {
+    const page = await readPage(current.apex, cursor);
+    current.back.push(previous);
+    current.rows = page.rows;
+    current.cursor = cursor;
+    current.nextCursor = page.nextCursor;
+    current.start = previous.start + previous.rows.length;
+    current.total = page.total;
+    current.datedTotal = page.datedTotal;
+    clearPageFilter();
+    renderShape(current.rows);
+    paint();
+    el.shelfBody.scrollTop = 0;
+    el.shelfHeading.focus({ preventScroll: true });
+  } catch (error) {
+    el.shelfState.textContent = error.status === 429
+      ? "The daily allowance is spent; this page was not read."
+      : "The next page could not be read. Try again in a moment.";
+  } finally {
+    current.loading = false;
+    syncPager();
+  }
+}
+
+function previousPage() {
+  if (current.loading || !current.back.length) return;
+  const previous = current.back.pop();
+  current.rows = previous.rows;
+  current.cursor = previous.cursor;
+  current.nextCursor = previous.nextCursor;
+  current.start = previous.start;
+  clearPageFilter();
+  renderShape(current.rows);
+  paint();
+  el.shelfBody.scrollTop = 0;
+  el.shelfHeading.focus({ preventScroll: true });
+}
+
+el.shelfNext.addEventListener("click", nextPage);
+el.shelfPrev.addEventListener("click", previousPage);
+
 /* ── opening and closing the shelf ───────────────────────────────── */
 /* showModal is what earns the shelf its behaviour: the page behind it goes
    inert, Escape closes it, focus cannot tab out the back, and ::backdrop is a
@@ -810,9 +931,7 @@ function openShelf() {
 
 /* Every way out of the shelf lands here: the close button, a click on the
    backdrop, and Escape - which the dialog handles itself and reports through
-   its close event. Dropping the rows is the point. A result that ran to tens
-   of thousands of names would otherwise sit in a hidden dialog for the rest of
-   the visit, and the page behind is already showing its own slice. */
+   its close event. Dropping the page rows from the dialog is the point. */
 function closeShelf() {
   // Already put away: nothing to close, no rows to drop, no focus to move.
   if (!el.shelf.open && !el.shelfLedger.firstChild) return;
@@ -848,36 +967,36 @@ el.shelf.addEventListener("click", (event) => {
   pressedOff = false;
 });
 
-function renderRegister(apex, rows) {
-  current = { apex, rows };
-  syncInputs(apex);
+function renderRegister(page) {
+  current = page;
+  syncInputs(current.apex);
   // A keystroke from the previous result must not re-filter this one.
   clearTimeout(filterTimer);
   el.filter.value = "";
   el.shelfFilter.value = "";
   el.register.hidden = false;
   el.register.removeAttribute("aria-busy");
-  el.registerApex.textContent = apex;
-  el.shelfApex.textContent = apex;
+  el.registerApex.textContent = current.apex;
+  el.shelfApex.textContent = current.apex;
   el.registerState.replaceChildren();
   el.shelfState.replaceChildren();
 
-  el.apiLink.href = `${API_BASE}/v1/search?apex=${encodeURIComponent(apex)}&format=json&dates=1`;
-  el.filterWrap.hidden = rows.length < 2;
+  el.apiLink.href = `${API_BASE}/v1/search?apex=${encodeURIComponent(current.apex)}&format=json&dates=1`;
+  el.filterWrap.hidden = current.total < 2;
 
-  if (!rows.length) {
-    const dated = 0;
-    setCount(el.registerCount, 0, 0, dated);
-    setCount(el.shelfCount, 0, 0, dated);
+  if (!current.rows.length) {
+    setCount(el.registerCount, 0, 0, 0);
+    setCount(el.shelfCount, 0, 0, 0);
     el.ledger.replaceChildren();
     el.shelfLedger.replaceChildren();
     uncase();
     el.shape.hidden = true;
-    renderEmpty(apex, el.registerState);
+    syncPager();
+    renderEmpty(current.apex, el.registerState);
     return;
   }
 
-  renderShape(rows);
+  renderShape(current.rows);
   paint();
 }
 
@@ -913,7 +1032,7 @@ async function search(raw, { push = true } = {}) {
   clearError();
 
   if (CACHE.has(apex)) {
-    renderRegister(apex, CACHE.get(apex));
+    renderRegister(CACHE.get(apex));
     syncUrl(apex, push && new URLSearchParams(location.search).get("apex") !== apex);
     reveal();
     return;
@@ -933,43 +1052,33 @@ async function search(raw, { push = true } = {}) {
   renderLoading();
   reveal();
 
-  const url = `${API_BASE}/v1/search?apex=${encodeURIComponent(apex)}&format=json&dates=1`;
-
   try {
-    const response = await fetch(url, {
-      headers: { Accept: "application/json" },
-      signal: timeoutSignal(FETCH_TIMEOUT_MS),
-    });
-    setQuota(response.headers);
-
-    if (response.status === 400) {
-      el.register.hidden = true;
-      showError("Not a registrable domain.", "Search the domain itself, so example.com rather than mail.example.com.");
-      return;
-    }
-
-    if (response.status === 429) {
-      const retry = Number(response.headers.get("Retry-After"));
-      const wait = Number.isFinite(retry) ? `${Math.ceil(retry / 60)} min` : "the UTC day boundary";
-      el.register.hidden = true;
-      showError("Daily allowance spent.", `This IP has used all 1000 reads. The counter resets in ${wait}.`);
-      return;
-    }
-
-    if (!response.ok) {
-      el.register.hidden = true;
-      showError(`Read failed (${response.status}).`, "The index did not answer. Try again in a moment.");
-      return;
-    }
-
-    const rows = await response.json();
-    CACHE.set(apex, rows);
-    renderRegister(apex, rows);
+    const page = await readPage(apex);
+    const result = {
+      apex,
+      ...page,
+      cursor: null,
+      start: 0,
+      back: [],
+      loading: false,
+    };
+    CACHE.set(apex, result);
+    renderRegister(result);
     syncUrl(apex, push);
     reveal();
-  } catch {
+  } catch (error) {
     el.register.hidden = true;
-    showError("Could not reach the index.", "Check that the API is running on this origin, then try again.");
+    if (error.status === 400) {
+      showError("Not a registrable domain.", "Search the domain itself, so example.com rather than mail.example.com.");
+    } else if (error.status === 429) {
+      const retry = Number(error.retryAfter);
+      const wait = Number.isFinite(retry) ? `${Math.ceil(retry / 60)} min` : "the UTC day boundary";
+      showError("Daily allowance spent.", `This IP has used all 1000 reads. The counter resets in ${wait}.`);
+    } else if (error.status) {
+      showError(`Read failed (${error.status}).`, "The index did not answer. Try again in a moment.");
+    } else {
+      showError("Could not reach the index.", "Check that the API is running on this origin, then try again.");
+    }
   } finally {
     el.register.removeAttribute("aria-busy");
     el.submit.disabled = false;

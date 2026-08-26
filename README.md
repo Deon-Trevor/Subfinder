@@ -86,6 +86,10 @@ The unpaginated response remains backward compatible and streams valid text or
 JSON without building the full result in memory. Large consumers can add
 `limit=5000` and follow `X-Next-Cursor` or the `Link: rel="next"` header. A
 cursor is valid only for the same apex and ordering contract used to obtain it.
+Paginated responses also carry `X-Result-Total`, `X-Result-Dated-Total`, and
+`X-Result-Page-Size`. The web interface requests 500 rows at a time and keeps
+the shelf DOM bounded to the current page; moving forward is an explicit
+search read, while moving back reuses pages already read in that tab.
 
 `GET /v1/records` is the stable local-index interface for service consumers.
 It never contacts an upstream provider. Its JSON response identifies
