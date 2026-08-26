@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from ctlogs.control import ControlDatabase
 from ctlogs.database import Database, QuotaExceeded
 from ctlogs.ingest.enrich import (
     SourcePage,
@@ -22,6 +23,12 @@ from ctlogs.scheduler import (
     build_jobs,
     run_due_jobs,
 )
+
+
+def _control(tmp_path: Path) -> ControlDatabase:
+    control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
+    control.initialize()
+    return control
 
 
 def test_due_jobs_persist_success_and_retry_times(tmp_path: Path) -> None:
@@ -226,7 +233,8 @@ def test_priority_urlscan_queue_advances_history_until_complete(
 ) -> None:
     database = Database(tmp_path / "scheduler.sqlite3")
     database.initialize()
-    database.enqueue_urlscan_history("example.com")
+    control = _control(tmp_path)
+    control.admit("test", 10, "example.com")
     cursors: list[str | None] = []
 
     class Source:
@@ -249,17 +257,19 @@ def test_priority_urlscan_queue_advances_history_until_complete(
     source = Source()
     assert _run_urlscan_priority_batch(  # type: ignore[arg-type]
         database,
+        control,
         source,
         apexes_per_run=1,
     ) == (1, 1)
-    assert database.queued_urlscan_history(1) == ["example.com"]
+    assert control.queued_refreshes(1) == ["example.com"]
 
     assert _run_urlscan_priority_batch(  # type: ignore[arg-type]
         database,
+        control,
         source,
         apexes_per_run=1,
     ) == (1, 1)
-    assert database.queued_urlscan_history(1) == []
+    assert control.queued_refreshes(1) == []
     assert cursors == [None, "older-page"]
     assert [row.subdomain for row in database.search("example.com")] == [
         "old.example.com",
@@ -272,13 +282,18 @@ def test_priority_quota_exhaustion_keeps_the_queue_position(
 ) -> None:
     database = Database(tmp_path / "scheduler.sqlite3")
     database.initialize()
-    database.enqueue_urlscan_history(
+    control = _control(tmp_path)
+    control.admit(
+        "one",
+        10,
         "one.example",
-        requested_at="2026-08-24T00:00:00Z",
+        now=datetime(2026, 8, 24, 0, 0, tzinfo=UTC),
     )
-    database.enqueue_urlscan_history(
+    control.admit(
+        "two",
+        10,
         "two.example",
-        requested_at="2026-08-24T00:00:01Z",
+        now=datetime(2026, 8, 24, 0, 0, 1, tzinfo=UTC),
     )
 
     class Source:
@@ -291,12 +306,13 @@ def test_priority_quota_exhaustion_keeps_the_queue_position(
     with pytest.raises(QuotaExceeded):
         _run_urlscan_priority_batch(  # type: ignore[arg-type]
             database,
+            control,
             Source(),
             apexes_per_run=1,
             request_guard=lambda: database.consume_request("exhausted", 1),
         )
 
-    assert database.queued_urlscan_history(2) == ["one.example", "two.example"]
+    assert control.queued_refreshes(2) == ["one.example", "two.example"]
 
 
 def test_ct_history_scheduler_rotates_across_logs_with_separate_cursors(
@@ -358,7 +374,7 @@ def test_build_jobs_keeps_each_capped_source_on_its_own_budget(
         '["hagezi=https://data.example/hosts.txt"]',
     )
 
-    assert [job.name for job in build_jobs(database)] == [
+    assert [job.name for job in build_jobs(database, _control(tmp_path))] == [
         "root",
         "gov",
         "artifact:hagezi:bf2fe8a0d413",
@@ -369,7 +385,7 @@ def test_build_jobs_keeps_each_capped_source_on_its_own_budget(
     monkeypatch.setenv("URLSCAN_API_KEY", "key")
     monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "one.example,two.example")
 
-    assert [job.name for job in build_jobs(database)] == [
+    assert [job.name for job in build_jobs(database, _control(tmp_path))] == [
         "root",
         "gov",
         "artifact:hagezi:bf2fe8a0d413",
@@ -381,7 +397,7 @@ def test_build_jobs_keeps_each_capped_source_on_its_own_budget(
     monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "*")
     monkeypatch.setenv("CTLOGS_URLSCAN_INTERVAL", "60")
     monkeypatch.setenv("CTLOGS_URLSCAN_RETRY_INTERVAL", "120")
-    urlscan_job = build_jobs(database)[-1]
+    urlscan_job = build_jobs(database, _control(tmp_path))[-1]
     assert urlscan_job.name == "urlscan"
     assert urlscan_job.interval_seconds == 60
     assert urlscan_job.retry_seconds == 120
@@ -399,7 +415,10 @@ def test_disabled_urlscan_ignores_unrelated_provider_configuration(
     monkeypatch.delenv("CZDS_USERNAME", raising=False)
     monkeypatch.delenv("CZDS_PASSWORD", raising=False)
 
-    assert [job.name for job in build_jobs(database)] == ["root", "gov"]
+    assert [job.name for job in build_jobs(database, _control(tmp_path))] == [
+        "root",
+        "gov",
+    ]
 
 
 def test_urlscan_accepts_a_quoted_wildcard_from_a_raw_env_file(
@@ -413,7 +432,7 @@ def test_urlscan_accepts_a_quoted_wildcard_from_a_raw_env_file(
     monkeypatch.setenv("URLSCAN_API_KEY", "key")
     monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "'*'")
 
-    assert [job.name for job in build_jobs(database)] == [
+    assert [job.name for job in build_jobs(database, _control(tmp_path))] == [
         "urlscan-priority",
         "urlscan",
     ]
@@ -432,7 +451,35 @@ def test_ct_history_job_is_explicit_and_independent(
     monkeypatch.delenv("CZDS_USERNAME", raising=False)
     monkeypatch.delenv("CZDS_PASSWORD", raising=False)
 
-    assert [job.name for job in build_jobs(database)] == ["ct-history"]
+    assert [job.name for job in build_jobs(database, _control(tmp_path))] == [
+        "ct-history"
+    ]
+
+
+def test_live_ct_job_is_explicit_and_runs_inside_the_writer_scheduler(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    monkeypatch.setenv("CTLOGS_SCHEDULE_DEFAULTS", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_URLSCAN", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_LIVE_CT", "1")
+    monkeypatch.delenv("CZDS_USERNAME", raising=False)
+    monkeypatch.delenv("CZDS_PASSWORD", raising=False)
+    calls: list[tuple[int, int, int]] = []
+
+    async def poll(_database, *, batch, initial_backfill, max_batches):
+        calls.append((batch, initial_backfill, max_batches))
+        return 7
+
+    monkeypatch.setattr("ctlogs.scheduler.poll_once", poll)
+    jobs = build_jobs(database, _control(tmp_path))
+
+    assert [job.name for job in jobs] == ["live-ct"]
+    assert jobs[0].action() == 7
+    assert calls == [(1024, 1024, 8)]
 
 
 def test_singleton_lock_rejects_a_second_scheduler(tmp_path: Path) -> None:
@@ -477,7 +524,7 @@ def test_urlscan_breadth_cannot_spend_priority_or_search_reserves(
         URLSCAN_BREADTH_QUOTA_SUBJECT,
         1,
     )
-    jobs = {job.name: job for job in build_jobs(database)}
+    jobs = {job.name: job for job in build_jobs(database, _control(tmp_path))}
 
     with pytest.raises(QuotaExceeded, match="daily request limit exceeded"):
         jobs["urlscan"].action()
@@ -491,7 +538,8 @@ def test_priority_history_still_runs_after_breadth_budget_is_exhausted(
     database = Database(tmp_path / "scheduler.sqlite3")
     database.initialize()
     database.upsert_subdomains("breadth.example", [("breadth.example", None)])
-    database.enqueue_urlscan_history("priority.example")
+    control = _control(tmp_path)
+    control.admit("test", 10, "priority.example")
     monkeypatch.setenv("CTLOGS_SCHEDULE_DEFAULTS", "0")
     monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "0")
     monkeypatch.setenv("URLSCAN_API_KEY", "key")
@@ -520,7 +568,7 @@ def test_priority_history_still_runs_after_breadth_budget_is_exhausted(
         URLSCAN_BREADTH_QUOTA_SUBJECT,
         1,
     )
-    jobs = {job.name: job for job in build_jobs(database)}
+    jobs = {job.name: job for job in build_jobs(database, control)}
 
     assert jobs["urlscan-priority"].action() == (1, 0)
     with pytest.raises(QuotaExceeded):

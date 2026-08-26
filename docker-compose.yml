@@ -6,24 +6,18 @@ services:
       - "127.0.0.1:8200:8200"
     volumes:
       - ctlogs-data:/data
+      - ctlogs-control:/control
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     environment:
       CTLOGS_DB_PATH: /data/ctlogs.sqlite3
-      CTLOGS_AUTO_SEED: "0"
-      CTLOGS_ENABLE_LIVE_CT: "1"
-      CTLOGS_STATIC_CT_URLS: "https://mon.willow.ct.letsencrypt.org/2026h2"
+      CTLOGS_CONTROL_DB_PATH: /control/control.sqlite3
+      CTLOGS_INDEX_READ_ONLY: "1"
       CTLOGS_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,[::1]:*,subfinder-index:*"
       CTLOGS_ALLOWED_ORIGINS: "http://127.0.0.1:*,http://localhost:*"
-      CTLOGS_URLSCAN_DAILY_LIMIT: "100000"
-      CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT: "10000"
-      CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT: "20000"
-      CTLOGS_URLSCAN_SEARCH_PAGE_SIZE: "100"
-      CTLOGS_URLSCAN_SEARCH_TIMEOUT: "5"
-      CZDS_USERNAME: ""
-      CZDS_PASSWORD: ""
-    env_file:
-      - path: .env.providers
-        required: false
-        format: raw
+      CTLOGS_API_TOKENS: ${CTLOGS_API_TOKENS:-}
+      CTLOGS_TOKEN_REQUEST_LIMIT: ${CTLOGS_TOKEN_REQUEST_LIMIT:-10000}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8200/health"]
       interval: 10s
@@ -45,10 +39,24 @@ services:
       disable: true
     volumes:
       - ctlogs-data:/data
+      - ctlogs-control:/control
     env_file:
       - path: .env.providers
         required: false
         format: raw
+
+  migrate:
+    build: .
+    image: ctlogs:latest
+    entrypoint: ["python", "-m", "ctlogs.migrate"]
+    healthcheck:
+      disable: true
+    volumes:
+      - ctlogs-data:/data
+      - ctlogs-control:/control
+    environment:
+      CTLOGS_DB_PATH: /data/ctlogs.sqlite3
+      CTLOGS_CONTROL_DB_PATH: /control/control.sqlite3
 
   scheduler:
     build: .
@@ -59,33 +67,21 @@ services:
     restart: unless-stopped
     volumes:
       - ctlogs-data:/data
+      - ctlogs-control:/control
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     environment:
       CTLOGS_DB_PATH: /data/ctlogs.sqlite3
+      CTLOGS_CONTROL_DB_PATH: /control/control.sqlite3
       CTLOGS_SCHEDULER_LOCK: /data/scheduler.lock
       CTLOGS_SCHEDULER_INTERVAL: "86400"
       CTLOGS_SCHEDULER_RETRY_INTERVAL: "3600"
       CTLOGS_CZDS_MAX_ZONES: "25"
-      CTLOGS_SCHEDULE_URLSCAN: "0"
-    env_file:
-      - path: .env.providers
-        required: false
-        format: raw
-
-  urlscan-scheduler:
-    build: .
-    image: ctlogs:latest
-    entrypoint: ["python", "-m", "ctlogs.scheduler"]
-    healthcheck:
-      disable: true
-    restart: unless-stopped
-    volumes:
-      - ctlogs-data:/data
-    environment:
-      CTLOGS_DB_PATH: /data/ctlogs.sqlite3
-      CTLOGS_SCHEDULER_LOCK: /data/urlscan-scheduler.lock
-      CTLOGS_SCHEDULE_DEFAULTS: "0"
-      CTLOGS_SCHEDULE_CZDS: "0"
-      CTLOGS_URLSCAN_APEXES: "*"
+      CTLOGS_SCHEDULE_URLSCAN: "1"
+      CTLOGS_SCHEDULE_CT_HISTORY: "1"
+      CTLOGS_SCHEDULE_LIVE_CT: "1"
+      CTLOGS_STATIC_CT_URLS: "https://mon.willow.ct.letsencrypt.org/2026h2"
       CTLOGS_URLSCAN_APEXES_PER_RUN: "69"
       CTLOGS_URLSCAN_PRIORITY_APEXES_PER_RUN: "14"
       CTLOGS_URLSCAN_DAILY_LIMIT: "100000"
@@ -93,36 +89,21 @@ services:
       CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT: "20000"
       CTLOGS_URLSCAN_INTERVAL: "60"
       CTLOGS_URLSCAN_RETRY_INTERVAL: "3600"
-    env_file:
-      - path: .env.providers
-        required: false
-        format: raw
-
-  ct-history-scheduler:
-    build: .
-    image: ctlogs:latest
-    entrypoint: ["python", "-m", "ctlogs.scheduler"]
-    healthcheck:
-      disable: true
-    restart: unless-stopped
-    volumes:
-      - ctlogs-data:/data
-    environment:
-      CTLOGS_DB_PATH: /data/ctlogs.sqlite3
-      CTLOGS_SCHEDULER_LOCK: /data/ct-history-scheduler.lock
-      CTLOGS_SCHEDULE_DEFAULTS: "0"
-      CTLOGS_SCHEDULE_CZDS: "0"
-      CTLOGS_SCHEDULE_URLSCAN: "0"
-      CTLOGS_SCHEDULE_CT_HISTORY: "1"
       CTLOGS_CT_HISTORY_LOGS_PER_RUN: "1"
       CTLOGS_CT_HISTORY_BATCH_SIZE: "1024"
       CTLOGS_CT_HISTORY_MAX_BATCHES_PER_LOG: "8"
       CTLOGS_CT_HISTORY_INTERVAL: "60"
       CTLOGS_CT_HISTORY_RETRY_INTERVAL: "3600"
+    env_file:
+      - path: .env.providers
+        required: false
+        format: raw
 
 volumes:
   ctlogs-data:
     name: ${CTLOGS_DATA_VOLUME:-subfinder_ctlogs-data}
+  ctlogs-control:
+    name: ${CTLOGS_CONTROL_VOLUME:-subfinder_ctlogs-control}
 
 networks:
   data-plane:

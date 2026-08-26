@@ -4,8 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     CTLOGS_DB_PATH=/data/ctlogs.sqlite3 \
-    CTLOGS_ENABLE_LIVE_CT=1 \
-    CTLOGS_AUTO_SEED=0
+    CTLOGS_CONTROL_DB_PATH=/control/control.sqlite3 \
+    CTLOGS_INDEX_READ_ONLY=1
 
 WORKDIR /app
 
@@ -19,8 +19,8 @@ RUN pip install --upgrade pip && pip install -e .
 # The frontend is static, so it copies in after the install to keep that layer cached
 COPY web ./web
 
-# Ensure data dir exists and is writable (DB lives here)
-RUN mkdir -p /data && chmod 777 /data
+# The API reads /data and writes only small admission state under /control.
+RUN mkdir -p /data /control && chmod 777 /data /control
 
 EXPOSE 8200
 

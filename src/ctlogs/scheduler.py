@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from ctlogs.control import ControlDatabase
 from ctlogs.database import Database, QuotaExceeded
 from ctlogs.ingest.backfill import (
     DEFAULT_JOBS,
@@ -34,7 +36,7 @@ from ctlogs.ingest.enrich import (
     split_urlscan_budget,
 )
 from ctlogs.ingest.history import run_history
-from ctlogs.worker import _usable_log_urls
+from ctlogs.worker import _usable_log_urls, poll_once
 
 LOGGER = logging.getLogger("ctlogs.scheduler")
 DEFAULT_INTERVAL_SECONDS = 24 * 60 * 60
@@ -180,12 +182,13 @@ def _run_urlscan_apex(
 
 def _run_urlscan_priority_batch(
     database: Database,
+    control_database: ControlDatabase,
     source: UrlscanSource,
     *,
     apexes_per_run: int,
     request_guard: Callable[[], object] | None = None,
 ) -> tuple[int, int]:
-    apexes = database.queued_urlscan_history(apexes_per_run)
+    apexes = control_database.queued_refreshes(apexes_per_run)
     requests = 0
     hostnames = 0
     failures = 0
@@ -205,7 +208,11 @@ def _run_urlscan_priority_batch(
         else:
             requests += source_requests
             hostnames += source_hostnames
-        database.finish_urlscan_history_attempt(apex)
+        state = database.get_ingest_state(f"enrich:{source.name}:{apex}")
+        control_database.finish_refresh_attempt(
+            apex,
+            complete=bool(state and state.get("cursor") == "complete"),
+        )
     if apexes and failures == len(apexes):
         raise RuntimeError("urlscan priority history failed for every queued apex")
     return requests, hostnames
@@ -297,7 +304,10 @@ def _run_ct_history_batch(
     return entries, hostnames
 
 
-def build_jobs(database: Database) -> list[ScheduledJob]:
+def build_jobs(
+    database: Database,
+    control_database: ControlDatabase,
+) -> list[ScheduledJob]:
     interval = _positive_environment_integer(
         "CTLOGS_SCHEDULER_INTERVAL",
         DEFAULT_INTERVAL_SECONDS,
@@ -405,6 +415,43 @@ def build_jobs(database: Database) -> list[ScheduledJob]:
             )
         )
 
+    if _enabled("CTLOGS_SCHEDULE_LIVE_CT", False):
+        live_ct_interval = _positive_environment_integer(
+            "CTLOGS_LIVE_CT_INTERVAL",
+            60,
+        )
+        live_ct_retry = _positive_environment_integer(
+            "CTLOGS_LIVE_CT_RETRY_INTERVAL",
+            retry,
+        )
+        live_ct_batch_size = _positive_environment_integer(
+            "CTLOGS_LIVE_CT_BATCH_SIZE",
+            1024,
+        )
+        live_ct_initial_backfill = _positive_environment_integer(
+            "CTLOGS_LIVE_CT_INITIAL_BACKFILL",
+            1024,
+        )
+        live_ct_max_batches = _positive_environment_integer(
+            "CTLOGS_LIVE_CT_MAX_BATCHES_PER_LOG",
+            8,
+        )
+        jobs.append(
+            ScheduledJob(
+                "live-ct",
+                live_ct_interval,
+                live_ct_retry,
+                lambda: asyncio.run(
+                    poll_once(
+                        database,
+                        batch=live_ct_batch_size,
+                        initial_backfill=live_ct_initial_backfill,
+                        max_batches=live_ct_max_batches,
+                    )
+                ),
+            )
+        )
+
     if _enabled("CTLOGS_SCHEDULE_URLSCAN"):
         urlscan_key = os.environ.get("URLSCAN_API_KEY")
         urlscan_apexes = _apexes_from_environment()
@@ -461,6 +508,7 @@ def build_jobs(database: Database) -> list[ScheduledJob]:
                     urlscan_retry,
                     lambda: _run_urlscan_priority_batch(
                         database,
+                        control_database,
                         UrlscanSource(urlscan_key, timeout=timeout),
                         apexes_per_run=priority_apexes_per_run,
                         request_guard=priority_guard,
@@ -567,14 +615,20 @@ def run_forever(database: Database, jobs: list[ScheduledJob], tick_seconds: int)
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run recurring ingestion jobs")
     parser.add_argument("--db", default=os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3"))
+    parser.add_argument(
+        "--control-db",
+        default=os.environ.get("CTLOGS_CONTROL_DB_PATH", "data/control.sqlite3"),
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=os.environ.get("CTLOGS_LOG_LEVEL", "INFO"))
 
     database = Database(args.db)
-    database.initialize()
-    jobs = build_jobs(database)
+    database.verify_schema()
+    control_database = ControlDatabase(args.control_db)
+    control_database.verify_schema()
+    jobs = build_jobs(database, control_database)
     if (
         _enabled("CTLOGS_SCHEDULE_URLSCAN")
         and os.environ.get("URLSCAN_API_KEY")

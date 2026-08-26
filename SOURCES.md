@@ -1,9 +1,8 @@
 # Source catalog
 
-This catalog separates the public query service from bulk indexing jobs. When
-configured, a query refreshes urlscan's newest indexed records, queues deeper
-history, and then reads the local index. It does not submit a live scan or probe
-a hostname.
+This catalog separates the public query service from indexing jobs. A query
+reads the local index and atomically queues optional passive enrichment. It does
+not wait for urlscan, submit a live scan, or probe a hostname.
 
 ## Default sources without credentials
 
@@ -36,32 +35,32 @@ a hostname.
 
 Every enabled adapter writes to one index. A hostname keeps its earliest dated
 observation across sources, while `subdomain_sources` keeps each source's own
-first and last observation. Public searches refresh urlscan when configured,
-then read the consolidated index. Bulk sources run on their own schedules and
-are never replaced by urlscan results. `/v1/stats` reports the current count of
-distinct provenance source IDs.
+first and last observation. Public searches only read the consolidated index.
+Bulk and enrichment sources run on the writer scheduler and are never replaced
+by urlscan results. `/v1/stats` reports the current count of distinct
+provenance source IDs.
 
 ## Update cadence
 
-The API container tails Chrome, Apple, RFC 6962, and configured Static CT logs
-continuously. A separate CT history scheduler rotates across usable RFC 6962
-logs and advances each log from its first entry with an independent cursor. One
-scheduler runs IANA, CISA, configured artifacts, and CZDS every 24 hours. A
-separate urlscan scheduler runs priority and breadth jobs. Search requests also
-perform one bounded urlscan refresh before reading SQLite.
+One scheduler owns recurring catalog writes. It tails Chrome, Apple, RFC 6962,
+and configured Static CT logs; rotates through historical RFC 6962 entries with
+an independent cursor; runs IANA, CISA, configured artifacts, and CZDS; and
+runs optional urlscan priority and breadth jobs. Search requests only enqueue
+the searched apex in the separate control database.
 
 CZDS and urlscan have independent caps. CZDS checks the 25 least-recently
 checked approved zones per run. With `CTLOGS_URLSCAN_APEXES=*`, urlscan walks
 the full local apex index in batches of up to 69. Each apex keeps its own
 `search_after` cursor. Search requests add their apex to a persistent FIFO queue
-whose job processes up to 14 apexes per run. Incomplete apexes rotate to the
+in the control database. Its job processes up to 14 apexes per run. Incomplete apexes rotate to the
 back; completed apexes leave the queue. API refreshes do not overwrite those
 cursors.
 
 Automated URLSCAN calls use separate daily classes under one 100,000-request
-ceiling: 10,000 live refreshes, 20,000 queued-history requests, and 70,000
-breadth requests. The class maximums add up to the total, so breadth cannot
-silently consume the priority share. Artifact imports each have their own
+ceiling: 20,000 queued-history requests, a retained 10,000-request reserve, and
+70,000 breadth requests. Searches do not make provider calls. The class
+maximums add up to the total, so breadth cannot silently consume the priority
+share. Artifact imports each have their own
 download and parser run, so adding one cannot consume another source's slot.
 
 The `.ee`, `.se`, `.nu`, `.ch`, `.li`, Chaos, Common Crawl, HaGeZi, and Geomys
