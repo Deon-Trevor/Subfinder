@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subfinder burst-hardening council</title>
+  <style>
+    :root { color-scheme: light; --ink:#17211b; --muted:#667168; --line:#dce3dd; --soft:#f5f8f5; --accent:#24734b; --warn:#9b5b13; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#fff; color:var(--ink); font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(980px,calc(100% - 32px)); margin:40px auto 64px; }
+    h1,h2 { line-height:1.2; }
+    h1 { font-size:clamp(2rem,5vw,3.6rem); margin:0 0 12px; }
+    h2 { margin-top:36px; }
+    .meta { color:var(--muted); }
+    .question,.verdict { border:1px solid var(--line); border-radius:14px; padding:22px; }
+    .question { background:var(--soft); }
+    .verdict { border-left:5px solid var(--accent); margin-top:24px; }
+    .verdict h2 { margin-top:0; }
+    .alignment { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin:18px 0; }
+    .alignment span { background:#dcefe3; border-radius:8px; padding:10px 6px; text-align:center; font-size:.86rem; }
+    .alignment .split { background:#fae8cf; }
+    details { border:1px solid var(--line); border-radius:10px; margin:10px 0; padding:0 16px; }
+    summary { cursor:pointer; font-weight:700; padding:14px 0; }
+    details div { padding:0 0 16px; }
+    code { background:var(--soft); border-radius:4px; padding:.1em .3em; }
+    footer { border-top:1px solid var(--line); color:var(--muted); margin-top:42px; padding-top:18px; }
+    @media (max-width:640px) { .alignment { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <p class="meta">LLM Council briefing · 2026-08-26T15:08:35Z</p>
+  <h1>Subfinder burst hardening</h1>
+  <section class="question">
+    <strong>Question</strong>
+    <p>How should Subfinder serve a synchronized burst of 70 public searches plus 10 authenticated Threat Hunter record requests, reject abusive overload, preserve exact quotas, and trust client identity behind NGINX and Docker?</p>
+    <p>Baseline evidence: same-apex public p95 was 652 ms, distinct-apex p95 was 608 ms, staggered-burst p95 was 79 ms, and an unbounded 500+20 load raised public p95 to 6.7 seconds and maximum RSS to 153 MB.</p>
+  </section>
+
+  <section class="verdict">
+    <h2>The recommendation</h2>
+    <p>Use separate total in-flight limits of 80 public and 16 authenticated-service requests. Keep each request counted until its response completes. Reject excess work before quota admission with <code>503</code>, <code>Retry-After: 1</code>, and a class-specific <code>X-Overload-Reason</code>. Keep <code>429</code> only for exact daily quota exhaustion.</p>
+    <p>Keep one catalog worker. A disconfirming benchmark after the advisor round showed that 70 direct reads took about 55 ms sequentially and about 379 ms with eight threads. One reader reduced synchronized distinct-apex p95 to 233 ms. Do not add a cache, group commits, or singleflight without new evidence.</p>
+    <p>NGINX must replace forwarding headers. Uvicorn must trust only the exact NGINX socket peer. Run one Uvicorn worker so the in-process limits remain authoritative.</p>
+  </section>
+
+  <h2>Agreement and disagreement</h2>
+  <div class="alignment" aria-label="Advisor alignment">
+    <span>5/5<br>Bound load</span>
+    <span>5/5<br>Keep SQLite</span>
+    <span>5/5<br>Reserve service</span>
+    <span>5/5<br>Trusted proxy</span>
+    <span class="split">2/5<br>Add singleflight</span>
+  </div>
+  <p>All advisors agreed on bounded class-aware capacity, service reservation, health isolation, correct status semantics, and an explicit proxy trust boundary. They disagreed on reader count, quota batching, and catalog singleflight.</p>
+
+  <h2>Advisor responses</h2>
+  <details>
+    <summary>The Contrarian</summary>
+    <div><p>Do not enlarge semaphores. Use public capacity 80 and service capacity 16, reserve service work, and reject full or expired capacity with <code>503</code>. Keep quota exhaustion as <code>429</code>. The advisor proposed a bounded micro-batched control writer but rejected catalog singleflight because distinct-apex traffic was equally slow and shared large responses can create memory risk. NGINX must replace forwarding headers and trust only known proxy peers.</p></div>
+  </details>
+  <details>
+    <summary>The First Principles Thinker</summary>
+    <div><p>Define two admission classes with a global catalog bound and reserved service capacity. Bound control work, return <code>503</code> for capacity failures, and authenticate service traffic before public admission. This advisor proposed catalog singleflight and a small TTL cache. The chairman rejected the cache and extra reader concurrency after the sequential-read benchmark.</p></div>
+  </details>
+  <details>
+    <summary>The Expansionist</summary>
+    <div><p>Use explicit admission, catalog, and refresh lanes. Reserve token capacity, add bounded quota micro-batches, use catalog singleflight without a TTL cache, and keep refresh work outside result delivery. The advisor also called for structured lane metrics and one Uvicorn worker. The proposed 16 catalog readers conflicted with later evidence.</p></div>
+  </details>
+  <details>
+    <summary>The Outsider</summary>
+    <div><p>Treat 70+10 as a supported service contract. Bound every existing wait queue, keep public and service capacity separate, reject overload before quota consumption, and keep SQLite. The proxy must replace untrusted headers, and the test set must include 500+20 rejection behavior as well as the supported burst.</p></div>
+  </details>
+  <details>
+    <summary>The Executor</summary>
+    <div><p>Add separate FIFO capacity for public and service traffic, retain serialized exact quota work, bound catalog acquisition, and test only on local or container targets. The advisor incorrectly proposed <code>429</code> for a full queue, then used <code>503</code> for deadline expiry. The chairman kept <code>503</code> for every capacity rejection.</p></div>
+  </details>
+
+  <h2>Peer review highlights</h2>
+  <details>
+    <summary>Open the review findings</summary>
+    <div>
+      <p>Three reviewers ranked Response B strongest. One ranked A strongest. Reviewers consistently rejected Response E's use of <code>429</code> for overload and warned that its 250 ms deadline was below the measured pre-fix wait.</p>
+      <p>The reviews found two contracts that the advisor round missed. Response egress and slow clients must remain within the in-flight limits. A synchronous SQLite operation can commit after a caller disconnects or a coroutine times out, so the implementation must not release its lane while abandoned thread work continues.</p>
+      <p>The reviews also required an executable service contract: all 70 public and 10 service requests succeed under the supported gate, public p95 stays below 250 ms, health p99 stays below 50 ms, and excess public work receives a predictable <code>503</code>.</p>
+    </div>
+  </details>
+
+  <h2>The one thing to do first</h2>
+  <p>Change catalog concurrency from eight to one, then rerun the synchronized distinct-apex gate before adding a cache or batch worker.</p>
+
+  <footer>Subfinder burst-hardening council · Full transcript: <code>council-transcript-20260826T150835Z.md</code></footer>
+</main>
+</body>
+</html>
