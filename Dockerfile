@@ -12,9 +12,16 @@ WORKDIR /app
 # curl for HEALTHCHECK, ca-certificates for TLS fetches if ingests run at startup
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md SOURCES.md ./
+COPY pyproject.toml ./
+RUN pip install --upgrade pip && \
+    python -c 'import subprocess, sys, tomllib; dependencies = tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]; subprocess.check_call([sys.executable, "-m", "pip", "install", *dependencies])'
+
+# Application and documentation changes should not invalidate the much slower
+# dependency layer above. PYTHONPATH exposes the local package without another
+# package-manager or build-isolation pass.
+COPY README.md SOURCES.md ./
 COPY src ./src
-RUN pip install --upgrade pip && pip install -e .
+ENV PYTHONPATH=/app/src
 
 # The frontend is static, so it copies in after the install to keep that layer cached
 COPY web ./web
