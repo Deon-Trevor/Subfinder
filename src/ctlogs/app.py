@@ -10,27 +10,46 @@ import re
 import secrets
 import sqlite3
 import time
+from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass
 from functools import lru_cache, partial
-from collections.abc import AsyncIterator, Iterable, Iterator
 from pathlib import Path
 from threading import Lock
 from typing import Literal
 
 import tldextract
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel
 
-from ctlogs.control import Admission, AdmissionRequest, ControlDatabase, ControlUnavailable
-from ctlogs.database import Database, Quota, QuotaExceeded, SearchCursor, SearchResult
+from ctlogs.control import (
+    Admission,
+    AdmissionRequest,
+    ControlDatabase,
+    ControlUnavailable,
+)
+from ctlogs.database import (
+    BatchResultTooLarge,
+    Database,
+    Quota,
+    QuotaExceeded,
+    SearchCursor,
+    SearchResult,
+)
 from ctlogs.web import mount_frontend
 
 DAILY_REQUEST_LIMIT = 1_000
 RECORDS_SCHEMA_VERSION = "subfinder.index-records.v1"
+BATCH_RECORDS_SCHEMA_VERSION = "subfinder.internal-index-records-batch.v1"
 STREAM_CHUNK_BYTES = 64 * 1024
+INTERNAL_REQUEST_MAX_BYTES = 64 * 1024
 LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 EXTRACT = tldextract.TLDExtract(
     suffix_list_urls=(),
@@ -55,6 +74,17 @@ class IndexRecordsResponse(BaseModel):
     schema_version: Literal["subfinder.index-records.v1"] = RECORDS_SCHEMA_VERSION
     apex: str
     records: list[HostnameRecord]
+
+
+class BatchRecordsRequest(BaseModel):
+    apexes: list[str]
+
+
+class BatchRecordsResponse(BaseModel):
+    schema_version: Literal["subfinder.internal-index-records-batch.v1"] = (
+        BATCH_RECORDS_SCHEMA_VERSION
+    )
+    results: list[IndexRecordsResponse]
 
 
 class _ImmediateCapacity:
@@ -114,6 +144,38 @@ class _RequestCapacityMiddleware:
             None,
         )
         service = _valid_bearer_token(authorization, self.api_tokens)
+        if scope["path"].startswith("/internal/") and not service:
+            response = JSONResponse(
+                status_code=401,
+                content={"detail": "a valid service token is required"},
+                headers={
+                    "Cache-Control": "no-store",
+                    "WWW-Authenticate": "Bearer",
+                },
+            )
+            await response(scope, receive, send)
+            return
+        if scope["path"].startswith("/internal/"):
+            content_length = next(
+                (
+                    value.decode("latin-1")
+                    for name, value in scope.get("headers", ())
+                    if name.lower() == b"content-length"
+                ),
+                "0",
+            )
+            try:
+                declared_bytes = int(content_length)
+            except ValueError:
+                declared_bytes = INTERNAL_REQUEST_MAX_BYTES + 1
+            if declared_bytes > INTERNAL_REQUEST_MAX_BYTES:
+                response = JSONResponse(
+                    status_code=413,
+                    content={"detail": "internal request body is too large"},
+                    headers={"Cache-Control": "no-store"},
+                )
+                await response(scope, receive, send)
+                return
         capacity = self.service_capacity if service else self.public_capacity
         request_class = "service" if service else "public"
         if not capacity.try_acquire():
@@ -135,8 +197,14 @@ class _RequestCapacityMiddleware:
 
     @staticmethod
     def _protected_path(path: str) -> bool:
-        return path in {"/v1/search", "/v1/records", "/mcp"} or path.startswith(
-            "/mcp/"
+        return (
+            path in {
+                "/v1/search",
+                "/v1/records",
+                "/internal/v1/records/batch",
+                "/mcp",
+            }
+            or path.startswith("/mcp/")
         )
 
 
@@ -397,6 +465,8 @@ def create_app(
     enqueue_refresh: bool | None = None,
     public_inflight_limit: int | None = None,
     service_inflight_limit: int | None = None,
+    batch_max_apexes: int | None = None,
+    batch_max_records: int | None = None,
 ) -> FastAPI:
     if daily_request_limit < 1:
         raise ValueError("daily_request_limit must be positive")
@@ -426,6 +496,18 @@ def create_app(
     )
     if authenticated_limit < 1:
         raise ValueError("token_request_limit must be positive")
+    configured_batch_max_apexes = (
+        batch_max_apexes
+        if batch_max_apexes is not None
+        else _get_env_int("CTLOGS_BATCH_MAX_APEXES", 100)
+    )
+    configured_batch_max_records = (
+        batch_max_records
+        if batch_max_records is not None
+        else _get_env_int("CTLOGS_BATCH_MAX_RECORDS", 5_000)
+    )
+    if configured_batch_max_apexes < 1 or configured_batch_max_records < 1:
+        raise ValueError("batch limits must be positive")
 
     path = Path(
         database_path or os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3")
@@ -502,6 +584,17 @@ def create_app(
                 enqueue_refresh=refresh and configured_enqueue_refresh,
             )
         )
+
+    def authenticated_subject(authorization: str | None) -> str:
+        if not _valid_bearer_token(authorization, configured_tokens):
+            raise HTTPException(
+                status_code=401,
+                detail="a valid service token is required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        assert authorization is not None
+        candidate = authorization.removeprefix("Bearer ").strip()
+        return "token:" + hashlib.sha256(candidate.encode()).hexdigest()
 
     async def catalog_call(function, *args, **kwargs):
         await asyncio.wait_for(catalog_slots.acquire(), timeout=catalog_deadline)
@@ -711,6 +804,116 @@ def create_app(
             f"catalog;dur={catalog_ms:.3f}, total;dur={total_ms:.3f}"
         )
         return records
+
+    @app.post(
+        "/internal/v1/records/batch",
+        response_model=BatchRecordsResponse,
+    )
+    async def batch_index_records(
+        request: Request,
+        response: Response,
+        body: BatchRecordsRequest,
+    ) -> BatchRecordsResponse:
+        """Read bounded index snapshots for trusted data-plane consumers."""
+        started = time.perf_counter()
+        authorization = request.headers.get("authorization")
+        subject = authenticated_subject(authorization)
+        if not body.apexes:
+            raise HTTPException(status_code=400, detail="apexes must not be empty")
+        if len(body.apexes) > configured_batch_max_apexes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "batch contains too many apexes; maximum is "
+                    f"{configured_batch_max_apexes}"
+                ),
+            )
+        try:
+            apexes = [normalize_apex(apex) for apex in body.apexes]
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if len(set(apexes)) != len(apexes):
+            raise HTTPException(status_code=400, detail="apexes must be unique")
+
+        admission_started = time.perf_counter()
+        try:
+            quota = await asyncio.to_thread(
+                control.consume,
+                subject,
+                authenticated_limit,
+                len(apexes),
+            )
+        except QuotaExceeded as error:
+            raise HTTPException(
+                status_code=429,
+                detail="daily request limit exceeded",
+                headers=_retry_headers(error.quota),
+            ) from error
+        except (ControlUnavailable, TimeoutError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="batch admission is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        admission_ms = (time.perf_counter() - admission_started) * 1_000
+
+        catalog_started = time.perf_counter()
+        try:
+            indexed = await catalog_call(
+                database.records_many,
+                apexes,
+                max_records=configured_batch_max_records,
+            )
+        except BatchResultTooLarge as error:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"batch contains {error.total} hostnames; maximum is "
+                    f"{error.limit}; split the request"
+                ),
+            ) from error
+        except (sqlite3.Error, TimeoutError, RuntimeError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="catalog is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        catalog_ms = (time.perf_counter() - catalog_started) * 1_000
+
+        results = [
+            IndexRecordsResponse(
+                apex=apex,
+                records=[
+                    HostnameRecord(
+                        hostname=record.hostname,
+                        first_seen=record.first_seen,
+                        sources=[
+                            SourceRecord(
+                                source=source.source,
+                                first_seen=source.first_seen,
+                                last_seen=source.last_seen,
+                            )
+                            for source in record.sources
+                        ],
+                    )
+                    for record in indexed[apex]
+                ],
+            )
+            for apex in apexes
+        ]
+        total_ms = (time.perf_counter() - started) * 1_000
+        response.headers.update(_quota_headers(quota))
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Subfinder-Schema-Version"] = (
+            BATCH_RECORDS_SCHEMA_VERSION
+        )
+        response.headers["X-Request-ID"] = secrets.token_hex(8)
+        response.headers["X-Batch-Apex-Count"] = str(len(apexes))
+        response.headers["Server-Timing"] = (
+            f"admission;dur={admission_ms:.3f}, "
+            f"catalog;dur={catalog_ms:.3f}, total;dur={total_ms:.3f}"
+        )
+        return BatchRecordsResponse(results=results)
 
     @app.get("/v1/search")
     async def search_api(

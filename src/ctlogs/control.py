@@ -171,6 +171,68 @@ class ControlDatabase:
             raise outcome
         return outcome
 
+    def consume(
+        self,
+        subject: str,
+        limit: int,
+        units: int,
+        *,
+        now: datetime | None = None,
+    ) -> Quota:
+        """Atomically consume several quota units or consume none of them."""
+        if limit < 1 or units < 1:
+            raise ValueError("limit and units must be positive")
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            raise ValueError("now must include a timezone")
+        current = current.astimezone(UTC)
+        day = current.date().isoformat()
+        reset = datetime.combine(current.date() + timedelta(days=1), time.min, UTC)
+        if units > limit:
+            raise QuotaExceeded(Quota(limit, limit, int(reset.timestamp())))
+        prune_before_day = (current.date() - timedelta(days=2)).isoformat()
+        should_prune = self._last_prune_day != day
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if should_prune:
+                    connection.execute(
+                        "DELETE FROM request_counts WHERE day < ?",
+                        (prune_before_day,),
+                    )
+                row = connection.execute(
+                    """
+                    INSERT INTO request_counts (day, subject, used)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT (day, subject) DO UPDATE
+                    SET used = used + excluded.used
+                    WHERE used + excluded.used <= ?
+                    RETURNING used
+                    """,
+                    (day, subject, units, limit),
+                ).fetchone()
+                if row is None:
+                    existing = connection.execute(
+                        "SELECT used FROM request_counts WHERE day = ? AND subject = ?",
+                        (day, subject),
+                    ).fetchone()
+                    used = int(existing["used"]) if existing is not None else 0
+                    raise QuotaExceeded(
+                        Quota(
+                            limit,
+                            max(0, limit - used),
+                            int(reset.timestamp()),
+                        )
+                    )
+                used = int(row["used"])
+        except QuotaExceeded:
+            raise
+        except sqlite3.Error as error:
+            raise ControlUnavailable("control quota consumption failed") from error
+        if should_prune:
+            self._last_prune_day = day
+        return Quota(limit, max(0, limit - used), int(reset.timestamp()))
+
     def admit_many(
         self,
         requests: list[AdmissionRequest],

@@ -58,6 +58,22 @@ def test_admission_is_atomic_across_threads(tmp_path: Path) -> None:
     assert accepted.count(False) == 30
 
 
+def test_multi_unit_consumption_is_exact_and_all_or_nothing(tmp_path: Path) -> None:
+    control = ControlDatabase(tmp_path / "multi-unit.sqlite3")
+    control.initialize()
+    now = datetime(2026, 8, 26, tzinfo=UTC)
+
+    accepted = control.consume("threat-hunter", 5, 3, now=now)
+    assert accepted.remaining == 2
+
+    with pytest.raises(QuotaExceeded) as rejected:
+        control.consume("threat-hunter", 5, 3, now=now)
+    assert rejected.value.quota.remaining == 2
+
+    final = control.consume("threat-hunter", 5, 2, now=now)
+    assert final.remaining == 0
+
+
 def test_batched_admission_preserves_order_quota_and_refresh_deduplication(
     tmp_path: Path,
 ) -> None:

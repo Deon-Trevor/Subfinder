@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from pathlib import Path
 import asyncio
 import sqlite3
 import threading
 import time
+from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 import pytest
@@ -145,6 +145,160 @@ async def test_records_api_returns_local_provenance_without_discovery(
     }
     assert app.state.control_database.queued_refreshes(1) == []
     assert "x-urlscan-status" not in response.headers
+
+
+@pytest.mark.anyio
+async def test_private_batch_records_requires_token_and_charges_each_apex(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        tmp_path / "batch-api.sqlite3",
+        api_tokens=["threat-hunter-token"],
+        token_request_limit=4,
+        batch_max_apexes=3,
+        batch_max_records=10,
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        app.state.database.upsert_subdomains(
+            "example.com",
+            [("www.example.com", "2025-02-03T04:05:06Z")],
+            source="direct_ct:https://ct.example",
+            observed_at="2026-08-21T00:00:00Z",
+        )
+        missing = await test_client.post(
+            "/internal/v1/records/batch",
+            json={"apexes": ["example.com"]},
+        )
+        forged = await test_client.post(
+            "/internal/v1/records/batch",
+            headers={"Authorization": "Bearer wrong"},
+            json={"apexes": ["example.com"]},
+        )
+        first = await test_client.post(
+            "/internal/v1/records/batch",
+            headers={"Authorization": "Bearer threat-hunter-token"},
+            json={"apexes": ["example.net", "example.com"]},
+        )
+        second = await test_client.post(
+            "/internal/v1/records/batch",
+            headers={"Authorization": "Bearer threat-hunter-token"},
+            json={"apexes": ["example.com", "example.net"]},
+        )
+        exhausted = await test_client.post(
+            "/internal/v1/records/batch",
+            headers={"Authorization": "Bearer threat-hunter-token"},
+            json={"apexes": ["example.com"]},
+        )
+
+    assert missing.status_code == 401
+    assert missing.headers["www-authenticate"] == "Bearer"
+    assert forged.status_code == 401
+    assert first.status_code == 200
+    assert first.headers["cache-control"] == "no-store"
+    assert first.headers["x-ratelimit-remaining"] == "2"
+    assert first.headers["x-batch-apex-count"] == "2"
+    assert first.json()["schema_version"] == (
+        "subfinder.internal-index-records-batch.v1"
+    )
+    assert [item["apex"] for item in first.json()["results"]] == [
+        "example.net",
+        "example.com",
+    ]
+    assert first.json()["results"][0]["records"] == []
+    assert first.json()["results"][1]["records"][0]["hostname"] == (
+        "www.example.com"
+    )
+    assert second.status_code == 200
+    assert second.headers["x-ratelimit-remaining"] == "0"
+    assert exhausted.status_code == 429
+
+
+@pytest.mark.anyio
+async def test_private_batch_validates_bounds_before_consuming_quota(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        tmp_path / "batch-bounds.sqlite3",
+        api_tokens=["token"],
+        token_request_limit=2,
+        batch_max_apexes=2,
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    headers = {"Authorization": "Bearer token"}
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        empty = await test_client.post(
+            "/internal/v1/records/batch", headers=headers, json={"apexes": []}
+        )
+        duplicate = await test_client.post(
+            "/internal/v1/records/batch",
+            headers=headers,
+            json={"apexes": ["example.com", "EXAMPLE.COM."]},
+        )
+        oversized = await test_client.post(
+            "/internal/v1/records/batch",
+            headers=headers,
+            json={"apexes": ["example.com", "example.net", "example.org"]},
+        )
+        accepted = await test_client.post(
+            "/internal/v1/records/batch",
+            headers=headers,
+            json={"apexes": ["example.com", "example.net"]},
+        )
+
+    assert empty.status_code == 400
+    assert duplicate.status_code == 400
+    assert oversized.status_code == 413
+    assert accepted.status_code == 200
+    assert accepted.headers["x-ratelimit-remaining"] == "0"
+
+
+@pytest.mark.anyio
+async def test_private_batch_refuses_an_unbounded_hostname_response(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        tmp_path / "batch-result-bound.sqlite3",
+        api_tokens=["token"],
+        batch_max_records=1,
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        app.state.database.upsert_subdomains(
+            "example.com",
+            [("one.example.com", None), ("two.example.com", None)],
+        )
+        response = await test_client.post(
+            "/internal/v1/records/batch",
+            headers={"Authorization": "Bearer token"},
+            json={"apexes": ["example.com"]},
+        )
+
+    assert response.status_code == 413
+    assert response.json() == {
+        "detail": "batch contains 2 hostnames; maximum is 1; split the request"
+    }
 
 
 @pytest.mark.anyio
@@ -497,6 +651,7 @@ async def test_forwarded_client_identity_requires_a_trusted_socket_peer() -> Non
     [
         ("/v1/search", True),
         ("/v1/records", True),
+        ("/internal/v1/records/batch", True),
         ("/mcp", True),
         ("/mcp/", True),
         ("/mcp/messages", True),
@@ -511,6 +666,16 @@ def test_capacity_boundary_covers_only_costly_request_paths(
     protected: bool,
 ) -> None:
     assert app_module._RequestCapacityMiddleware._protected_path(path) is protected
+
+
+def test_public_edge_does_not_proxy_internal_data_plane_routes() -> None:
+    config = (Path(__file__).resolve().parents[1] / "deploy/nginx.conf").read_text(
+        encoding="utf-8"
+    )
+    internal = config.index("location ^~ /internal/")
+    public = config.index("location / {", internal)
+
+    assert "return 404;" in config[internal:public]
 
 
 @pytest.mark.anyio

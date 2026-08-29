@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import fcntl
+import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
-import fcntl
 from pathlib import Path
 
 
@@ -57,6 +57,15 @@ class QuotaExceeded(Exception):
     def __init__(self, quota: Quota) -> None:
         super().__init__("daily request limit exceeded")
         self.quota = quota
+
+
+class BatchResultTooLarge(ValueError):
+    """The requested apex set exceeds the bounded batch response size."""
+
+    def __init__(self, total: int, limit: int) -> None:
+        super().__init__(f"batch contains {total} hostnames; limit is {limit}")
+        self.total = total
+        self.limit = limit
 
 
 class Database:
@@ -604,6 +613,87 @@ class Database:
         if hostname is not None:
             records.append(IndexedRecord(hostname, first_seen, tuple(sources)))
         return records
+
+    def records_many(
+        self,
+        apexes: list[str],
+        *,
+        max_records: int,
+    ) -> dict[str, list[IndexedRecord]]:
+        """Read complete provenance records for several apexes in one snapshot."""
+        if not apexes:
+            raise ValueError("apexes must not be empty")
+        if len(set(apexes)) != len(apexes):
+            raise ValueError("apexes must be unique")
+        if max_records < 1:
+            raise ValueError("max_records must be positive")
+
+        placeholders = ",".join("?" for _ in apexes)
+        order = " ".join(
+            f"WHEN ? THEN {index}" for index, _apex in enumerate(apexes)
+        )
+        with self.connect() as connection:
+            count_row = connection.execute(
+                f"SELECT COUNT(*) AS total FROM subdomains "
+                f"WHERE apex IN ({placeholders})",
+                apexes,
+            ).fetchone()
+            total = int(count_row["total"])
+            if total > max_records:
+                raise BatchResultTooLarge(total, max_records)
+            rows = connection.execute(
+                f"""
+                SELECT
+                    names.apex,
+                    names.subdomain,
+                    names.first_seen AS hostname_first_seen,
+                    evidence.source,
+                    evidence.first_seen AS source_first_seen,
+                    evidence.last_seen
+                FROM subdomains AS names
+                LEFT JOIN subdomain_sources AS evidence
+                    ON evidence.apex = names.apex
+                   AND evidence.subdomain = names.subdomain
+                WHERE names.apex IN ({placeholders})
+                ORDER BY
+                    CASE names.apex {order} END,
+                    names.first_seen IS NULL,
+                    names.first_seen,
+                    names.subdomain,
+                    evidence.source
+                """,
+                [*apexes, *apexes],
+            ).fetchall()
+
+        result = {apex: [] for apex in apexes}
+        sources: list[SourceObservation] = []
+        current: tuple[str, str] | None = None
+        first_seen: str | None = None
+
+        def finish() -> None:
+            if current is None:
+                return
+            apex, hostname = current
+            result[apex].append(IndexedRecord(hostname, first_seen, tuple(sources)))
+
+        for row in rows:
+            key = (str(row["apex"]), str(row["subdomain"]))
+            if current is not None and key != current:
+                finish()
+                sources = []
+            if key != current:
+                current = key
+                first_seen = row["hostname_first_seen"]
+            if row["source"] is not None:
+                sources.append(
+                    SourceObservation(
+                        source=str(row["source"]),
+                        first_seen=row["source_first_seen"],
+                        last_seen=str(row["last_seen"]),
+                    )
+                )
+        finish()
+        return result
 
     def apexes_after(self, cursor: str, limit: int) -> list[str]:
         if limit < 1:

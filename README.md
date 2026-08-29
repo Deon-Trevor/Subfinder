@@ -101,6 +101,22 @@ earliest observation plus the source-specific `source`, `first_seen`, and
 returns `X-Subfinder-Schema-Version` so consumers can reject an unsupported
 contract before parsing the body.
 
+Trusted services can read several complete index snapshots with
+`POST /internal/v1/records/batch`:
+
+```json
+{"apexes":["example.com","example.net"]}
+```
+
+The route requires a bearer token configured in `CTLOGS_API_TOKENS`, is
+available only by calling the API container on the private data plane, and is
+explicitly hidden by the public NGINX edge. Its response schema is
+`subfinder.internal-index-records-batch.v1`; `results` uses the existing
+`subfinder.index-records.v1` object for each apex in request order. One batch
+contains at most 100 unique apexes and 5,000 hostnames by default. Set
+`CTLOGS_BATCH_MAX_APEXES` and `CTLOGS_BATCH_MAX_RECORDS` to lower deployment
+limits. Oversized requests return `413` and must be split.
+
 For another Compose project, attach only its API or worker that needs these
 facts to `syncpundit-data-plane` and call
 `http://subfinder-index:8200/v1/records?apex=example.com`. Do not mount the
@@ -125,6 +141,9 @@ allowance. Configure accepted tokens with `CTLOGS_API_TOKENS` and the limit for
 each token with
 `CTLOGS_TOKEN_REQUEST_LIMIT`. The database stores only a SHA-256 token digest
 as the quota identity.
+The private batch route consumes one token allowance unit per apex, atomically;
+an HTTP batch is not a quota discount and a rejected quota debit consumes no
+units. It never schedules refresh or discovery work.
 
 ### Bound request load
 

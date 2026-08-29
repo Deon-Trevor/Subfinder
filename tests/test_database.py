@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
-import sqlite3
 from typing import Any
 
 import pytest
 
 from ctlogs.database import (
+    BatchResultTooLarge,
     Database,
     IndexedRecord,
     QuotaExceeded,
@@ -361,6 +362,50 @@ def test_records_return_neutral_hostname_provenance(tmp_path: Path) -> None:
             ),
         )
     ]
+
+
+def test_records_many_uses_one_bounded_snapshot_in_request_order(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "batch-records.sqlite3")
+    database.initialize()
+    database.upsert_subdomains(
+        "example.com",
+        [("www.example.com", "2025-02-03T04:05:06Z")],
+        source="direct_ct:https://ct.example",
+        observed_at="2026-08-21T00:00:00Z",
+    )
+    database.upsert_subdomains("example.net", [("example.net", None)])
+
+    result = database.records_many(
+        ["example.net", "missing.example", "example.com"],
+        max_records=2,
+    )
+
+    assert list(result) == ["example.net", "missing.example", "example.com"]
+    assert [record.hostname for record in result["example.net"]] == ["example.net"]
+    assert result["missing.example"] == []
+    assert result["example.com"] == [
+        IndexedRecord(
+            "www.example.com",
+            "2025-02-03T04:05:06Z",
+            (
+                SourceObservation(
+                    "direct_ct:https://ct.example",
+                    "2025-02-03T04:05:06Z",
+                    "2026-08-21T00:00:00Z",
+                ),
+            ),
+        )
+    ]
+
+    with pytest.raises(BatchResultTooLarge) as failure:
+        database.records_many(
+            ["example.net", "example.com"],
+            max_records=1,
+        )
+    assert failure.value.total == 2
+    assert failure.value.limit == 1
 
 
 def test_stats_report_index_and_provenance_counts(tmp_path: Path) -> None:
