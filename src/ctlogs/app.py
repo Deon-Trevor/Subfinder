@@ -34,6 +34,9 @@ from ctlogs.control import (
     AdmissionRequest,
     ControlDatabase,
     ControlUnavailable,
+    IdempotencyConflict,
+    RecordBatchJob,
+    RecordBatchQueueFull,
 )
 from ctlogs.database import (
     BatchResultTooLarge,
@@ -49,7 +52,9 @@ DAILY_REQUEST_LIMIT = 1_000
 RECORDS_SCHEMA_VERSION = "subfinder.index-records.v1"
 BATCH_RECORDS_SCHEMA_VERSION = "subfinder.internal-index-records-batch.v1"
 STREAM_CHUNK_BYTES = 64 * 1024
-INTERNAL_REQUEST_MAX_BYTES = 64 * 1024
+INTERNAL_REQUEST_MAX_BYTES = 512 * 1024
+QUEUED_BATCH_SCHEMA_VERSION = "subfinder.internal-record-batch.v1"
+QUEUED_SLICE_SCHEMA_VERSION = "subfinder.internal-record-batch-slice.v1"
 LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 EXTRACT = tldextract.TLDExtract(
     suffix_list_urls=(),
@@ -85,6 +90,10 @@ class BatchRecordsResponse(BaseModel):
         BATCH_RECORDS_SCHEMA_VERSION
     )
     results: list[IndexRecordsResponse]
+
+
+class RecordBatchSubmission(BaseModel):
+    apexes: list[str]
 
 
 class _ImmediateCapacity:
@@ -176,6 +185,19 @@ class _RequestCapacityMiddleware:
                 )
                 await response(scope, receive, send)
                 return
+            received = 0
+            original_receive = receive
+
+            async def bounded_receive():
+                nonlocal received
+                message = await original_receive()
+                if message.get("type") == "http.request":
+                    received += len(message.get("body", b""))
+                    if received > INTERNAL_REQUEST_MAX_BYTES:
+                        raise _InternalBodyTooLarge
+                return message
+
+            receive = bounded_receive
         capacity = self.service_capacity if service else self.public_capacity
         request_class = "service" if service else "public"
         if not capacity.try_acquire():
@@ -191,21 +213,30 @@ class _RequestCapacityMiddleware:
             await response(scope, receive, send)
             return
         try:
-            await self.app(scope, receive, send)
+            try:
+                await self.app(scope, receive, send)
+            except _InternalBodyTooLarge:
+                response = JSONResponse(
+                    status_code=413,
+                    content={"detail": "internal request body is too large"},
+                    headers={"Cache-Control": "no-store"},
+                )
+                await response(scope, original_receive, send)
         finally:
             capacity.release()
 
     @staticmethod
     def _protected_path(path: str) -> bool:
-        return (
-            path in {
-                "/v1/search",
-                "/v1/records",
-                "/internal/v1/records/batch",
-                "/mcp",
-            }
-            or path.startswith("/mcp/")
-        )
+        return path in {
+            "/v1/search",
+            "/v1/records",
+            "/internal/v1/records/batch",
+            "/mcp",
+        } or path.startswith(("/internal/v1/record-batches", "/mcp/"))
+
+
+class _InternalBodyTooLarge(Exception):
+    pass
 
 
 @dataclass(frozen=True)
@@ -234,7 +265,9 @@ class _ControlBatcher:
         try:
             while self._pending:
                 await asyncio.sleep(self.window_seconds)
-                selected = [item for item in self._pending if not item.future.cancelled()]
+                selected = [
+                    item for item in self._pending if not item.future.cancelled()
+                ]
                 self._pending.clear()
                 if not selected:
                     continue
@@ -433,6 +466,41 @@ def _retry_headers(quota: Quota) -> dict[str, str]:
     return headers
 
 
+def _record_batch_document(job: RecordBatchJob) -> dict[str, object]:
+    return {
+        "schema_version": QUEUED_BATCH_SCHEMA_VERSION,
+        "job_id": job.job_id,
+        "state": job.state,
+        "total_apexes": job.total_apexes,
+        "completed_apexes": job.completed_apexes,
+        "failed_apexes": job.failed_apexes,
+        "queued_apexes": (
+            max(0, job.total_apexes - job.completed_apexes)
+            if job.state in {"queued", "running"}
+            else 0
+        ),
+        "next_sequence": job.next_sequence,
+        "cancel_requested": job.cancel_requested,
+        "quota": {
+            "reserved": job.reserved_units,
+            "committed": job.committed_units,
+            "released": job.released_units,
+            "outstanding": max(
+                0,
+                job.reserved_units - job.committed_units - job.released_units,
+            ),
+        },
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "error": job.error or None,
+        "links": {
+            "self": f"/internal/v1/record-batches/{job.job_id}",
+            "chunks": f"/internal/v1/record-batches/{job.job_id}/chunks",
+            "cancel": f"/internal/v1/record-batches/{job.job_id}/cancel",
+        },
+    }
+
+
 def _csv_environment(name: str, defaults: list[str]) -> list[str]:
     raw = os.environ.get(name)
     if raw is None:
@@ -467,6 +535,9 @@ def create_app(
     service_inflight_limit: int | None = None,
     batch_max_apexes: int | None = None,
     batch_max_records: int | None = None,
+    queued_batch_max_apexes: int | None = None,
+    queued_batch_max_pending: int | None = None,
+    queued_batch_max_pending_per_token: int | None = None,
 ) -> FastAPI:
     if daily_request_limit < 1:
         raise ValueError("daily_request_limit must be positive")
@@ -508,6 +579,30 @@ def create_app(
     )
     if configured_batch_max_apexes < 1 or configured_batch_max_records < 1:
         raise ValueError("batch limits must be positive")
+    configured_queued_max_apexes = (
+        queued_batch_max_apexes
+        if queued_batch_max_apexes is not None
+        else _get_env_int("CTLOGS_QUEUED_BATCH_MAX_APEXES", 1_000)
+    )
+    configured_queued_max_pending = (
+        queued_batch_max_pending
+        if queued_batch_max_pending is not None
+        else _get_env_int("CTLOGS_QUEUED_BATCH_MAX_PENDING", 128)
+    )
+    configured_queued_max_pending_per_token = (
+        queued_batch_max_pending_per_token
+        if queued_batch_max_pending_per_token is not None
+        else _get_env_int("CTLOGS_QUEUED_BATCH_MAX_PENDING_PER_TOKEN", 16)
+    )
+    if (
+        min(
+            configured_queued_max_apexes,
+            configured_queued_max_pending,
+            configured_queued_max_pending_per_token,
+        )
+        < 1
+    ):
+        raise ValueError("queued batch limits must be positive")
 
     path = Path(
         database_path or os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3")
@@ -539,9 +634,7 @@ def create_app(
         if enqueue_refresh is not None
         else _enabled("CTLOGS_ENQUEUE_SEARCH_REFRESH", True)
     )
-    control_batch_window = _get_env_float(
-        "CTLOGS_CONTROL_BATCH_WINDOW_SECONDS", 0.002
-    )
+    control_batch_window = _get_env_float("CTLOGS_CONTROL_BATCH_WINDOW_SECONDS", 0.002)
     if control_batch_window < 0:
         raise ValueError("control batch window must not be negative")
     catalog_deadline = _get_env_float("CTLOGS_CATALOG_DEADLINE_SECONDS", 1.0)
@@ -560,7 +653,9 @@ def create_app(
         ),
     )
 
-    def quota_subject(client_ip: str, authorization: str | None = None) -> tuple[str, int]:
+    def quota_subject(
+        client_ip: str, authorization: str | None = None
+    ) -> tuple[str, int]:
         if _valid_bearer_token(authorization, configured_tokens):
             assert authorization is not None
             candidate = authorization.removeprefix("Bearer ").strip()
@@ -835,28 +930,6 @@ def create_app(
         if len(set(apexes)) != len(apexes):
             raise HTTPException(status_code=400, detail="apexes must be unique")
 
-        admission_started = time.perf_counter()
-        try:
-            quota = await asyncio.to_thread(
-                control.consume,
-                subject,
-                authenticated_limit,
-                len(apexes),
-            )
-        except QuotaExceeded as error:
-            raise HTTPException(
-                status_code=429,
-                detail="daily request limit exceeded",
-                headers=_retry_headers(error.quota),
-            ) from error
-        except (ControlUnavailable, TimeoutError) as error:
-            raise HTTPException(
-                status_code=503,
-                detail="batch admission is temporarily unavailable",
-                headers={"Retry-After": "1"},
-            ) from error
-        admission_ms = (time.perf_counter() - admission_started) * 1_000
-
         catalog_started = time.perf_counter()
         try:
             indexed = await catalog_call(
@@ -879,6 +952,30 @@ def create_app(
                 headers={"Retry-After": "1"},
             ) from error
         catalog_ms = (time.perf_counter() - catalog_started) * 1_000
+
+        # A deterministic result-envelope rejection and catalog outage are not
+        # completed index reads. Charge only after a bounded snapshot exists.
+        admission_started = time.perf_counter()
+        try:
+            quota = await asyncio.to_thread(
+                control.consume,
+                subject,
+                authenticated_limit,
+                len(apexes),
+            )
+        except QuotaExceeded as error:
+            raise HTTPException(
+                status_code=429,
+                detail="daily request limit exceeded",
+                headers=_retry_headers(error.quota),
+            ) from error
+        except (ControlUnavailable, TimeoutError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="batch admission is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        admission_ms = (time.perf_counter() - admission_started) * 1_000
 
         results = [
             IndexRecordsResponse(
@@ -904,9 +1001,7 @@ def create_app(
         total_ms = (time.perf_counter() - started) * 1_000
         response.headers.update(_quota_headers(quota))
         response.headers["Cache-Control"] = "no-store"
-        response.headers["X-Subfinder-Schema-Version"] = (
-            BATCH_RECORDS_SCHEMA_VERSION
-        )
+        response.headers["X-Subfinder-Schema-Version"] = BATCH_RECORDS_SCHEMA_VERSION
         response.headers["X-Request-ID"] = secrets.token_hex(8)
         response.headers["X-Batch-Apex-Count"] = str(len(apexes))
         response.headers["Server-Timing"] = (
@@ -914,6 +1009,171 @@ def create_app(
             f"catalog;dur={catalog_ms:.3f}, total;dur={total_ms:.3f}"
         )
         return BatchRecordsResponse(results=results)
+
+    @app.post("/internal/v1/record-batches")
+    async def submit_record_batch(
+        request: Request,
+        body: RecordBatchSubmission,
+    ) -> JSONResponse:
+        """Queue a durable, idempotent local-index snapshot job."""
+        subject = authenticated_subject(request.headers.get("authorization"))
+        idempotency_key = request.headers.get("idempotency-key", "").strip()
+        if not idempotency_key:
+            raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+        if not body.apexes:
+            raise HTTPException(status_code=400, detail="apexes must not be empty")
+        if len(body.apexes) > configured_queued_max_apexes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "batch contains too many apexes; maximum is "
+                    f"{configured_queued_max_apexes}"
+                ),
+            )
+        try:
+            apexes = [normalize_apex(apex) for apex in body.apexes]
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if len(set(apexes)) != len(apexes):
+            raise HTTPException(status_code=400, detail="apexes must be unique")
+        try:
+            admission = await asyncio.to_thread(
+                control.enqueue_record_batch,
+                subject,
+                authenticated_limit,
+                apexes,
+                idempotency_key=idempotency_key,
+                max_pending=configured_queued_max_pending,
+                max_pending_per_subject=configured_queued_max_pending_per_token,
+            )
+        except QuotaExceeded as error:
+            raise HTTPException(
+                status_code=429,
+                detail="daily request limit exceeded",
+                headers=_retry_headers(error.quota),
+            ) from error
+        except IdempotencyConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except RecordBatchQueueFull as error:
+            raise HTTPException(
+                status_code=503,
+                detail=str(error),
+                headers={"Retry-After": "1", "X-Overload-Reason": "batch-queue"},
+            ) from error
+        except ControlUnavailable as error:
+            raise HTTPException(
+                status_code=503,
+                detail="batch admission is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        headers = _quota_headers(admission.quota)
+        headers.update(
+            {
+                "Cache-Control": "no-store",
+                "Location": f"/internal/v1/record-batches/{admission.job.job_id}",
+                "X-Idempotent-Replay": "0" if admission.created else "1",
+            }
+        )
+        return JSONResponse(
+            status_code=202,
+            content=_record_batch_document(admission.job),
+            headers=headers,
+        )
+
+    @app.get("/internal/v1/record-batches/{job_id}")
+    async def record_batch_status(request: Request, job_id: str) -> JSONResponse:
+        subject = authenticated_subject(request.headers.get("authorization"))
+        try:
+            job = await asyncio.to_thread(
+                control.record_batch_job, job_id, subject=subject
+            )
+        except ControlUnavailable as error:
+            raise HTTPException(
+                status_code=503,
+                detail="batch status is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        if job is None:
+            raise HTTPException(status_code=404, detail="record batch not found")
+        return JSONResponse(
+            _record_batch_document(job), headers={"Cache-Control": "no-store"}
+        )
+
+    @app.get("/internal/v1/record-batches/{job_id}/chunks")
+    async def record_batch_chunks(
+        request: Request,
+        job_id: str,
+        after: int = Query(default=-1, ge=-1),
+        limit: int = Query(default=10, ge=1, le=50),
+        wait: float = Query(default=0, ge=0, le=20),
+    ) -> JSONResponse:
+        subject = authenticated_subject(request.headers.get("authorization"))
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                job = await asyncio.to_thread(
+                    control.record_batch_job, job_id, subject=subject
+                )
+                if job is None:
+                    raise HTTPException(
+                        status_code=404, detail="record batch not found"
+                    )
+                rows = await asyncio.to_thread(
+                    control.record_batch_slices,
+                    job_id,
+                    subject=subject,
+                    after=after,
+                    limit=limit,
+                )
+            except ControlUnavailable as error:
+                raise HTTPException(
+                    status_code=503,
+                    detail="batch results are temporarily unavailable",
+                    headers={"Retry-After": "1"},
+                ) from error
+            if rows or job.state in {"done", "failed", "cancelled"}:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.2, remaining))
+        chunks = [
+            {
+                "sequence": int(row["sequence"]),
+                **json.loads(str(row["document"])),
+            }
+            for row in rows
+        ]
+        next_cursor = chunks[-1]["sequence"] if chunks else after
+        return JSONResponse(
+            {
+                "schema_version": QUEUED_SLICE_SCHEMA_VERSION,
+                "job": _record_batch_document(job),
+                "after": after,
+                "next_cursor": next_cursor,
+                "chunks": chunks,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/internal/v1/record-batches/{job_id}/cancel")
+    async def cancel_record_batch(request: Request, job_id: str) -> JSONResponse:
+        subject = authenticated_subject(request.headers.get("authorization"))
+        try:
+            job = await asyncio.to_thread(
+                control.cancel_record_batch, job_id, subject=subject
+            )
+        except ControlUnavailable as error:
+            raise HTTPException(
+                status_code=503,
+                detail="batch cancellation is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        if job is None:
+            raise HTTPException(status_code=404, detail="record batch not found")
+        return JSONResponse(
+            _record_batch_document(job), headers={"Cache-Control": "no-store"}
+        )
 
     @app.get("/v1/search")
     async def search_api(

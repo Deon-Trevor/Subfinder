@@ -22,6 +22,9 @@ services:
       CTLOGS_SERVICE_INFLIGHT_LIMIT: ${CTLOGS_SERVICE_INFLIGHT_LIMIT:-16}
       CTLOGS_BATCH_MAX_APEXES: ${CTLOGS_BATCH_MAX_APEXES:-100}
       CTLOGS_BATCH_MAX_RECORDS: ${CTLOGS_BATCH_MAX_RECORDS:-5000}
+      CTLOGS_QUEUED_BATCH_MAX_APEXES: ${CTLOGS_QUEUED_BATCH_MAX_APEXES:-1000}
+      CTLOGS_QUEUED_BATCH_MAX_PENDING: ${CTLOGS_QUEUED_BATCH_MAX_PENDING:-128}
+      CTLOGS_QUEUED_BATCH_MAX_PENDING_PER_TOKEN: ${CTLOGS_QUEUED_BATCH_MAX_PENDING_PER_TOKEN:-16}
       CTLOGS_CATALOG_CONCURRENCY: ${CTLOGS_CATALOG_CONCURRENCY:-1}
       CTLOGS_CONTROL_BATCH_WINDOW_SECONDS: ${CTLOGS_CONTROL_BATCH_WINDOW_SECONDS:-0.002}
       # The API is not host-published; only the edge and trusted data-plane
@@ -78,6 +81,30 @@ services:
     environment:
       CTLOGS_DB_PATH: /data/ctlogs.sqlite3
       CTLOGS_CONTROL_DB_PATH: /control/control.sqlite3
+
+  batch-worker:
+    build: .
+    image: ctlogs:latest
+    entrypoint: ["python", "-m", "ctlogs.batch_worker"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ctlogs-data:/data:ro
+      - ctlogs-control:/control
+    environment:
+      CTLOGS_DB_PATH: /data/ctlogs.sqlite3
+      CTLOGS_CONTROL_DB_PATH: /control/control.sqlite3
+      CTLOGS_BATCH_WORKER_SLICE_APEXES: ${CTLOGS_BATCH_WORKER_SLICE_APEXES:-25}
+      CTLOGS_BATCH_MAX_RECORDS: ${CTLOGS_BATCH_MAX_RECORDS:-5000}
+      CTLOGS_BATCH_MAX_SOURCE_ROWS: ${CTLOGS_BATCH_MAX_SOURCE_ROWS:-20000}
+      CTLOGS_BATCH_MAX_DOCUMENT_BYTES: ${CTLOGS_BATCH_MAX_DOCUMENT_BYTES:-2097152}
+      CTLOGS_BATCH_LEASE_SECONDS: ${CTLOGS_BATCH_LEASE_SECONDS:-60}
+    deploy:
+      replicas: 2
 
   scheduler:
     build: .

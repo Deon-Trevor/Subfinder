@@ -117,6 +117,32 @@ contains at most 100 unique apexes and 5,000 hostnames by default. Set
 `CTLOGS_BATCH_MAX_APEXES` and `CTLOGS_BATCH_MAX_RECORDS` to lower deployment
 limits. Oversized requests return `413` and must be split.
 
+Threat Hunter should use the durable queue rather than hold a request open:
+
+```http
+POST /internal/v1/record-batches
+Authorization: Bearer <service token>
+Idempotency-Key: <stable request identity>
+Content-Type: application/json
+
+{"apexes":["example.com","example.net"]}
+```
+
+Submission returns `202` and a job identifier. Poll
+`GET /internal/v1/record-batches/{job_id}/chunks?after=-1&limit=10&wait=20`
+and advance `after` to the returned `next_cursor`. Chunks are immutable and
+become visible only after their complete apex snapshots and quota settlement
+commit together. Cursor replay is safe. `GET .../{job_id}` reports exact
+queued, completed, failed, reserved, committed, released, and outstanding
+counts; `POST .../{job_id}/cancel` releases unstarted work.
+
+Two durable `batch-worker` replicas consume bounded slices by default. A large
+apex is isolated and reported in the chunk's `errors` collection instead of
+failing unrelated apexes. The catalog read uses one WAL snapshot and separate
+hostname, provenance-row, and serialized-byte bounds. The queue is bounded
+globally and per service token; an idempotent retry of the same normalized
+request does not consume quota twice.
+
 For another Compose project, attach only its API or worker that needs these
 facts to `syncpundit-data-plane` and call
 `http://subfinder-index:8200/v1/records?apex=example.com`. Do not mount the

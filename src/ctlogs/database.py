@@ -126,10 +126,13 @@ class Database:
         with self.write_transaction() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
-            needs_source_backfill = connection.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type = 'table' AND name = 'index_sources'"
-            ).fetchone() is None
+            needs_source_backfill = (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'index_sources'"
+                ).fetchone()
+                is None
+            )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS subdomains (
@@ -240,9 +243,12 @@ class Database:
                     "SELECT DISTINCT source FROM subdomain_sources"
                 )
 
-            if connection.execute(
-                "SELECT 1 FROM index_totals WHERE singleton = 1"
-            ).fetchone() is None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM index_totals WHERE singleton = 1"
+                ).fetchone()
+                is None
+            ):
                 connection.execute(
                     """
                     INSERT INTO index_totals (
@@ -410,10 +416,15 @@ class Database:
             }
             if required_columns - columns:
                 raise RuntimeError("catalog migration required; index totals are stale")
-            if connection.execute(
-                "SELECT 1 FROM index_totals WHERE singleton = 1"
-            ).fetchone() is None:
-                raise RuntimeError("catalog migration required; index totals are missing")
+            if (
+                connection.execute(
+                    "SELECT 1 FROM index_totals WHERE singleton = 1"
+                ).fetchone()
+                is None
+            ):
+                raise RuntimeError(
+                    "catalog migration required; index totals are missing"
+                )
 
     def search(self, apex: str) -> list[SearchResult]:
         with self.connect() as connection:
@@ -619,6 +630,7 @@ class Database:
         apexes: list[str],
         *,
         max_records: int,
+        max_source_rows: int | None = None,
     ) -> dict[str, list[IndexedRecord]]:
         """Read complete provenance records for several apexes in one snapshot."""
         if not apexes:
@@ -627,12 +639,15 @@ class Database:
             raise ValueError("apexes must be unique")
         if max_records < 1:
             raise ValueError("max_records must be positive")
+        if max_source_rows is not None and max_source_rows < 1:
+            raise ValueError("max_source_rows must be positive")
 
         placeholders = ",".join("?" for _ in apexes)
-        order = " ".join(
-            f"WHEN ? THEN {index}" for index, _apex in enumerate(apexes)
-        )
+        order = " ".join(f"WHEN ? THEN {index}" for index, _apex in enumerate(apexes))
         with self.connect() as connection:
+            # Pin the count and provenance scan to the same WAL snapshot. This
+            # prevents concurrent ingestion from invalidating the checked bound.
+            connection.execute("BEGIN")
             count_row = connection.execute(
                 f"SELECT COUNT(*) AS total FROM subdomains "
                 f"WHERE apex IN ({placeholders})",
@@ -663,37 +678,40 @@ class Database:
                     evidence.source
                 """,
                 [*apexes, *apexes],
-            ).fetchall()
+            )
 
-        result = {apex: [] for apex in apexes}
-        sources: list[SourceObservation] = []
-        current: tuple[str, str] | None = None
-        first_seen: str | None = None
+            result = {apex: [] for apex in apexes}
+            sources: list[SourceObservation] = []
+            current: tuple[str, str] | None = None
+            first_seen: str | None = None
 
-        def finish() -> None:
-            if current is None:
-                return
-            apex, hostname = current
-            result[apex].append(IndexedRecord(hostname, first_seen, tuple(sources)))
+            def finish() -> None:
+                if current is None:
+                    return
+                apex, hostname = current
+                result[apex].append(IndexedRecord(hostname, first_seen, tuple(sources)))
 
-        for row in rows:
-            key = (str(row["apex"]), str(row["subdomain"]))
-            if current is not None and key != current:
-                finish()
-                sources = []
-            if key != current:
-                current = key
-                first_seen = row["hostname_first_seen"]
-            if row["source"] is not None:
-                sources.append(
-                    SourceObservation(
-                        source=str(row["source"]),
-                        first_seen=row["source_first_seen"],
-                        last_seen=str(row["last_seen"]),
+            for source_rows, row in enumerate(rows, start=1):
+                if max_source_rows is not None and source_rows > max_source_rows:
+                    raise BatchResultTooLarge(source_rows, max_source_rows)
+                key = (str(row["apex"]), str(row["subdomain"]))
+                if current is not None and key != current:
+                    finish()
+                    sources = []
+                if key != current:
+                    current = key
+                    first_seen = row["hostname_first_seen"]
+                if row["source"] is not None:
+                    sources.append(
+                        SourceObservation(
+                            source=str(row["source"]),
+                            first_seen=row["source_first_seen"],
+                            last_seen=str(row["last_seen"]),
+                        )
                     )
-                )
-        finish()
-        return result
+            finish()
+            connection.commit()
+            return result
 
     def apexes_after(self, cursor: str, limit: int) -> list[str]:
         if limit < 1:
@@ -965,7 +983,15 @@ class Database:
                 INSERT INTO ingest_runs (source, started_at, finished_at, apex_count, hostname_count, duration_ms, bytes_read)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (source, started_at, finished_at, apex_count, hostname_count, duration_ms, bytes_read),
+                (
+                    source,
+                    started_at,
+                    finished_at,
+                    apex_count,
+                    hostname_count,
+                    duration_ms,
+                    bytes_read,
+                ),
             )
             return int(cursor.lastrowid)
 
