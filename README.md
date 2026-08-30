@@ -21,7 +21,16 @@ control database before the read-only API and the single catalog-writer
 scheduler start. The published loopback port belongs to a bounded NGINX edge;
 the API itself is reachable only from Docker networks.
 
+Copy `.env.example` to the single untracked `.env` deployment file and fill in
+only the credentials and overrides this deployment uses. Compose passes
+provider credentials from that file only to `jobs` and `scheduler`. Wrap values
+containing `$` in single quotes so Compose preserves them literally and does not
+interpret credential fragments as variable names. The API and workers receive
+only the variables explicitly listed for them in `docker-compose.yml`; the file
+is never injected wholesale into a container.
+
 ```bash
+cp .env.example .env
 docker network create syncpundit-data-plane
 docker compose up -d --build
 ```
@@ -35,6 +44,8 @@ NGINX and attaches only the API container to the external
 network once before the first deployment.
 The API opens the catalog read-only. The migration and scheduler services are
 the only Compose services that can mutate it.
+`CTLOGS_DATA_VOLUME`, `CTLOGS_CONTROL_VOLUME`, and `CTLOGS_DATA_NETWORK` in
+`.env` make ownership of those shared deployment surfaces explicit.
 
 The first deployment must stop every old API and scheduler container before
 starting the new set. Old processes must not overlap the replacement. `docker
@@ -416,10 +427,11 @@ python -m ctlogs.ingest.history --db data/ctlogs.sqlite3 \
   --log-url https://ct.example/log --max-batches-per-log 8
 ```
 
-Account-backed sources are explicit per-apex jobs. Put their credentials in an
-untracked `.env.providers` file using `.env.example`. Each invocation has its
-own request budget. The different filename matters because Compose otherwise
-interpolates dollar signs while automatically loading `.env`.
+Account-backed sources are explicit per-apex jobs. Put their credentials in the
+untracked `.env` file using `.env.example`. Each invocation has its own request
+budget. The `jobs` and `scheduler` services load provider values from this file;
+single-quoted credentials preserve dollar signs without exposing those
+credentials to the public API container.
 
 ```bash
 python -m ctlogs.ingest.enrich --db data/ctlogs.sqlite3 \

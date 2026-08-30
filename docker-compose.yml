@@ -64,10 +64,12 @@ services:
     volumes:
       - ctlogs-data:/data
       - ctlogs-control:/control
-    env_file:
-      - path: .env.providers
-        required: false
-        format: raw
+    environment:
+      CTLOGS_DB_PATH: /data/ctlogs.sqlite3
+      CTLOGS_CONTROL_DB_PATH: /control/control.sqlite3
+      URLSCAN_API_KEY: ${URLSCAN_API_KEY:-}
+      CZDS_USERNAME: ${CZDS_USERNAME:-}
+      CZDS_PASSWORD: ${CZDS_PASSWORD:-}
 
   migrate:
     build: .
@@ -132,9 +134,14 @@ services:
       CTLOGS_STATIC_CT_URLS: "https://mon.willow.ct.letsencrypt.org/2026h2"
       CTLOGS_URLSCAN_APEXES_PER_RUN: "69"
       CTLOGS_URLSCAN_PRIORITY_APEXES_PER_RUN: "14"
-      CTLOGS_URLSCAN_DAILY_LIMIT: "100000"
-      CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT: "10000"
-      CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT: "20000"
+      URLSCAN_API_KEY: ${URLSCAN_API_KEY:-}
+      CZDS_USERNAME: ${CZDS_USERNAME:-}
+      CZDS_PASSWORD: ${CZDS_PASSWORD:-}
+      CTLOGS_URLSCAN_APEXES: ${CTLOGS_URLSCAN_APEXES:-*}
+      CTLOGS_SCHEDULED_ARTIFACTS: ${CTLOGS_SCHEDULED_ARTIFACTS:-[]}
+      CTLOGS_URLSCAN_DAILY_LIMIT: ${CTLOGS_URLSCAN_DAILY_LIMIT:-100000}
+      CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT: ${CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT:-10000}
+      CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT: ${CTLOGS_URLSCAN_PRIORITY_DAILY_LIMIT:-20000}
       CTLOGS_URLSCAN_INTERVAL: "60"
       CTLOGS_URLSCAN_RETRY_INTERVAL: "3600"
       CTLOGS_CT_HISTORY_LOGS_PER_RUN: "1"
@@ -142,11 +149,6 @@ services:
       CTLOGS_CT_HISTORY_MAX_BATCHES_PER_LOG: "8"
       CTLOGS_CT_HISTORY_INTERVAL: "60"
       CTLOGS_CT_HISTORY_RETRY_INTERVAL: "3600"
-    env_file:
-      - path: .env.providers
-        required: false
-        format: raw
-
 volumes:
   ctlogs-data:
     name: ${CTLOGS_DATA_VOLUME:-subfinder_ctlogs-data}
