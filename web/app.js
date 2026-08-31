@@ -45,6 +45,14 @@ const el = {
   registerApex: document.getElementById("register-apex"),
   registerCount: document.getElementById("register-count"),
   registerState: document.getElementById("register-state"),
+  enrich: document.getElementById("enrich"),
+  enrichLede: document.getElementById("enrich-lede"),
+  enrichLanes: document.getElementById("enrich-lanes"),
+  enrichActions: document.getElementById("enrich-actions"),
+  enrichBlocked: document.getElementById("enrich-blocked"),
+  enrichRun: document.getElementById("enrich-run"),
+  enrichSubmit: document.getElementById("enrich-submit"),
+  enrichNote: document.getElementById("enrich-note"),
   filterWrap: document.getElementById("filter-wrap"),
   filter: document.getElementById("filter"),
   toolStatus: document.getElementById("tool-status"),
@@ -993,11 +1001,13 @@ function renderRegister(page) {
     el.shape.hidden = true;
     syncPager();
     renderEmpty(current.apex, el.registerState);
+    syncEnrichment();
     return;
   }
 
   renderShape(current.rows);
   paint();
+  syncEnrichment();
 }
 
 function reveal() {
@@ -1030,6 +1040,10 @@ async function search(raw, { push = true } = {}) {
   if (!apex) return;
 
   clearError();
+  // A run is only worth watching while its apex is the one on screen. Reading
+  // the same apex again - which is how a finished run replaces its own empty
+  // result - keeps it.
+  stopEnrichment(apex);
 
   if (CACHE.has(apex)) {
     renderRegister(CACHE.get(apex));
@@ -1156,6 +1170,664 @@ document.addEventListener("keydown", (event) => {
   field.focus();
   field.select();
 });
+
+
+/* ── enrichment: an empty answer that need not stay empty ────────── */
+/* An apex with nothing on file is a real answer, not an error - but the
+   records sometimes exist and have simply not been read in yet. The API
+   reports which of two are already on hand: an approved zone artifact sitting
+   in the managed directory, and URLScan history for scans that have already
+   been taken.
+
+   Neither one reaches the domain, and the copy below never suggests
+   otherwise. Subfinder does not download a zone it does not have, so the offer
+   is only ever to import a file already on that disk; and "URLScan" here is a
+   search of scans other people already ran, never a new one. That is what lets
+   this offer sit on a page whose whole claim is that a lookup sends the target
+   nothing. */
+
+const ENRICH_POLL_FLOOR_S = 1;
+const ENRICH_POLL_CEILING_S = 30;
+/* A run that has not reached a terminal state in this long has stopped being
+   something to watch. Polling gives up and hands the reader a control instead,
+   rather than holding a timer open for the rest of the visit. */
+const ENRICH_WATCH_MS = 5 * 60_000;
+
+const ENRICH_ORDER = ["local_zone", "urlscan"];
+const ENRICH_NAMES = { local_zone: "Zone file", urlscan: "URLScan history" };
+
+/* What each lane says when the job reports it unavailable. The job document
+   carries lane states but no prose; only the options document explains itself,
+   and by the time a lane reports in, that document may be a minute stale. */
+const ENRICH_ABSENT = {
+  local_zone: "No approved zone artifact is on disk for this zone.",
+  urlscan: "Passive URLScan reading is not configured on this deployment.",
+};
+
+let enrich = null;
+
+function bytesText(value) {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const units = ["bytes", "KB", "MB", "GB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${unit === 0 ? size : size.toFixed(size < 10 ? 1 : 0)} ${units[unit]}`;
+}
+
+/* One key per apex and action selection. A retry after a dropped connection
+   then joins the job it already started instead of paying for a second one,
+   and a different selection is a different request - which is exactly what the
+   API refuses a reused key for. It is held in sessionStorage so that a reload
+   mid-run rejoins the run rather than orphaning it. */
+function idempotencyKey(apex, actions) {
+  const slot = `subfinder-enrich:${apex}:${actions.join(",")}`;
+  try {
+    const held = sessionStorage.getItem(slot);
+    if (held) return held;
+  } catch { /* private mode */ }
+
+  const minted = typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${apex}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  try { sessionStorage.setItem(slot, minted); } catch { /* private mode */ }
+  return minted;
+}
+
+function forgetKey(apex, actions) {
+  try { sessionStorage.removeItem(`subfinder-enrich:${apex}:${actions.join(",")}`); } catch { /* private mode */ }
+}
+
+function stopEnrichment(keepFor = null) {
+  if (!enrich) return;
+  if (keepFor !== null && enrich.apex === keepFor) return;
+  clearTimeout(enrich.timer);
+  enrich = null;
+  el.enrich.hidden = true;
+  el.enrichLanes.hidden = true;
+  el.enrichLanes.replaceChildren();
+  el.enrichActions.replaceChildren();
+  el.enrichRun.hidden = true;
+  el.enrichBlocked.hidden = true;
+  setEnrichNote("");
+}
+
+function setEnrichNote(text, bad = false) {
+  el.enrichNote.textContent = text;
+  el.enrichNote.classList.toggle("is-bad", bad);
+}
+
+/* What the server actually asked for, as seconds. Reported to the reader
+   unchanged: a spent daily allowance resets hours from now, and rounding that
+   into a polling interval would quote a wait that is not the real one. */
+function retryAfter(headers, fallback) {
+  const asked = Number.parseInt(headers.get("Retry-After") ?? "", 10);
+  return Number.isFinite(asked) && asked >= 0 ? asked : fallback;
+}
+
+/* The same header as a polling interval, which does need clamping: missing,
+   junk, or very large must not stall the watch or turn it into a hammer. */
+function pollDelay(headers, fallback) {
+  return Math.min(
+    ENRICH_POLL_CEILING_S,
+    Math.max(ENRICH_POLL_FLOOR_S, retryAfter(headers, fallback)),
+  );
+}
+
+function sentence(text) {
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+}
+
+async function detailOf(response, fallback) {
+  try {
+    const body = await response.json();
+    const detail = body && body.detail;
+    return typeof detail === "string" && detail ? detail : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function readEnrichmentOptions(apex) {
+  const response = await fetch(
+    `${API_BASE}/v1/enrichment-options?apex=${encodeURIComponent(apex)}`,
+    { headers: { Accept: "application/json" }, signal: timeoutSignal(FETCH_TIMEOUT_MS) },
+  );
+  if (!response.ok) {
+    const error = new Error(`options failed (${response.status})`);
+    error.status = response.status;
+    error.retryAfter = retryAfter(response.headers, 5);
+    throw error;
+  }
+  return response.json();
+}
+
+/* A finished run keeps the panel it wrote. Re-reading the record is what ends
+   the run, and clearing the report in the same breath would leave no account
+   of what the run actually did. */
+function enrichmentFor(apex) {
+  if (enrich && enrich.apex === apex && enrich.job && enrich.job.terminal) {
+    el.enrich.hidden = false;
+    return;
+  }
+  openEnrichment(apex);
+}
+
+async function openEnrichment(apex) {
+  stopEnrichment();
+  enrich = {
+    apex,
+    options: null,
+    selected: new Set(),
+    job: null,
+    jobUrl: null,
+    timer: null,
+    until: 0,
+    busy: false,
+    // Actions this panel has already run. `actionable` says the capability is
+    // published, not that there is anything left to ask for, so URLScan would
+    // otherwise be offered again forever - directly under a lane that just
+    // said there is nothing more to do there.
+    ran: new Set(),
+    // Actions whose lane came back failed, and so are worth asking for again.
+    retry: new Set(),
+    lastActions: [],
+    laneSignature: "",
+  };
+
+  let options;
+  try {
+    options = await readEnrichmentOptions(apex);
+  } catch (error) {
+    // The empty answer is correct with or without this panel, so a route that
+    // is missing or briefly down gets no alarm raised over it. Only a stated
+    // overload earns a line, because that one is worth coming back from.
+    if (error.status === 503 && enrich && enrich.apex === apex) {
+      el.enrichLede.textContent =
+        `Whether anything is on hand for ${apex} cannot be read right now.`;
+      el.enrichActions.replaceChildren();
+      el.enrichBlocked.hidden = true;
+      el.enrichRun.hidden = false;
+      el.enrichSubmit.hidden = true;
+      setEnrichNote(`Try again in about ${plural(error.retryAfter, "second")}.`);
+      el.enrich.hidden = false;
+    }
+    return;
+  }
+
+  // A newer search overtook this one while the options were in flight.
+  if (!enrich || enrich.apex !== apex) return;
+  enrich.options = options;
+  renderOffer();
+}
+
+function actionRow(name, action, zone) {
+  const row = document.createElement("label");
+  row.className = "enrich-action";
+
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.className = "enrich-check";
+  box.checked = true;
+  box.dataset.action = name;
+  box.addEventListener("change", () => {
+    if (box.checked) enrich.selected.add(name);
+    else enrich.selected.delete(name);
+    syncEnrichSubmit();
+  });
+
+  const title = document.createElement("span");
+  title.className = "enrich-action-title";
+  const note = document.createElement("span");
+  note.className = "enrich-action-note";
+
+  if (name === "local_zone") {
+    title.textContent = `Import the ${zone} zone file`;
+    const size = bytesText(Number(action.artifact_bytes));
+    note.textContent =
+      `The approved artifact is already on this disk${size ? ` (${size})` : ""}`
+      + " and is read from there. Nothing is fetched to produce it.";
+  } else {
+    title.textContent = "Read the URLScan history already on file";
+    note.textContent =
+      "A passive search of scans that have already been run by others."
+      + " No scan is submitted, and the domain is not contacted.";
+  }
+
+  row.append(box, title, note);
+  return row;
+}
+
+function renderOffer() {
+  const { apex, options } = enrich;
+  const actions = (options && options.actions) || {};
+  const zone = options.zone || "zone";
+
+  // Only actionable actions are ever offered. The rest are stated below,
+  // because why the index is empty is part of the answer to an empty search.
+  const open = ENRICH_ORDER.filter(
+    (name) => actions[name] && actions[name].actionable && !enrich.ran.has(name),
+  );
+  const shut = ENRICH_ORDER.filter(
+    (name) => actions[name] && !actions[name].actionable && !enrich.ran.has(name),
+  );
+
+  enrich.selected = new Set(open);
+  el.enrichActions.replaceChildren(
+    ...open.map((name) => actionRow(name, actions[name], zone)),
+  );
+
+  el.enrichBlocked.replaceChildren();
+  for (const name of shut) {
+    if (el.enrichBlocked.firstChild) el.enrichBlocked.append(document.createElement("br"));
+    // reason is the API's own words for why this one cannot run
+    el.enrichBlocked.append(`${ENRICH_NAMES[name]} - ${actions[name].reason}`);
+  }
+  el.enrichBlocked.hidden = shut.length === 0;
+
+  const ran = Boolean(enrich.job && enrich.job.terminal);
+  if (!ran && open.length) {
+    el.enrichLede.textContent =
+      `Nothing was read from ${apex} to produce this empty answer, and nothing`
+      + " below would be either. These records already exist elsewhere; they"
+      + " have just not been read into the index yet.";
+  } else if (!ran) {
+    el.enrichLede.textContent = `Nothing is on hand to read in for ${apex} right now.`;
+  } else if (open.some((name) => enrich.retry.has(name))) {
+    el.enrichLede.textContent =
+      "Nothing was read in from that one, so it is worth another go."
+      + " Asking again starts a fresh attempt rather than replaying the last.";
+  } else if (open.length) {
+    el.enrichLede.textContent =
+      `One more record is on hand for ${apex}, and reads the same way: without contacting it.`;
+  } else {
+    el.enrichLede.textContent = `Nothing further is on hand for ${apex}.`;
+  }
+
+  el.enrichRun.hidden = open.length === 0;
+  el.enrichSubmit.hidden = false;
+  el.enrich.hidden = false;
+  syncEnrichSubmit();
+}
+
+function syncEnrichSubmit() {
+  const count = enrich ? enrich.selected.size : 0;
+  el.enrichSubmit.disabled = !enrich || enrich.busy || count === 0;
+  if (enrich && enrich.busy) {
+    el.enrichSubmit.textContent = "Reading";
+    return;
+  }
+  el.enrichSubmit.textContent = count > 1 ? "Read them in" : "Read it in";
+}
+
+/* ── lanes ───────────────────────────────────────────────────────── */
+/* Each lane reports for itself. A job that finishes with one lane complete and
+   the other unavailable is a job that did what it could, and saying so lane by
+   lane is the only way to report that without either overclaiming or reading
+   as a failure. */
+function laneReport(name, lane, zone) {
+  const read = Number(lane.records_ingested) || 0;
+
+  switch (lane.state) {
+    case "queued":
+      return { tone: "wait", text: "Waiting for the worker" };
+    case "running":
+      return {
+        tone: "wait",
+        text: name === "local_zone"
+          ? `Reading the ${zone} zone file`
+          : "Reading scans already on file",
+      };
+    case "complete":
+      return {
+        tone: "good",
+        text: read ? `Read in ${plural(read, "name")}` : "Nothing new to read in",
+      };
+    case "already_current":
+      return { tone: "good", text: "Already indexed - nothing to re-read" };
+    // Not a provider failure. One bounded pass landed, and the rest of the
+    // history stays on the ordinary queue, which continues from the cursor
+    // this run left behind. Saying "failed" here would be a lie about work
+    // that succeeded and is still going.
+    case "checkpointed":
+      return {
+        tone: "good",
+        text: (read ? `Read in ${plural(read, "name")} so far.` : "Nothing new in this pass.")
+          + " Older history is queued and lands on its own; nothing more to do here.",
+      };
+    case "unavailable":
+      return { tone: "quiet", text: ENRICH_ABSENT[name] };
+    case "failed":
+      return { tone: "bad", text: "This one did not finish" };
+    default:
+      return null;
+  }
+}
+
+function laneRow(name, report) {
+  const row = document.createElement("div");
+  row.className = "enrich-lane";
+  row.dataset.tone = report.tone;
+
+  const dot = document.createElement("span");
+  dot.className = "enrich-dot";
+
+  const label = document.createElement("span");
+  label.className = "enrich-lane-name";
+  label.textContent = ENRICH_NAMES[name];
+
+  const text = document.createElement("span");
+  text.className = "enrich-lane-text";
+  text.textContent = report.text;
+
+  row.append(dot, label, text);
+  return row;
+}
+
+/* The summary is read off the lanes rather than off job.state. "partial" is
+   the API's word for a job that is not wholly clean, and it covers both a lane
+   that failed and a lane that checkpointed - one of which is bad news and one
+   of which is not. Reporting them the same way would misinform. */
+function laneSummary(job, reports) {
+  if (job.state === "failed") return "Nothing could be read in.";
+  const more = reports.some(([, report]) => report.more);
+  const broke = reports.some(([, report]) => report.tone === "bad");
+  const absent = reports.some(([, report]) => report.tone === "quiet");
+
+  if (broke) {
+    return more
+      ? "Read in what was on hand. More is queued, and one source did not finish."
+      : "Read in what was on hand. One source did not finish.";
+  }
+  if (more) return "Read in. Older history is queued and lands on its own.";
+  if (absent) return "Read in what was on hand.";
+  return "Read in.";
+}
+
+/* What a reader would actually hear as new. The lanes sit in a live region and
+   a poll lands every couple of seconds, so redrawing an unchanged report would
+   have a screen reader read the whole thing out again on every one of them. */
+function laneSignature(job) {
+  const lanes = job.lanes || {};
+  const states = ENRICH_ORDER.map((name) => {
+    const lane = lanes[name];
+    return lane ? `${name}:${lane.state}:${lane.records_ingested || 0}` : `${name}:-`;
+  });
+  return `${states.join("|")}|${job.state}|${job.error || ""}`;
+}
+
+function renderLanes(job) {
+  const signature = laneSignature(job);
+  if (signature === enrich.laneSignature) return;
+  enrich.laneSignature = signature;
+
+  const zone = job.zone || (enrich.options && enrich.options.zone) || "zone";
+  const lanes = job.lanes || {};
+  const reports = [];
+
+  for (const name of ENRICH_ORDER) {
+    const lane = lanes[name];
+    if (!lane) continue;
+    const report = laneReport(name, lane, zone);
+    // A lane nobody asked for has nothing to report.
+    if (!report) continue;
+    report.more = lane.state === "checkpointed";
+    reports.push([name, report]);
+  }
+
+  const nodes = [];
+  if (job.terminal) {
+    const summary = document.createElement("p");
+    summary.className = "enrich-summary";
+    summary.textContent = laneSummary(job, reports);
+    nodes.push(summary);
+  }
+  for (const [name, report] of reports) nodes.push(laneRow(name, report));
+
+  if (job.terminal && job.error) {
+    const why = document.createElement("div");
+    why.className = "enrich-lane";
+    why.dataset.tone = "bad";
+    const dot = document.createElement("span");
+    dot.className = "enrich-dot";
+    const label = document.createElement("span");
+    label.className = "enrich-lane-name";
+    label.textContent = "Reported";
+    const text = document.createElement("span");
+    text.className = "enrich-lane-text";
+    text.textContent = job.error;
+    why.append(dot, label, text);
+    nodes.push(why);
+  }
+
+  el.enrichLanes.replaceChildren(...nodes);
+  el.enrichLanes.hidden = nodes.length === 0;
+}
+
+/* ── running one ─────────────────────────────────────────────────── */
+async function submitEnrichment() {
+  if (!enrich || enrich.busy || !enrich.selected.size) return;
+  const apex = enrich.apex;
+  // Sorted so that the same two actions always produce the same key, whichever
+  // order the boxes were ticked in.
+  const actions = [...enrich.selected].sort();
+
+  enrich.busy = true;
+  syncEnrichSubmit();
+  setEnrichNote("");
+
+  let response;
+  try {
+    response = await fetch(`${API_BASE}/v1/enrichment-jobs`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "Idempotency-Key": idempotencyKey(apex, actions),
+      },
+      body: JSON.stringify({ apex, actions }),
+      signal: timeoutSignal(FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    if (enrich && enrich.apex === apex) {
+      enrich.busy = false;
+      syncEnrichSubmit();
+      // The key is kept: if the request did reach the API, retrying with it
+      // rejoins that job rather than paying for a second one.
+      setEnrichNote("Could not reach the index. Try again in a moment.", true);
+    }
+    return;
+  }
+
+  if (!enrich || enrich.apex !== apex) return;
+  enrich.busy = false;
+  // The submission spends one unit of the ordinary search allowance the first
+  // time it is admitted, and the response says so; the meter should agree.
+  setQuota(response.headers);
+
+  if (response.status === 409) {
+    // Either the key has been used for a different request, or an action stopped
+    // being actionable while the reader was deciding. Both are answered the
+    // same way: get the current options and offer what is actually left.
+    forgetKey(apex, actions);
+    const detail = await detailOf(response, "That is no longer available.");
+    try {
+      const options = await readEnrichmentOptions(apex);
+      if (!enrich || enrich.apex !== apex) return;
+      enrich.options = options;
+      renderOffer();
+    } catch {
+      if (!enrich || enrich.apex !== apex) return;
+    }
+    setEnrichNote(sentence(detail), false);
+    return;
+  }
+
+  if (response.status === 429) {
+    const wait = retryAfter(response.headers, 60);
+    setEnrichNote(
+      `The daily allowance is spent, so this was not started. It resets in about ${plural(Math.ceil(wait / 60), "minute")}.`,
+      true,
+    );
+    syncEnrichSubmit();
+    return;
+  }
+
+  if (response.status === 503) {
+    const wait = retryAfter(response.headers, 5);
+    const detail = await detailOf(response, "The queue is not taking work right now.");
+    setEnrichNote(`${sentence(detail)} Try again in about ${plural(wait, "second")}.`, true);
+    syncEnrichSubmit();
+    return;
+  }
+
+  if (!response.ok) {
+    const detail = await detailOf(response, `The index refused this (${response.status}).`);
+    setEnrichNote(sentence(detail), true);
+    syncEnrichSubmit();
+    return;
+  }
+
+  const job = await response.json();
+  enrich.job = job;
+  for (const name of actions) enrich.ran.add(name);
+  enrich.lastActions = actions;
+  enrich.jobUrl = response.headers.get("Location") || `/v1/enrichment-jobs/${job.job_id}`;
+  enrich.until = Date.now() + ENRICH_WATCH_MS;
+
+  // The offer is spent; from here the panel is a report.
+  el.enrichActions.replaceChildren();
+  el.enrichBlocked.hidden = true;
+  el.enrichRun.hidden = true;
+  el.enrichLede.textContent =
+    `Reading records that already exist into the index. ${apex} is not contacted by any of it.`;
+  renderLanes(job);
+
+  if (job.terminal) {
+    await finishEnrichment(job);
+    return;
+  }
+  scheduleEnrichPoll(2);
+}
+
+function scheduleEnrichPoll(seconds) {
+  if (!enrich) return;
+  clearTimeout(enrich.timer);
+  enrich.timer = setTimeout(pollEnrichment, seconds * 1000);
+}
+
+/* Watching costs nothing against the allowance - the status route identifies
+   the requester but never admits a read - so the only thing to be careful
+   about is how often, and for how long. */
+async function pollEnrichment() {
+  if (!enrich || !enrich.jobUrl) return;
+  const apex = enrich.apex;
+
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${enrich.jobUrl}`, {
+      headers: { Accept: "application/json" },
+      signal: timeoutSignal(FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    if (enrich && enrich.apex === apex) scheduleEnrichPoll(5);
+    return;
+  }
+  if (!enrich || enrich.apex !== apex) return;
+
+  if (response.status === 503) {
+    scheduleEnrichPoll(pollDelay(response.headers, 2));
+    return;
+  }
+  if (!response.ok) {
+    setEnrichNote(
+      response.status === 404
+        ? "This run is no longer on record. Search again to see where the index got to."
+        : `Could not read the run's state (${response.status}).`,
+      true,
+    );
+    el.enrichRun.hidden = false;
+    el.enrichSubmit.hidden = true;
+    return;
+  }
+
+  const job = await response.json();
+  enrich.job = job;
+  renderLanes(job);
+
+  if (job.terminal) {
+    await finishEnrichment(job);
+    return;
+  }
+
+  if (Date.now() > enrich.until) {
+    // Still going, but no longer worth a timer. The run continues on the
+    // server either way; this only stops watching it.
+    el.enrichRun.hidden = false;
+    el.enrichSubmit.hidden = true;
+    setEnrichNote("Still running. Search this domain again to pick up where it got to.");
+    return;
+  }
+
+  scheduleEnrichPoll(pollDelay(response.headers, 2));
+}
+
+/* job.result_url is the unpaginated read. This page reads in pages of 500, so
+   it goes back through that same path for the apex the job names rather than
+   pulling a freshly imported zone into one response - which is the case the
+   paging exists for. */
+async function finishEnrichment(job) {
+  clearTimeout(enrich.timer);
+  enrich.timer = null;
+
+  // A lane that failed can be asked for again. Nothing came of the attempt, and
+  // the key naming it has to be released first or the API would rightly replay
+  // the same finished job instead of starting a new one.
+  const lanes = job.lanes || {};
+  const broke = ENRICH_ORDER.filter((name) => lanes[name] && lanes[name].state === "failed");
+  if (broke.length) {
+    forgetKey(job.apex, enrich.lastActions);
+    for (const name of broke) {
+      enrich.ran.delete(name);
+      enrich.retry.add(name);
+    }
+  }
+
+  if (!job.result_url) return;
+
+  CACHE.delete(job.apex);
+  await search(job.apex, { push: false });
+
+  if (!enrich || enrich.apex !== job.apex) return;
+  // Anything still on hand is worth offering now that the record has moved.
+  try {
+    const options = await readEnrichmentOptions(job.apex);
+    if (!enrich || enrich.apex !== job.apex) return;
+    enrich.options = options;
+    renderOffer();
+  } catch { /* the report stands on its own */ }
+}
+
+/* Called at the end of every register render, so the panel follows the record
+   rather than having to be torn down by every path that changes it. */
+function syncEnrichment() {
+  // A run that has already reported keeps its panel whether the record it
+  // filled is empty or not: it is the account of where those names came from.
+  if (enrich && enrich.apex === current.apex && enrich.job) {
+    el.enrich.hidden = false;
+    return;
+  }
+  if (!current.rows.length) {
+    enrichmentFor(current.apex);
+    return;
+  }
+  stopEnrichment();
+}
+
+el.enrichSubmit.addEventListener("click", submitEnrichment);
 
 /* ── export ──────────────────────────────────────────────────────── */
 function payloadFor(mode) {

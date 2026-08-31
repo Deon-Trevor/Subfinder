@@ -1279,6 +1279,172 @@ html:has(.shelf[open]) { overflow: hidden; }
   .case.is-cased { padding-inline: .85rem; }
 }
 
+/* ── enrichment: what is still on hand for an empty apex ─────────── */
+.enrich {
+  margin-top: 1.75rem;
+  padding: 1.4rem 1.5rem 1.5rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.enrich-lede {
+  margin-top: .55rem;
+  max-width: 62ch;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+}
+
+.enrich-actions { display: grid; gap: .55rem; margin-top: 1.15rem; }
+
+/* A whole row is the target, not a 13px box: the note under each title is
+   part of what is being agreed to, so it belongs inside the label. */
+.enrich-action {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: .1rem .7rem;
+  align-items: start;
+  padding: .8rem .9rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease);
+}
+
+.enrich-action:hover { border-color: var(--rule-strong); }
+.enrich-action:has(:focus-visible) { outline: 2px solid var(--sage); outline-offset: 2px; }
+.enrich-action:has(:checked) { border-color: color-mix(in srgb, var(--sage) 55%, var(--rule)); }
+
+.enrich-check {
+  grid-row: span 2;
+  width: 15px;
+  height: 15px;
+  margin: .18rem 0 0;
+  accent-color: var(--sage);
+}
+
+.enrich-action-title {
+  font-size: var(--t-sm);
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.enrich-action-note {
+  grid-column: 2;
+  font-size: var(--t-xs);
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.enrich-action-note .zone,
+.enrich-action-note .bytes { font-family: var(--mono); color: var(--ink-2); }
+
+/* Stated, never offered. An action that cannot run is part of the answer for
+   why the record is empty, so it reads as a fact rather than as a control. */
+.enrich-blocked {
+  margin-top: .85rem;
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 1.7;
+  color: var(--ink-3);
+}
+
+.enrich-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .75rem 1rem;
+  margin-top: 1.15rem;
+}
+
+.enrich-submit {
+  padding: .52rem 1.05rem;
+  border: 1px solid var(--sage);
+  border-radius: var(--radius);
+  background: var(--sage);
+  color: var(--on-accent);
+  font-family: inherit;
+  font-size: var(--t-sm);
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity var(--dur) var(--ease);
+}
+
+.enrich-submit:hover { opacity: .9; }
+.enrich-submit:focus-visible { outline: 2px solid var(--sage); outline-offset: 2px; }
+.enrich-submit:disabled { opacity: .45; cursor: not-allowed; }
+
+.enrich-note {
+  flex: 1 1 18ch;
+  min-width: 0;
+  font-size: var(--t-xs);
+  color: var(--ink-2);
+}
+
+.enrich-note.is-bad { color: var(--rose); }
+
+/* the lanes report */
+.enrich-lanes { display: grid; gap: .5rem; margin-top: 1.15rem; }
+
+.enrich-summary {
+  font-size: var(--t-sm);
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.enrich-lane {
+  display: grid;
+  grid-template-columns: auto minmax(0, 10rem) minmax(0, 1fr);
+  gap: .55rem;
+  align-items: baseline;
+  padding: .5rem .1rem;
+  font-size: var(--t-sm);
+  border-top: 1px dotted var(--rule);
+}
+
+@media (max-width: 560px) {
+  .enrich-lane { grid-template-columns: auto minmax(0, 1fr); }
+  .enrich-lane-text { grid-column: 2; }
+}
+
+.enrich-lane-name {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.enrich-lane-text { color: var(--ink-2); }
+.enrich-lane-text b { color: var(--ink); font-weight: 600; }
+
+/* The dot carries the state, and there are only three readings of it. A lane
+   that checkpointed is one of the good ones: it read what it was allowed to
+   read in one pass and left the rest to the ordinary queue, which is progress
+   with more coming rather than a provider that failed. */
+.enrich-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  align-self: center;
+  background: var(--ink-3);
+}
+
+.enrich-lane[data-tone="good"] .enrich-dot { background: var(--sage); }
+.enrich-lane[data-tone="bad"] .enrich-dot { background: var(--rose); }
+
+.enrich-lane[data-tone="wait"] .enrich-dot {
+  background: var(--brass);
+  animation: enrich-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes enrich-pulse { 50% { opacity: .3; } }
+
+@media (max-width: 640px) {
+  .enrich { padding: 1.15rem 1rem 1.25rem; }
+}
+
 /* ── states ──────────────────────────────────────────────────────── */
 .state {
   padding: 2.75rem 1.5rem;

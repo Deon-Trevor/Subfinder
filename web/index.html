@@ -261,6 +261,31 @@
     </div>
 
     <div id="register-state" role="status" aria-live="polite"></div>
+
+    <!-- An empty answer is still an answer, but it is not always the end of
+         one. When the index holds nothing under an apex, the API can say which
+         records are already on hand and could be read in. Both of them read
+         what already exists: Subfinder never downloads a zone it does not
+         have, and "URLScan" here is a search of scans other people have
+         already run, never a new one. The domain stays untouched either way,
+         which is the only reason this offer belongs on this page at all. -->
+    <section class="enrich" id="enrich" aria-labelledby="enrich-heading" hidden>
+      <p class="eyebrow" id="enrich-heading">Records already on hand</p>
+      <p class="enrich-lede" id="enrich-lede"></p>
+
+      <!-- The report sits above the offer: after a run this is what the reader
+           came back for, and anything still worth doing reads as what is left
+           rather than as a repeat of what just happened. -->
+      <div class="enrich-lanes" id="enrich-lanes" role="status" aria-live="polite" hidden></div>
+
+      <div class="enrich-actions" id="enrich-actions"></div>
+      <p class="enrich-blocked" id="enrich-blocked" hidden></p>
+
+      <div class="enrich-run" id="enrich-run" hidden>
+        <button class="enrich-submit" id="enrich-submit" type="button">Read them in</button>
+        <p class="enrich-note" id="enrich-note"></p>
+      </div>
+    </section>
   </section>
 
   <section class="wireup wrap" aria-labelledby="wireup-heading">
