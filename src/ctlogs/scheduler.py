@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ctlogs.control import ControlDatabase
-from ctlogs.database import Database, QuotaExceeded
+from ctlogs.database import Database
 from ctlogs.ingest.backfill import (
     DEFAULT_JOBS,
     DEFAULT_MAX_BYTES,
@@ -29,7 +29,6 @@ from ctlogs.ingest.enrich import (
     DEFAULT_URLSCAN_PRIORITY_DAILY_LIMIT,
     DEFAULT_URLSCAN_SEARCH_DAILY_LIMIT,
     URLSCAN_BREADTH_QUOTA_SUBJECT,
-    URLSCAN_PRIORITY_QUOTA_SUBJECT,
     URLSCAN_TOTAL_QUOTA_SUBJECT,
     UrlscanSource,
     run_source,
@@ -111,7 +110,9 @@ def _scheduled_artifacts() -> list[tuple[str, str]]:
         values = json.loads(raw)
     except json.JSONDecodeError as error:
         raise ValueError("CTLOGS_SCHEDULED_ARTIFACTS must be a JSON list") from error
-    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+    if not isinstance(values, list) or not all(
+        isinstance(value, str) for value in values
+    ):
         raise ValueError("CTLOGS_SCHEDULED_ARTIFACTS must be a JSON list of strings")
     jobs: list[tuple[str, str]] = []
     for value in values:
@@ -131,7 +132,9 @@ def _run_urlscan_batch(
 ) -> tuple[int, int]:
     state_key = "scheduler:urlscan:rotation"
     state = database.get_ingest_state(state_key)
-    start = int(state["cursor"]) if state and str(state.get("cursor", "")).isdigit() else 0
+    start = (
+        int(state["cursor"]) if state and str(state.get("cursor", "")).isdigit() else 0
+    )
     count = min(apexes_per_run, len(apexes))
     selected = [apexes[(start + offset) % len(apexes)] for offset in range(count)]
     requests = 0
@@ -178,44 +181,6 @@ def _run_urlscan_apex(
         persist_state=not history_complete,
         request_guard=request_guard,
     )
-
-
-def _run_urlscan_priority_batch(
-    database: Database,
-    control_database: ControlDatabase,
-    source: UrlscanSource,
-    *,
-    apexes_per_run: int,
-    request_guard: Callable[[], object] | None = None,
-) -> tuple[int, int]:
-    apexes = control_database.queued_refreshes(apexes_per_run)
-    requests = 0
-    hostnames = 0
-    failures = 0
-    for apex in apexes:
-        try:
-            source_requests, source_hostnames = _run_urlscan_apex(
-                database,
-                source,
-                apex,
-                request_guard=request_guard,
-            )
-        except QuotaExceeded:
-            raise
-        except Exception:
-            failures += 1
-            LOGGER.exception("priority urlscan history failed for %s", apex)
-        else:
-            requests += source_requests
-            hostnames += source_hostnames
-        state = database.get_ingest_state(f"enrich:{source.name}:{apex}")
-        control_database.finish_refresh_attempt(
-            apex,
-            complete=bool(state and state.get("cursor") == "complete"),
-        )
-    if apexes and failures == len(apexes):
-        raise RuntimeError("urlscan priority history failed for every queued apex")
-    return requests, hostnames
 
 
 def _run_urlscan_index_batch(
@@ -306,7 +271,6 @@ def _run_ct_history_batch(
 
 def build_jobs(
     database: Database,
-    control_database: ControlDatabase,
 ) -> list[ScheduledJob]:
     interval = _positive_environment_integer(
         "CTLOGS_SCHEDULER_INTERVAL",
@@ -321,6 +285,7 @@ def build_jobs(
         "CTLOGS_SCHEDULER_MAX_BYTES",
         DEFAULT_MAX_BYTES,
     )
+    zone_directory = Path(os.environ.get("CTLOGS_CZDS_OUTPUT", "/data/czds"))
     jobs: list[ScheduledJob] = []
 
     if _enabled("CTLOGS_SCHEDULE_DEFAULTS"):
@@ -362,17 +327,24 @@ def build_jobs(
     if bool(username) != bool(password):
         raise ValueError("CZDS_USERNAME and CZDS_PASSWORD must be set together")
     if username and password and _enabled("CTLOGS_SCHEDULE_CZDS"):
-        output = Path(os.environ.get("CTLOGS_CZDS_OUTPUT", "/data/czds"))
         max_zones = _positive_environment_integer("CTLOGS_CZDS_MAX_ZONES", 25)
+        czds_interval = _positive_environment_integer(
+            "CTLOGS_CZDS_INTERVAL",
+            interval,
+        )
+        czds_retry = _positive_environment_integer(
+            "CTLOGS_CZDS_RETRY_INTERVAL",
+            retry,
+        )
         jobs.append(
             ScheduledJob(
                 "czds",
-                interval,
-                retry,
+                czds_interval,
+                czds_retry,
                 lambda: run_czds(
                     database,
                     CzdsClient(username, password, timeout=timeout),
-                    output,
+                    zone_directory,
                     max_zones=max_zones,
                     refresh=True,
                 ),
@@ -467,10 +439,6 @@ def build_jobs(
             "CTLOGS_URLSCAN_APEXES_PER_RUN",
             10,
         )
-        priority_apexes_per_run = _positive_environment_integer(
-            "CTLOGS_URLSCAN_PRIORITY_APEXES_PER_RUN",
-            14,
-        )
         urlscan_interval = _positive_environment_integer(
             "CTLOGS_URLSCAN_INTERVAL",
             interval,
@@ -494,27 +462,6 @@ def build_jobs(
                 DEFAULT_URLSCAN_PRIORITY_DAILY_LIMIT,
             ),
         )
-        if urlscan_budgets.priority:
-            priority_guard = lambda: database.consume_partitioned_request(
-                URLSCAN_TOTAL_QUOTA_SUBJECT,
-                urlscan_daily_limit,
-                URLSCAN_PRIORITY_QUOTA_SUBJECT,
-                urlscan_budgets.priority,
-            )
-            jobs.append(
-                ScheduledJob(
-                    "urlscan-priority",
-                    urlscan_interval,
-                    urlscan_retry,
-                    lambda: _run_urlscan_priority_batch(
-                        database,
-                        control_database,
-                        UrlscanSource(urlscan_key, timeout=timeout),
-                        apexes_per_run=priority_apexes_per_run,
-                        request_guard=priority_guard,
-                    ),
-                )
-            )
         if urlscan_apexes and urlscan_budgets.breadth:
             breadth_guard = lambda: database.consume_partitioned_request(
                 URLSCAN_TOTAL_QUOTA_SUBJECT,
@@ -605,7 +552,9 @@ def _singleton_lock(path: Path) -> Iterator[None]:
         yield
 
 
-def run_forever(database: Database, jobs: list[ScheduledJob], tick_seconds: int) -> None:
+def run_forever(
+    database: Database, jobs: list[ScheduledJob], tick_seconds: int
+) -> None:
     LOGGER.info("scheduler started with jobs: %s", ", ".join(job.name for job in jobs))
     while True:
         run_due_jobs(database, jobs)
@@ -614,7 +563,9 @@ def run_forever(database: Database, jobs: list[ScheduledJob], tick_seconds: int)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run recurring ingestion jobs")
-    parser.add_argument("--db", default=os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3"))
+    parser.add_argument(
+        "--db", default=os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3")
+    )
     parser.add_argument(
         "--control-db",
         default=os.environ.get("CTLOGS_CONTROL_DB_PATH", "data/control.sqlite3"),
@@ -628,7 +579,7 @@ def main() -> None:
     database.verify_schema()
     control_database = ControlDatabase(args.control_db)
     control_database.verify_schema()
-    jobs = build_jobs(database, control_database)
+    jobs = build_jobs(database)
     if (
         _enabled("CTLOGS_SCHEDULE_URLSCAN")
         and os.environ.get("URLSCAN_API_KEY")
@@ -639,7 +590,9 @@ def main() -> None:
         )
     if args.list:
         for job in jobs:
-            print(f"{job.name}: every {job.interval_seconds}s, retry {job.retry_seconds}s")
+            print(
+                f"{job.name}: every {job.interval_seconds}s, retry {job.retry_seconds}s"
+            )
         return
     lock_path = Path(os.environ.get("CTLOGS_SCHEDULER_LOCK", "/data/scheduler.lock"))
     with _singleton_lock(lock_path):

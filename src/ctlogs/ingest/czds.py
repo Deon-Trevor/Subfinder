@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import io
 import json
 import os
+import stat
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +19,92 @@ from ctlogs.database import Database
 
 AUTH_URL = "https://account-api.icann.org/api/authenticate"
 LINKS_URL = "https://czds-api.icann.org/czds/downloads/links"
+
+
+@dataclass(frozen=True)
+class LocalZoneArtifact:
+    """One scheduler-owned zone file that is safe to offer for local import."""
+
+    zone: str
+    name: str
+    path: Path
+    size: int
+    modified_ns: int
+
+    @property
+    def fingerprint(self) -> str:
+        return f"stat-v1:{self.size}:{self.modified_ns}"
+
+
+def local_zone_artifact(
+    directory: Path,
+    zone: str,
+    *,
+    max_bytes: int | None = None,
+) -> LocalZoneArtifact | None:
+    """Resolve an exact managed-zone artifact without following links or paths."""
+    canonical = zone.strip().lower().rstrip(".")
+    if (
+        not canonical
+        or "/" in canonical
+        or "\\" in canonical
+        or any(
+            not label or not label.replace("-", "a").isalnum()
+            for label in canonical.split(".")
+        )
+    ):
+        return None
+    name = f"{canonical}.zone.gz"
+    path = directory / name
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        return None
+    if max_bytes is not None and metadata.st_size > max_bytes:
+        return None
+    return LocalZoneArtifact(
+        zone=canonical,
+        name=name,
+        path=path,
+        size=metadata.st_size,
+        modified_ns=metadata.st_mtime_ns,
+    )
+
+
+def zone_artifact_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def import_local_zone(
+    database: Database,
+    artifact: LocalZoneArtifact,
+    *,
+    batch_size: int = 5000,
+) -> tuple[int, str]:
+    """Import one already-local artifact and pin the exact file generation."""
+    digest = zone_artifact_sha256(artifact.path)
+    inserted = import_zone(
+        database,
+        artifact.zone,
+        artifact.path,
+        batch_size=batch_size,
+    )
+    current = local_zone_artifact(artifact.path.parent, artifact.zone)
+    if current is None or current.fingerprint != artifact.fingerprint:
+        raise RuntimeError("zone artifact changed while it was being indexed")
+    database.upsert_ingest_state(
+        f"zone-import:{artifact.zone}",
+        cursor=artifact.fingerprint,
+        etag=digest,
+        updated_at=datetime.now(UTC).isoformat(),
+    )
+    return inserted, digest
 
 
 class CzdsClient:
@@ -77,7 +166,9 @@ class CzdsClient:
     def approved_links(self) -> list[str]:
         with self._open_authorized(LINKS_URL) as response:
             payload = json.loads(response.read())
-        if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+        if not isinstance(payload, list) or not all(
+            isinstance(item, str) for item in payload
+        ):
             raise ValueError("CZDS links response was not a list of URLs")
         return payload
 
@@ -137,7 +228,9 @@ def _zone_lines(path: Path):
             raw.close()
 
 
-def import_zone(database: Database, zone: str, path: Path, *, batch_size: int = 5000) -> int:
+def import_zone(
+    database: Database, zone: str, path: Path, *, batch_size: int = 5000
+) -> int:
     source = f"czds:{zone}"
     rows: list[tuple[str, str | None]] = []
     count = 0
@@ -234,6 +327,14 @@ def run_czds(
             continue
         bytes_read, modified = result
         inserted = import_zone(database, zone, path)
+        artifact = local_zone_artifact(output_directory, zone)
+        if artifact is not None:
+            database.upsert_ingest_state(
+                f"zone-import:{zone}",
+                cursor=artifact.fingerprint,
+                etag=zone_artifact_sha256(path),
+                updated_at=datetime.now(UTC).isoformat(),
+            )
         finished_at = datetime.now(UTC).isoformat()
         database.record_ingest_run(
             f"czds:{zone}",
@@ -256,7 +357,9 @@ def run_czds(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Download and ingest approved ICANN CZDS zones")
+    parser = argparse.ArgumentParser(
+        description="Download and ingest approved ICANN CZDS zones"
+    )
     parser.add_argument("--db", default="data/ctlogs.sqlite3")
     parser.add_argument("--output", default="data/czds")
     parser.add_argument("--tld", action="append")

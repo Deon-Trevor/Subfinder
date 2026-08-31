@@ -11,4 +11,5 @@ data/
 *.sqlite3-shm
 *.sqlite3-wal
 .agents/
+.DS_Store
 .codex/

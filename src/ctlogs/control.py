@@ -24,6 +24,10 @@ class IdempotencyConflict(RuntimeError):
     pass
 
 
+class EnrichmentQueueFull(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class Admission:
     quota: Quota
@@ -62,6 +66,33 @@ class RecordBatchJob:
 @dataclass(frozen=True)
 class RecordBatchAdmission:
     job: RecordBatchJob
+    quota: Quota
+    created: bool
+
+
+@dataclass(frozen=True)
+class EnrichmentJob:
+    job_id: str
+    subject: str
+    state: str
+    apex: str
+    zone: str
+    artifact_name: str
+    artifact_fingerprint: str
+    zone_state: str
+    urlscan_state: str
+    zone_records: int
+    urlscan_records: int
+    created_at: float
+    updated_at: float
+    lease_owner: str = ""
+    lease_expires: float = 0.0
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class EnrichmentAdmission:
+    job: EnrichmentJob
     quota: Quota
     created: bool
 
@@ -177,6 +208,52 @@ class ControlDatabase:
                         document_json TEXT NOT NULL,
                         PRIMARY KEY(job_id, sequence)
                     );
+
+                    CREATE TABLE IF NOT EXISTS runtime_capabilities (
+                        name TEXT PRIMARY KEY,
+                        available INTEGER NOT NULL CHECK (available IN (0,1)),
+                        detail TEXT NOT NULL DEFAULT '',
+                        updated_at REAL NOT NULL
+                    ) WITHOUT ROWID;
+
+                    CREATE TABLE IF NOT EXISTS enrichment_jobs (
+                        job_id TEXT PRIMARY KEY,
+                        subject TEXT NOT NULL,
+                        idempotency_key TEXT NOT NULL,
+                        request_sha256 TEXT NOT NULL,
+                        quota_day TEXT NOT NULL,
+                        state TEXT NOT NULL CHECK (
+                            state IN ('queued','running','done','partial','failed')
+                        ),
+                        apex TEXT NOT NULL,
+                        zone TEXT NOT NULL,
+                        artifact_name TEXT NOT NULL DEFAULT '',
+                        artifact_fingerprint TEXT NOT NULL DEFAULT '',
+                        zone_state TEXT NOT NULL CHECK (
+                            zone_state IN (
+                                'not_requested','queued','running','complete',
+                                'already_current','failed'
+                            )
+                        ),
+                        urlscan_state TEXT NOT NULL CHECK (
+                            urlscan_state IN (
+                                'not_requested','queued','running','complete',
+                                'checkpointed','unavailable','failed'
+                            )
+                        ),
+                        zone_records INTEGER NOT NULL DEFAULT 0
+                            CHECK (zone_records >= 0),
+                        urlscan_records INTEGER NOT NULL DEFAULT 0
+                            CHECK (urlscan_records >= 0),
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        lease_owner TEXT NOT NULL DEFAULT '',
+                        lease_expires REAL NOT NULL DEFAULT 0,
+                        error TEXT NOT NULL DEFAULT '',
+                        UNIQUE(subject, idempotency_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS enrichment_jobs_claim
+                        ON enrichment_jobs(state, updated_at, job_id);
                     """
                 )
                 connection.execute(
@@ -190,6 +267,11 @@ class ControlDatabase:
                     "DELETE FROM record_batch_jobs "
                     "WHERE state IN ('done','failed','cancelled') "
                     "AND updated_at < strftime('%s','now') - 86400"
+                )
+                connection.execute(
+                    "DELETE FROM enrichment_jobs "
+                    "WHERE state IN ('done','partial','failed') "
+                    "AND updated_at < strftime('%s','now') - 604800"
                 )
         except sqlite3.Error as error:
             raise ControlUnavailable(
@@ -216,6 +298,8 @@ class ControlDatabase:
             "record_batch_jobs",
             "record_batch_apexes",
             "record_batch_slices",
+            "runtime_capabilities",
+            "enrichment_jobs",
         } - present
         if missing:
             raise ControlUnavailable(
@@ -337,6 +421,421 @@ class ControlDatabase:
         if should_prune:
             self._last_prune_day = day
         return Quota(limit, max(0, limit - used), int(reset.timestamp()))
+
+    def set_capability(
+        self,
+        name: str,
+        available: bool,
+        *,
+        detail: str = "",
+        now: float | None = None,
+    ) -> None:
+        if not name:
+            raise ValueError("capability name is required")
+        timestamp = epoch_seconds() if now is None else now
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO runtime_capabilities(name,available,detail,updated_at) "
+                    "VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                    "available=excluded.available,detail=excluded.detail,"
+                    "updated_at=excluded.updated_at",
+                    (name, int(available), detail[:500], timestamp),
+                )
+        except sqlite3.Error as error:
+            raise ControlUnavailable("capability update failed") from error
+
+    def capability(self, name: str) -> tuple[bool, str, float] | None:
+        try:
+            with self._connect(read_only=True) as connection:
+                row = connection.execute(
+                    "SELECT available,detail,updated_at FROM runtime_capabilities "
+                    "WHERE name=?",
+                    (name,),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise ControlUnavailable("capability read failed") from error
+        if row is None:
+            return None
+        return bool(row["available"]), str(row["detail"]), float(row["updated_at"])
+
+    @staticmethod
+    def _enrichment_job(row: sqlite3.Row) -> EnrichmentJob:
+        return EnrichmentJob(
+            job_id=str(row["job_id"]),
+            subject=str(row["subject"]),
+            state=str(row["state"]),
+            apex=str(row["apex"]),
+            zone=str(row["zone"]),
+            artifact_name=str(row["artifact_name"]),
+            artifact_fingerprint=str(row["artifact_fingerprint"]),
+            zone_state=str(row["zone_state"]),
+            urlscan_state=str(row["urlscan_state"]),
+            zone_records=int(row["zone_records"]),
+            urlscan_records=int(row["urlscan_records"]),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+            lease_owner=str(row["lease_owner"]),
+            lease_expires=float(row["lease_expires"]),
+            error=str(row["error"]),
+        )
+
+    def enqueue_enrichment(
+        self,
+        subject: str,
+        limit: int,
+        apex: str,
+        zone: str,
+        *,
+        artifact_name: str = "",
+        artifact_fingerprint: str = "",
+        include_urlscan: bool,
+        idempotency_key: str,
+        max_pending: int,
+        max_pending_per_subject: int,
+        now: datetime | None = None,
+    ) -> EnrichmentAdmission:
+        """Debit one request and enqueue a bounded local enrichment job."""
+        if not subject or not apex or not zone:
+            raise ValueError("subject, apex, and zone are required")
+        if not artifact_name and not include_urlscan:
+            raise ValueError("at least one enrichment action is required")
+        if bool(artifact_name) != bool(artifact_fingerprint):
+            raise ValueError("zone artifact name and fingerprint must be paired")
+        if not idempotency_key or len(idempotency_key) > 128:
+            raise ValueError("idempotency_key must contain at most 128 characters")
+        if min(limit, max_pending, max_pending_per_subject) < 1:
+            raise ValueError("queue and quota limits must be positive")
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            raise ValueError("now must include a timezone")
+        current = current.astimezone(UTC)
+        timestamp = current.timestamp()
+        day = current.date().isoformat()
+        reset = datetime.combine(current.date() + timedelta(days=1), time.min, UTC)
+        reset_at = int(reset.timestamp())
+        request_document = {
+            "apex": apex,
+            "zone": zone,
+            "artifact_name": artifact_name,
+            "artifact_fingerprint": artifact_fingerprint,
+            "include_urlscan": include_urlscan,
+        }
+        request_sha256 = hashlib.sha256(
+            json.dumps(request_document, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    "SELECT * FROM enrichment_jobs "
+                    "WHERE subject=? AND idempotency_key=?",
+                    (subject, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing["request_sha256"]) != request_sha256:
+                        raise IdempotencyConflict(
+                            "idempotency key was already used for another request"
+                        )
+                    used_row = connection.execute(
+                        "SELECT used FROM request_counts WHERE day=? AND subject=?",
+                        (day, subject),
+                    ).fetchone()
+                    used = int(used_row["used"]) if used_row is not None else 0
+                    return EnrichmentAdmission(
+                        self._enrichment_job(existing),
+                        Quota(limit, max(0, limit - used), reset_at),
+                        False,
+                    )
+                active = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM enrichment_jobs "
+                        "WHERE state IN ('queued','running')"
+                    ).fetchone()[0]
+                )
+                subject_active = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM enrichment_jobs WHERE subject=? "
+                        "AND state IN ('queued','running')",
+                        (subject,),
+                    ).fetchone()[0]
+                )
+                if active >= max_pending or subject_active >= max_pending_per_subject:
+                    raise EnrichmentQueueFull("enrichment queue is full")
+                quota_row = connection.execute(
+                    """
+                    INSERT INTO request_counts(day,subject,used) VALUES(?,?,1)
+                    ON CONFLICT(day,subject) DO UPDATE SET used=used+1
+                    WHERE used+1<=?
+                    RETURNING used
+                    """,
+                    (day, subject, limit),
+                ).fetchone()
+                if quota_row is None:
+                    used_row = connection.execute(
+                        "SELECT used FROM request_counts WHERE day=? AND subject=?",
+                        (day, subject),
+                    ).fetchone()
+                    used = int(used_row["used"]) if used_row is not None else 0
+                    raise QuotaExceeded(Quota(limit, max(0, limit - used), reset_at))
+                job_id = uuid.uuid4().hex
+                zone_state = "queued" if artifact_name else "not_requested"
+                urlscan_state = "queued" if include_urlscan else "not_requested"
+                connection.execute(
+                    "INSERT INTO enrichment_jobs "
+                    "(job_id,subject,idempotency_key,request_sha256,quota_day,state,"
+                    "apex,zone,artifact_name,artifact_fingerprint,zone_state,"
+                    "urlscan_state,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,'queued',?,?,?,?,?,?,?,?)",
+                    (
+                        job_id,
+                        subject,
+                        idempotency_key,
+                        request_sha256,
+                        day,
+                        apex,
+                        zone,
+                        artifact_name,
+                        artifact_fingerprint,
+                        zone_state,
+                        urlscan_state,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                if include_urlscan:
+                    refresh_status = self._enqueue_refresh(
+                        connection,
+                        apex,
+                        current.isoformat(),
+                    )
+                    if refresh_status == "queue-full":
+                        raise EnrichmentQueueFull("URLScan refresh queue is full")
+                row = connection.execute(
+                    "SELECT * FROM enrichment_jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                assert row is not None
+                return EnrichmentAdmission(
+                    self._enrichment_job(row),
+                    Quota(
+                        limit,
+                        max(0, limit - int(quota_row["used"])),
+                        reset_at,
+                    ),
+                    True,
+                )
+        except (
+            EnrichmentQueueFull,
+            IdempotencyConflict,
+            QuotaExceeded,
+        ):
+            raise
+        except sqlite3.Error as error:
+            raise ControlUnavailable("enrichment admission failed") from error
+
+    def enrichment_job(
+        self,
+        job_id: str,
+        *,
+        subject: str | None = None,
+    ) -> EnrichmentJob | None:
+        query = "SELECT * FROM enrichment_jobs WHERE job_id=?"
+        parameters: tuple[object, ...] = (job_id,)
+        if subject is not None:
+            query += " AND subject=?"
+            parameters = (job_id, subject)
+        try:
+            with self._connect(read_only=True) as connection:
+                row = connection.execute(query, parameters).fetchone()
+        except sqlite3.Error as error:
+            raise ControlUnavailable("enrichment status read failed") from error
+        return self._enrichment_job(row) if row is not None else None
+
+    def enrichment_replay(
+        self,
+        subject: str,
+        limit: int,
+        idempotency_key: str,
+        *,
+        now: datetime | None = None,
+    ) -> EnrichmentAdmission | None:
+        """Return a prior admission without rechecking mutable capabilities."""
+        if not subject or limit < 1 or not idempotency_key:
+            raise ValueError("subject, limit, and idempotency key are required")
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            raise ValueError("now must include a timezone")
+        current = current.astimezone(UTC)
+        day = current.date().isoformat()
+        reset = datetime.combine(current.date() + timedelta(days=1), time.min, UTC)
+        try:
+            with self._connect(read_only=True) as connection:
+                row = connection.execute(
+                    "SELECT * FROM enrichment_jobs "
+                    "WHERE subject=? AND idempotency_key=?",
+                    (subject, idempotency_key),
+                ).fetchone()
+                if row is None:
+                    return None
+                used_row = connection.execute(
+                    "SELECT used FROM request_counts WHERE day=? AND subject=?",
+                    (day, subject),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise ControlUnavailable("enrichment replay read failed") from error
+        used = int(used_row["used"]) if used_row is not None else 0
+        return EnrichmentAdmission(
+            self._enrichment_job(row),
+            Quota(limit, max(0, limit - used), int(reset.timestamp())),
+            False,
+        )
+
+    def claim_enrichment(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: float,
+        now: float | None = None,
+    ) -> EnrichmentJob | None:
+        if not worker_id or lease_seconds <= 0:
+            raise ValueError("worker and positive lease are required")
+        timestamp = epoch_seconds() if now is None else now
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "UPDATE enrichment_jobs SET state='queued',lease_owner='',"
+                    "lease_expires=0,updated_at=?,"
+                    "zone_state=CASE WHEN zone_state='running' THEN 'queued' "
+                    "ELSE zone_state END,"
+                    "urlscan_state=CASE WHEN urlscan_state='running' THEN 'queued' "
+                    "ELSE urlscan_state END "
+                    "WHERE state='running' AND lease_expires<=?",
+                    (timestamp, timestamp),
+                )
+                row = connection.execute(
+                    "SELECT * FROM enrichment_jobs WHERE state='queued' "
+                    "ORDER BY updated_at,job_id LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                job_id = str(row["job_id"])
+                changed = connection.execute(
+                    "UPDATE enrichment_jobs SET state='running',lease_owner=?,"
+                    "lease_expires=?,updated_at=?,"
+                    "zone_state=CASE WHEN zone_state='queued' THEN 'running' "
+                    "ELSE zone_state END,"
+                    "urlscan_state=CASE WHEN urlscan_state='queued' THEN 'running' "
+                    "ELSE urlscan_state END "
+                    "WHERE job_id=? AND state='queued'",
+                    (worker_id, timestamp + lease_seconds, timestamp, job_id),
+                )
+                if not changed.rowcount:
+                    return None
+                claimed = connection.execute(
+                    "SELECT * FROM enrichment_jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                assert claimed is not None
+                return self._enrichment_job(claimed)
+        except sqlite3.Error as error:
+            raise ControlUnavailable("enrichment claim failed") from error
+
+    def checkpoint_enrichment(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        zone_state: str | None = None,
+        urlscan_state: str | None = None,
+        zone_records: int | None = None,
+        urlscan_records: int | None = None,
+        error: str | None = None,
+        now: float | None = None,
+    ) -> EnrichmentJob:
+        timestamp = epoch_seconds() if now is None else now
+        assignments = ["updated_at=?"]
+        values: list[object] = [timestamp]
+        for name, value in (
+            ("zone_state", zone_state),
+            ("urlscan_state", urlscan_state),
+            ("zone_records", zone_records),
+            ("urlscan_records", urlscan_records),
+            ("error", error[:500] if error is not None else None),
+        ):
+            if value is not None:
+                assignments.append(f"{name}=?")
+                values.append(value)
+        values.extend((job_id, worker_id))
+        try:
+            with self._connect() as connection:
+                changed = connection.execute(
+                    f"UPDATE enrichment_jobs SET {','.join(assignments)} "
+                    "WHERE job_id=? AND state='running' AND lease_owner=?",
+                    values,
+                )
+                if not changed.rowcount:
+                    raise ControlUnavailable("enrichment lease was lost")
+                row = connection.execute(
+                    "SELECT * FROM enrichment_jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                assert row is not None
+                return self._enrichment_job(row)
+        except ControlUnavailable:
+            raise
+        except sqlite3.Error as exc:
+            raise ControlUnavailable("enrichment checkpoint failed") from exc
+
+    def finish_enrichment(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        now: float | None = None,
+    ) -> EnrichmentJob:
+        timestamp = epoch_seconds() if now is None else now
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM enrichment_jobs WHERE job_id=? "
+                    "AND state='running' AND lease_owner=?",
+                    (job_id, worker_id),
+                ).fetchone()
+                if row is None:
+                    raise ControlUnavailable("enrichment lease was lost")
+                job = self._enrichment_job(row)
+                lane_states = [job.zone_state, job.urlscan_state]
+                if any(state in {"queued", "running"} for state in lane_states):
+                    raise ValueError("enrichment lanes must be terminal before finish")
+                successful = {
+                    "complete",
+                    "already_current",
+                    "checkpointed",
+                }
+                has_success = any(state in successful for state in lane_states)
+                has_partial = any(
+                    state in {"checkpointed", "unavailable", "failed"}
+                    for state in lane_states
+                )
+                state = (
+                    "failed"
+                    if not has_success
+                    else ("partial" if has_partial else "done")
+                )
+                connection.execute(
+                    "UPDATE enrichment_jobs SET state=?,updated_at=?,"
+                    "lease_owner='',lease_expires=0 WHERE job_id=?",
+                    (state, timestamp, job_id),
+                )
+                updated = connection.execute(
+                    "SELECT * FROM enrichment_jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                assert updated is not None
+                return self._enrichment_job(updated)
+        except (ControlUnavailable, ValueError):
+            raise
+        except sqlite3.Error as error:
+            raise ControlUnavailable("enrichment completion failed") from error
 
     @staticmethod
     def _batch_job(row: sqlite3.Row) -> RecordBatchJob:

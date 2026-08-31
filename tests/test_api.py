@@ -46,17 +46,15 @@ async def test_plain_text_is_one_hostname_per_line(client: httpx.AsyncClient) ->
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/plain; charset=utf-8"
-    assert response.text == (
-        "example.com\n"
-        "www.example.com\n"
-        "unknown.example.com\n"
-    )
+    assert response.text == ("example.com\nwww.example.com\nunknown.example.com\n")
     assert response.headers["x-ratelimit-limit"] == "1000"
     assert response.headers["x-ratelimit-remaining"] == "999"
 
 
 @pytest.mark.anyio
-async def test_dates_and_json_match_the_public_contract(client: httpx.AsyncClient) -> None:
+async def test_dates_and_json_match_the_public_contract(
+    client: httpx.AsyncClient,
+) -> None:
     dated_text = await client.get(
         "/v1/search",
         params={"apex": "example.com", "dates": 1},
@@ -148,6 +146,175 @@ async def test_records_api_returns_local_provenance_without_discovery(
 
 
 @pytest.mark.anyio
+async def test_enrichment_options_offer_only_existing_local_zone_and_urlscan(
+    tmp_path: Path,
+) -> None:
+    zone_directory = tmp_path / "czds"
+    zone_directory.mkdir()
+    (zone_directory / "ac.zw.zone.gz").write_bytes(b"nust 3600 IN NS ns1.example.\n")
+    app = create_app(
+        tmp_path / "enrichment.sqlite3",
+        zone_directory=zone_directory,
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        app.state.control_database.set_capability(
+            "urlscan-passive",
+            True,
+            detail="priority history is configured",
+        )
+
+        response = await test_client.get(
+            "/v1/enrichment-options",
+            params={"apex": "nust.ac.zw"},
+        )
+        missing = await test_client.get(
+            "/v1/enrichment-options",
+            params={"apex": "example.com"},
+        )
+        zone_path = zone_directory / "ac.zw.zone.gz"
+        app.state.database.upsert_ingest_state(
+            "zone-import:ac.zw",
+            cursor=(
+                f"stat-v1:{zone_path.stat().st_size}:{zone_path.stat().st_mtime_ns}"
+            ),
+            updated_at="2026-08-31T00:00:00+00:00",
+        )
+        current = await test_client.get(
+            "/v1/enrichment-options",
+            params={"apex": "nust.ac.zw"},
+        )
+
+    assert response.status_code == 200
+    document = response.json()
+    assert document["zone"] == "ac.zw"
+    assert document["actions"]["local_zone"] == {
+        "available": True,
+        "current": False,
+        "actionable": True,
+        "artifact": "ac.zw.zone.gz",
+        "artifact_bytes": 29,
+        "reason": "local zone artifact is ready",
+    }
+    assert document["actions"]["urlscan"]["available"] is True
+    assert missing.json()["actions"]["local_zone"]["available"] is False
+    assert current.json()["actions"]["local_zone"]["current"] is True
+    assert current.json()["actions"]["local_zone"]["actionable"] is False
+
+
+@pytest.mark.anyio
+async def test_composite_enrichment_submission_is_idempotent_and_subject_owned(
+    tmp_path: Path,
+) -> None:
+    zone_directory = tmp_path / "czds"
+    zone_directory.mkdir()
+    (zone_directory / "ac.zw.zone.gz").write_bytes(b"nust 3600 IN NS ns1.example.\n")
+    app = create_app(
+        tmp_path / "enrichment.sqlite3",
+        zone_directory=zone_directory,
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, client=("198.51.100.10", 5000)),
+            base_url="http://testserver",
+        ) as first_client,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, client=("198.51.100.11", 5001)),
+            base_url="http://testserver",
+        ) as other_client,
+    ):
+        app.state.control_database.set_capability("urlscan-passive", True)
+        body = {
+            "apex": "nust.ac.zw",
+            "actions": ["local_zone", "urlscan"],
+        }
+        first = await first_client.post(
+            "/v1/enrichment-jobs",
+            json=body,
+            headers={"Idempotency-Key": "nust-both"},
+        )
+        replay = await first_client.post(
+            "/v1/enrichment-jobs",
+            json=body,
+            headers={"Idempotency-Key": "nust-both"},
+        )
+        status = await first_client.get(first.headers["location"])
+        hidden = await other_client.get(first.headers["location"])
+        claimed = app.state.control_database.claim_enrichment(
+            "test-worker", lease_seconds=60
+        )
+        assert claimed is not None
+        app.state.control_database.checkpoint_enrichment(
+            claimed.job_id,
+            "test-worker",
+            zone_state="complete",
+            urlscan_state="complete",
+        )
+        app.state.control_database.finish_enrichment(claimed.job_id, "test-worker")
+        (zone_directory / "ac.zw.zone.gz").unlink()
+        app.state.control_database.set_capability("urlscan-passive", False)
+        terminal_replay = await first_client.post(
+            "/v1/enrichment-jobs",
+            json=body,
+            headers={"Idempotency-Key": "nust-both"},
+        )
+
+    assert first.status_code == 202
+    assert first.headers["x-idempotent-replay"] == "0"
+    assert replay.status_code == 202
+    assert replay.headers["x-idempotent-replay"] == "1"
+    assert replay.json()["job_id"] == first.json()["job_id"]
+    assert first.headers["x-ratelimit-remaining"] == "999"
+    assert replay.headers["x-ratelimit-remaining"] == "999"
+    assert terminal_replay.status_code == 202
+    assert terminal_replay.headers["x-idempotent-replay"] == "1"
+    assert terminal_replay.json()["state"] == "done"
+    assert terminal_replay.json()["job_id"] == first.json()["job_id"]
+    assert status.status_code == 200
+    assert status.json()["lanes"]["local_zone"]["state"] == "queued"
+    assert status.json()["lanes"]["urlscan"]["state"] == "queued"
+    assert hidden.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_enrichment_never_fetches_a_zone_that_is_not_local(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        tmp_path / "enrichment.sqlite3",
+        zone_directory=tmp_path / "empty-czds",
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        response = await test_client.post(
+            "/v1/enrichment-jobs",
+            json={"apex": "nust.ac.zw", "actions": ["local_zone"]},
+            headers={"Idempotency-Key": "missing-zone"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == ("no eligible local zone artifact is available")
+    assert not (tmp_path / "empty-czds").exists()
+
+
+@pytest.mark.anyio
 async def test_private_batch_records_requires_token_and_charges_each_apex(
     tmp_path: Path,
 ) -> None:
@@ -213,9 +380,7 @@ async def test_private_batch_records_requires_token_and_charges_each_apex(
         "example.com",
     ]
     assert first.json()["results"][0]["records"] == []
-    assert first.json()["results"][1]["records"][0]["hostname"] == (
-        "www.example.com"
-    )
+    assert first.json()["results"][1]["records"][0]["hostname"] == ("www.example.com")
     assert second.status_code == 200
     assert second.headers["x-ratelimit-remaining"] == "0"
     assert exhausted.status_code == 429
@@ -337,8 +502,12 @@ async def test_search_returns_the_local_index_and_coalesces_refresh_work(
 
 
 @pytest.mark.anyio
-async def test_optional_cursor_pages_preserve_the_legacy_body_shape(tmp_path: Path) -> None:
-    app = create_app(tmp_path / "page.sqlite3", allowed_hosts=["testserver"], allowed_origins=[])
+async def test_optional_cursor_pages_preserve_the_legacy_body_shape(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        tmp_path / "page.sqlite3", allowed_hosts=["testserver"], allowed_origins=[]
+    )
     async with app.router.lifespan_context(app):
         app.state.database.upsert_subdomains(
             "example.com",
@@ -354,7 +523,12 @@ async def test_optional_cursor_pages_preserve_the_legacy_body_shape(tmp_path: Pa
         ) as test_client:
             first = await test_client.get(
                 "/v1/search",
-                params={"apex": "example.com", "format": "json", "dates": 1, "limit": 2},
+                params={
+                    "apex": "example.com",
+                    "format": "json",
+                    "dates": 1,
+                    "limit": 2,
+                },
             )
             second = await test_client.get(
                 "/v1/search",
@@ -465,7 +639,9 @@ async def test_catalog_writer_does_not_stall_search_health_or_static_routes(
 
 
 @pytest.mark.anyio
-async def test_control_lock_fails_search_quickly_without_blocking_health(tmp_path: Path) -> None:
+async def test_control_lock_fails_search_quickly_without_blocking_health(
+    tmp_path: Path,
+) -> None:
     app = create_app(
         tmp_path / "catalog.sqlite3",
         control_database_path=tmp_path / "control.sqlite3",
@@ -599,9 +775,7 @@ async def test_public_capacity_is_held_until_a_streamed_response_finishes(
         )
         await asyncio.wait_for(entered.wait(), timeout=1)
 
-        overloaded = await test_client.get(
-            "/v1/search", params={"apex": "example.net"}
-        )
+        overloaded = await test_client.get("/v1/search", params={"apex": "example.net"})
         assert app.state.public_request_capacity.in_flight == 1
 
         release.set()
@@ -636,12 +810,8 @@ async def test_forwarded_client_identity_requires_a_trusted_socket_peer() -> Non
         "scheme": "http",
         "server": ("testserver", 80),
     }
-    await middleware(
-        {**base_scope, "client": ("127.0.0.1", 40000)}, receive, send
-    )
-    await middleware(
-        {**base_scope, "client": ("10.0.0.8", 40000)}, receive, send
-    )
+    await middleware({**base_scope, "client": ("127.0.0.1", 40000)}, receive, send)
+    await middleware({**base_scope, "client": ("10.0.0.8", 40000)}, receive, send)
 
     assert observed == ["198.18.0.1", "10.0.0.8"]
 
@@ -842,15 +1012,9 @@ async def test_rate_limit_is_atomic_and_stops_at_the_limit(tmp_path: Path) -> No
             base_url="http://testserver",
         ) as limited_client,
     ):
-        first = await limited_client.get(
-            "/v1/search", params={"apex": "example.com"}
-        )
-        second = await limited_client.get(
-            "/v1/search", params={"apex": "example.com"}
-        )
-        third = await limited_client.get(
-            "/v1/search", params={"apex": "example.com"}
-        )
+        first = await limited_client.get("/v1/search", params={"apex": "example.com"})
+        second = await limited_client.get("/v1/search", params={"apex": "example.com"})
+        third = await limited_client.get("/v1/search", params={"apex": "example.com"})
 
     assert first.status_code == 200
     assert first.headers["x-ratelimit-remaining"] == "1"

@@ -17,16 +17,18 @@ requested apex or the hostnames they return.
 ## Run with Docker (recommended)
 
 Build and run with Compose. A one-shot migration prepares the catalog and small
-control database before the read-only API and the single catalog-writer
-scheduler start. The published loopback port belongs to a bounded NGINX edge;
-the API itself is reachable only from Docker networks.
+control database before the read-only API, recurring scheduler, and dedicated
+enrichment worker start. The two writers serialize every catalog mutation with
+one cross-process lock. The published loopback port belongs to a bounded NGINX
+edge; the API itself is reachable only from Docker networks.
 
 Copy `.env.example` to the single untracked `.env` deployment file and fill in
 only the credentials and overrides this deployment uses. Compose passes
-provider credentials from that file only to `jobs` and `scheduler`. Wrap values
-containing `$` in single quotes so Compose preserves them literally and does not
-interpret credential fragments as variable names. The API and workers receive
-only the variables explicitly listed for them in `docker-compose.yml`; the file
+provider credentials from that file only where needed: CZDS goes to the
+scheduler, while URLScan goes to the scheduler and enrichment worker. Wrap
+values containing `$` in single quotes so Compose preserves them literally and
+does not interpret credential fragments as variable names. The API receives
+only the variables explicitly listed for it in `docker-compose.yml`; the file
 is never injected wholesale into a container.
 
 ```bash
@@ -42,8 +44,9 @@ Compose publishes the edge on port 8200 only on host loopback for the host
 NGINX and attaches only the API container to the external
 `syncpundit-data-plane` network under the `subfinder-index` alias. Create that
 network once before the first deployment.
-The API opens the catalog read-only. The migration and scheduler services are
-the only Compose services that can mutate it.
+The API opens the catalog read-only. Migration, the recurring scheduler, and
+the single enrichment worker are the only Compose services that can mutate
+it; every runtime write uses the same cross-process catalog lock.
 `CTLOGS_DATA_VOLUME`, `CTLOGS_CONTROL_VOLUME`, and `CTLOGS_DATA_NETWORK` in
 `.env` make ownership of those shared deployment surfaces explicit.
 
@@ -79,6 +82,9 @@ GET /v1/search?apex=example.com&format=json
 GET /v1/search?apex=example.com&dates=1
 GET /v1/search?apex=example.com&format=json&dates=1
 GET /v1/records?apex=example.com
+GET /v1/enrichment-options?apex=example.com
+POST /v1/enrichment-jobs
+GET /v1/enrichment-jobs/{job_id}
 GET /v1/stats
 GET /ready
 GET /health
@@ -94,6 +100,34 @@ GET /favicon.ico         and favicon.svg, apple-touch-icon.png,
 ```
 
 Plain text is one hostname per line unless `format=json` is requested. `dates=1` adds `first_seen`. Empty index returns `200` with empty body/array, not `404`.
+
+An empty local result can be enriched without turning the search request into
+a long provider call. `GET /v1/enrichment-options?apex=nust.ac.zw` reports two
+independent actions: import the exact public-suffix zone when its approved
+artifact is already present under the managed CZDS directory, and query
+existing URLScan history for the exact apex when the scheduler has published
+that capability. Subfinder never downloads a missing zone for this route and
+never accepts a caller-supplied path.
+
+Submit one or both advertised actions with a stable idempotency key:
+
+```http
+POST /v1/enrichment-jobs
+Idempotency-Key: nust-ac-zw-20260831
+Content-Type: application/json
+
+{"apex":"nust.ac.zw","actions":["local_zone","urlscan"]}
+```
+
+The response is `202` with a durable job and a `Location` header. Poll that
+location until `terminal` is true, then request `result_url`. The local-zone
+and URLScan lanes report their own state and ingested-record count. A bounded
+URLScan page with older history remaining is `checkpointed`, not complete;
+the ordinary priority queue continues from its existing cursor. “URLScan” here
+means a passive search of scans already on file. It never submits a scan or
+probes the apex. Jobs are bounded globally and per requester, consume one
+normal search allowance unit only when first admitted, and hide their status
+from other requester identities.
 
 The unpaginated response remains backward compatible and streams valid text or
 JSON without building the full result in memory. Large consumers can add
@@ -312,23 +346,25 @@ current Let's Encrypt Willow 2026h2 shard. Static shards are time-bounded, so
 deployment configuration must add new usable shards before the current shard
 closes.
 
-The Compose `scheduler` is the single recurring catalog-writer process. It runs
+The Compose `scheduler` owns recurring ingestion. It runs
 live CT tails, bounded historical replay, IANA and CISA imports, configured
-artifacts, optional CZDS, and optional urlscan jobs serially. Provider fetches
+artifacts, optional CZDS, and optional URLScan breadth serially. Provider fetches
 may be concurrent, but catalog commits share one process and the cross-process
-writer lock. WAL readers remain concurrent. SQLite stores each job's next run
-time.
+writer lock. The dedicated enrichment worker owns all search-priority URLScan
+and requested local-zone imports under that same lock and quota ledger. WAL
+readers remain concurrent. SQLite stores each recurring job's next run time.
 
 Set `CTLOGS_URLSCAN_APEXES` to a comma-separated allowlist, or set it to `*` to
 walk every apex already in the local index. The all-index mode keeps both its
 apex cursor and each apex's `search_after` cursor in SQLite. Each scheduled
 visit fetches the next older page until that apex's history is complete. Later
 visits refresh the newest page without discarding the completed history state.
-Search-triggered refreshes do not change scheduler pagination. They add the
-apex to a persistent FIFO queue in the control database. The priority job processes up to 14 queued apexes
-per run, one older 1,000-result page per apex, and rotates incomplete apexes to
-the back of the queue. The global walk processes up to 69 apexes per run. Both
-jobs start their next run 60 seconds after the previous run finishes.
+Search-triggered refreshes do not change breadth pagination. They add the apex
+to a persistent FIFO queue in the control database. The enrichment worker
+processes up to 14 queued apexes every 60 seconds, one older 1,000-result page
+per apex, and rotates incomplete apexes to the back of the queue. The global
+breadth walk processes up to 69 apexes per run and starts its next pass 60
+seconds after the previous run finishes.
 
 The automated URLSCAN ceiling is 100,000 requests per UTC day. Provider calls
 use independent quota identities: 20,000 priority-history requests and the
@@ -338,6 +374,30 @@ remaining breadth budget. Configure the total with
 accounted for by `CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT`. Search admission itself
 does not consume provider quota. Confirm
 that this fits the account quota and urlscan's usage terms before enabling it.
+
+The deployed cadence is intentionally explicit:
+
+| Ingestion family | Cadence and bound |
+| --- | --- |
+| Newest Chrome/Apple RFC 6962 logs | About every 60 seconds; at most 8 batches of 1,024 entries per usable log per pass, with four log polls in flight. |
+| Configured Static CT shards | The same live pass and bounds. The checked-in deployment pins the Let's Encrypt Willow `2026h2` shard; new shards must currently be added explicitly. |
+| Historical RFC 6962 replay | About every 60 seconds; one rotating log and at most 8,192 entries per pass. |
+| Search-priority URLScan history | About every 60 seconds; up to 14 rotating apexes and one 1,000-result page per apex. |
+| URLScan breadth walk | About every 60 seconds; up to 69 indexed apexes per pass. |
+| ICANN CZDS | Daily; at most 25 approved zones. Never-seen approvals sort ahead of refreshes, then older refreshes rotate first. |
+| IANA root, CISA `.gov`, configured artifacts | Daily, with conditional or digest-based no-op behavior where supported. |
+
+The CZDS cap means new approved zones normally arrive on the next daily pass,
+but the worst-case refresh interval for an unchanged approved catalog is about
+`ceil(approved zones / 25)` days. On-demand enrichment does not bypass that
+acquisition policy: it can only prioritize parsing an exact artifact already
+on disk. A dedicated worker checks the enrichment queue every two seconds and
+runs one composite job at a time. Catalog commits still use the shared writer
+lock, while long CT polling can no longer delay admission or job pickup.
+`CTLOGS_CZDS_MAX_ZONES`, `CTLOGS_CZDS_INTERVAL`, and
+`CTLOGS_CZDS_RETRY_INTERVAL` expose the acquisition cadence without coupling
+it to the other daily artifacts; raising them changes upstream traffic and
+download volume and should follow an observed catch-up budget.
 
 All enabled sources consolidate into the same `subdomains` table. The database
 keeps the earliest dated observation and records each source separately in

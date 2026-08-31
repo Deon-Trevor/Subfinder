@@ -36,17 +36,20 @@ not wait for urlscan, submit a live scan, or probe a hostname.
 Every enabled adapter writes to one index. A hostname keeps its earliest dated
 observation across sources, while `subdomain_sources` keeps each source's own
 first and last observation. Public searches only read the consolidated index.
-Bulk and enrichment sources run on the writer scheduler and are never replaced
-by urlscan results. `/v1/stats` reports the current count of distinct
-provenance source IDs.
+Bulk and CT sources run on the recurring writer scheduler. Search-priority
+URLScan and user-requested local-zone imports run on one dedicated enrichment
+worker. Both use the same cross-process catalog lock and URLScan quota ledger;
+neither replaces another source's observations. `/v1/stats` reports the
+current count of distinct provenance source IDs.
 
 ## Update cadence
 
 One scheduler owns recurring catalog writes. It tails Chrome, Apple, RFC 6962,
 and configured Static CT logs; rotates through historical RFC 6962 entries with
 an independent cursor; runs IANA, CISA, configured artifacts, and CZDS; and
-runs optional urlscan priority and breadth jobs. Search requests only enqueue
-the searched apex in the separate control database.
+runs optional URLScan breadth jobs. Search requests only enqueue the searched
+apex in the separate control database. The enrichment worker is the sole
+consumer of that priority FIFO, so provider calls cannot race.
 
 CZDS and urlscan have independent caps. CZDS checks the 25 least-recently
 checked approved zones per run. With `CTLOGS_URLSCAN_APEXES=*`, urlscan walks

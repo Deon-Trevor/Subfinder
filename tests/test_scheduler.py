@@ -7,9 +7,14 @@ import pytest
 
 from ctlogs.control import ControlDatabase
 from ctlogs.database import Database, QuotaExceeded
+from ctlogs.enrichment_worker import (
+    run_one as run_one_enrichment,
+    run_priority_batch,
+)
 from ctlogs.ingest.enrich import (
     SourcePage,
     URLSCAN_BREADTH_QUOTA_SUBJECT,
+    URLSCAN_PRIORITY_QUOTA_SUBJECT,
     URLSCAN_TOTAL_QUOTA_SUBJECT,
 )
 from ctlogs.scheduler import (
@@ -18,7 +23,6 @@ from ctlogs.scheduler import (
     _run_urlscan_apex,
     _run_urlscan_batch,
     _run_urlscan_index_batch,
-    _run_urlscan_priority_batch,
     _singleton_lock,
     build_jobs,
     run_due_jobs,
@@ -97,6 +101,177 @@ def test_urlscan_budget_rotates_without_starving_later_apexes(
         "three.example",
         "one.example",
     ]
+
+
+def test_composite_enrichment_imports_only_local_zone_and_passive_history(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    control = _control(tmp_path)
+    zone_directory = tmp_path / "czds"
+    zone_directory.mkdir()
+    zone_path = zone_directory / "ac.zw.zone.gz"
+    zone_path.write_bytes(b"nust 3600 IN NS ns1.example.\n")
+    fingerprint = f"stat-v1:{zone_path.stat().st_size}:{zone_path.stat().st_mtime_ns}"
+    admission = control.enqueue_enrichment(
+        "test",
+        10,
+        "nust.ac.zw",
+        "ac.zw",
+        artifact_name="ac.zw.zone.gz",
+        artifact_fingerprint=fingerprint,
+        include_urlscan=True,
+        idempotency_key="both",
+        max_pending=4,
+        max_pending_per_subject=2,
+        now=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+    calls: list[tuple[str, str | None]] = []
+
+    class Source:
+        name = "urlscan"
+
+        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
+            calls.append((apex, cursor))
+            return SourcePage([("mail.nust.ac.zw", "2026-08-31T00:00:00Z")], None, 1)
+
+    outcome = run_one_enrichment(
+        database,
+        control,
+        zone_directory=zone_directory,
+        max_zone_bytes=1024,
+        urlscan_source=Source(),  # type: ignore[arg-type]
+        worker_id="test-scheduler",
+    )
+
+    assert outcome["state"] == "done"
+    job = control.enrichment_job(admission.job.job_id)
+    assert job is not None
+    assert job.zone_state == "complete"
+    assert job.urlscan_state == "complete"
+    assert calls == [("nust.ac.zw", None)]
+    assert [row.subdomain for row in database.search("nust.ac.zw")] == [
+        "mail.nust.ac.zw",
+        "nust.ac.zw",
+    ]
+    assert control.queued_refreshes(1) == []
+
+
+def test_incomplete_on_demand_urlscan_returns_to_the_normal_priority_queue(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    control = _control(tmp_path)
+    admission = control.enqueue_enrichment(
+        "test",
+        10,
+        "nust.ac.zw",
+        "ac.zw",
+        include_urlscan=True,
+        idempotency_key="urlscan-only",
+        max_pending=4,
+        max_pending_per_subject=2,
+        now=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+
+    class Source:
+        name = "urlscan"
+
+        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
+            assert apex == "nust.ac.zw"
+            assert cursor is None
+            return SourcePage([("mail.nust.ac.zw", None)], "older-page", 1)
+
+    outcome = run_one_enrichment(
+        database,
+        control,
+        zone_directory=tmp_path / "czds",
+        max_zone_bytes=1024,
+        urlscan_source=Source(),  # type: ignore[arg-type]
+        worker_id="test-scheduler",
+    )
+
+    assert outcome["state"] == "partial"
+    job = control.enrichment_job(admission.job.job_id)
+    assert job is not None
+    assert job.zone_state == "not_requested"
+    assert job.urlscan_state == "checkpointed"
+    assert control.queued_refreshes(1) == ["nust.ac.zw"]
+    assert database.get_ingest_state("enrich:urlscan:nust.ac.zw")["cursor"] == (
+        "older-page"
+    )
+
+
+def test_priority_batch_does_not_repeat_an_apex_just_advanced_on_demand(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    control = _control(tmp_path)
+    for apex in ("one.example", "two.example", "three.example"):
+        control.enqueue_refresh(apex)
+    calls: list[str] = []
+
+    class Source:
+        name = "urlscan"
+
+        def fetch_page(self, apex: str, cursor: str | None) -> SourcePage:
+            calls.append(apex)
+            return SourcePage([], None, 1)
+
+    assert run_priority_batch(  # type: ignore[arg-type]
+        database,
+        control,
+        Source(),
+        apexes_per_run=2,
+        exclude_apexes={"one.example"},
+    ) == (2, 0)
+    assert calls == ["two.example", "three.example"]
+    assert control.queued_refreshes(1) == ["one.example"]
+
+
+def test_changed_zone_artifact_fails_closed_without_importing(tmp_path: Path) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    control = _control(tmp_path)
+    zone_directory = tmp_path / "czds"
+    zone_directory.mkdir()
+    zone_path = zone_directory / "ac.zw.zone.gz"
+    zone_path.write_bytes(b"nust 3600 IN NS ns1.example.\n")
+    stale_fingerprint = (
+        f"stat-v1:{zone_path.stat().st_size}:{zone_path.stat().st_mtime_ns}"
+    )
+    admission = control.enqueue_enrichment(
+        "test",
+        10,
+        "nust.ac.zw",
+        "ac.zw",
+        artifact_name="ac.zw.zone.gz",
+        artifact_fingerprint=stale_fingerprint,
+        include_urlscan=False,
+        idempotency_key="changed",
+        max_pending=4,
+        max_pending_per_subject=2,
+        now=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+    zone_path.write_bytes(b"changed content")
+
+    outcome = run_one_enrichment(
+        database,
+        control,
+        zone_directory=zone_directory,
+        max_zone_bytes=1024,
+        urlscan_source=None,
+        worker_id="test-scheduler",
+    )
+
+    assert outcome["state"] == "failed"
+    job = control.enrichment_job(admission.job.job_id)
+    assert job is not None
+    assert job.zone_state == "failed"
+    assert database.search("nust.ac.zw") == []
 
 
 def test_urlscan_all_apexes_uses_a_persistent_index_cursor(
@@ -255,7 +430,7 @@ def test_priority_urlscan_queue_advances_history_until_complete(
             )
 
     source = Source()
-    assert _run_urlscan_priority_batch(  # type: ignore[arg-type]
+    assert run_priority_batch(  # type: ignore[arg-type]
         database,
         control,
         source,
@@ -263,7 +438,7 @@ def test_priority_urlscan_queue_advances_history_until_complete(
     ) == (1, 1)
     assert control.queued_refreshes(1) == ["example.com"]
 
-    assert _run_urlscan_priority_batch(  # type: ignore[arg-type]
+    assert run_priority_batch(  # type: ignore[arg-type]
         database,
         control,
         source,
@@ -304,7 +479,7 @@ def test_priority_quota_exhaustion_keeps_the_queue_position(
 
     database.consume_request("exhausted", 1)
     with pytest.raises(QuotaExceeded):
-        _run_urlscan_priority_batch(  # type: ignore[arg-type]
+        run_priority_batch(  # type: ignore[arg-type]
             database,
             control,
             Source(),
@@ -374,7 +549,7 @@ def test_build_jobs_keeps_each_capped_source_on_its_own_budget(
         '["hagezi=https://data.example/hosts.txt"]',
     )
 
-    assert [job.name for job in build_jobs(database, _control(tmp_path))] == [
+    assert [job.name for job in build_jobs(database)] == [
         "root",
         "gov",
         "artifact:hagezi:bf2fe8a0d413",
@@ -385,19 +560,23 @@ def test_build_jobs_keeps_each_capped_source_on_its_own_budget(
     monkeypatch.setenv("URLSCAN_API_KEY", "key")
     monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "one.example,two.example")
 
-    assert [job.name for job in build_jobs(database, _control(tmp_path))] == [
+    assert [job.name for job in build_jobs(database)] == [
         "root",
         "gov",
         "artifact:hagezi:bf2fe8a0d413",
         "czds",
-        "urlscan-priority",
         "urlscan",
     ]
+    monkeypatch.setenv("CTLOGS_CZDS_INTERVAL", "21600")
+    monkeypatch.setenv("CTLOGS_CZDS_RETRY_INTERVAL", "600")
+    czds_job = next(job for job in build_jobs(database) if job.name == "czds")
+    assert czds_job.interval_seconds == 21600
+    assert czds_job.retry_seconds == 600
 
     monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "*")
     monkeypatch.setenv("CTLOGS_URLSCAN_INTERVAL", "60")
     monkeypatch.setenv("CTLOGS_URLSCAN_RETRY_INTERVAL", "120")
-    urlscan_job = build_jobs(database, _control(tmp_path))[-1]
+    urlscan_job = build_jobs(database)[-1]
     assert urlscan_job.name == "urlscan"
     assert urlscan_job.interval_seconds == 60
     assert urlscan_job.retry_seconds == 120
@@ -415,7 +594,7 @@ def test_disabled_urlscan_ignores_unrelated_provider_configuration(
     monkeypatch.delenv("CZDS_USERNAME", raising=False)
     monkeypatch.delenv("CZDS_PASSWORD", raising=False)
 
-    assert [job.name for job in build_jobs(database, _control(tmp_path))] == [
+    assert [job.name for job in build_jobs(database)] == [
         "root",
         "gov",
     ]
@@ -432,10 +611,7 @@ def test_urlscan_accepts_a_quoted_wildcard_from_a_raw_env_file(
     monkeypatch.setenv("URLSCAN_API_KEY", "key")
     monkeypatch.setenv("CTLOGS_URLSCAN_APEXES", "'*'")
 
-    assert [job.name for job in build_jobs(database, _control(tmp_path))] == [
-        "urlscan-priority",
-        "urlscan",
-    ]
+    assert [job.name for job in build_jobs(database)] == ["urlscan"]
 
 
 def test_ct_history_job_is_explicit_and_independent(
@@ -451,8 +627,8 @@ def test_ct_history_job_is_explicit_and_independent(
     monkeypatch.delenv("CZDS_USERNAME", raising=False)
     monkeypatch.delenv("CZDS_PASSWORD", raising=False)
 
-    assert [job.name for job in build_jobs(database, _control(tmp_path))] == [
-        "ct-history"
+    assert [job.name for job in build_jobs(database)] == [
+        "ct-history",
     ]
 
 
@@ -475,7 +651,7 @@ def test_live_ct_job_is_explicit_and_runs_inside_the_writer_scheduler(
         return 7
 
     monkeypatch.setattr("ctlogs.scheduler.poll_once", poll)
-    jobs = build_jobs(database, _control(tmp_path))
+    jobs = build_jobs(database)
 
     assert [job.name for job in jobs] == ["live-ct"]
     assert jobs[0].action() == 7
@@ -524,7 +700,7 @@ def test_urlscan_breadth_cannot_spend_priority_or_search_reserves(
         URLSCAN_BREADTH_QUOTA_SUBJECT,
         1,
     )
-    jobs = {job.name: job for job in build_jobs(database, _control(tmp_path))}
+    jobs = {job.name: job for job in build_jobs(database)}
 
     with pytest.raises(QuotaExceeded, match="daily request limit exceeded"):
         jobs["urlscan"].action()
@@ -568,9 +744,20 @@ def test_priority_history_still_runs_after_breadth_budget_is_exhausted(
         URLSCAN_BREADTH_QUOTA_SUBJECT,
         1,
     )
-    jobs = {job.name: job for job in build_jobs(database, control)}
+    jobs = {job.name: job for job in build_jobs(database)}
 
-    assert jobs["urlscan-priority"].action() == (1, 0)
+    assert run_priority_batch(  # type: ignore[arg-type]
+        database,
+        control,
+        Source(),
+        apexes_per_run=1,
+        request_guard=lambda: database.consume_partitioned_request(
+            URLSCAN_TOTAL_QUOTA_SUBJECT,
+            3,
+            URLSCAN_PRIORITY_QUOTA_SUBJECT,
+            1,
+        ),
+    ) == (1, 0)
     with pytest.raises(QuotaExceeded):
         jobs["urlscan"].action()
     assert calls == ["priority.example"]

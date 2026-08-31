@@ -6,7 +6,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ctlogs.database import Database
-from ctlogs.ingest.czds import AUTH_URL, LINKS_URL, CzdsClient, import_zone, run_czds
+from ctlogs.ingest.czds import (
+    AUTH_URL,
+    LINKS_URL,
+    CzdsClient,
+    import_local_zone,
+    import_zone,
+    local_zone_artifact,
+    run_czds,
+)
 
 
 class Response:
@@ -37,7 +45,9 @@ def test_client_authenticates_and_lists_approved_links() -> None:
         if request.full_url == AUTH_URL:
             return Response(json.dumps({"accessToken": "token"}).encode())
         assert request.full_url == LINKS_URL
-        return Response(json.dumps(["https://czds-api.icann.org/czds/downloads/com.zone"]).encode())
+        return Response(
+            json.dumps(["https://czds-api.icann.org/czds/downloads/com.zone"]).encode()
+        )
 
     links = CzdsClient("user", "password", opener=opener).approved_links()
 
@@ -167,3 +177,42 @@ def test_refresh_cap_rotates_to_the_least_recently_checked_zone(
         refresh=True,
     ) == (0, 0)
     assert downloads[1].endswith("/beta.zone")
+
+
+def test_local_zone_inventory_is_exact_bounded_and_does_not_follow_links(
+    tmp_path: Path,
+) -> None:
+    artifact_path = tmp_path / "ac.zw.zone.gz"
+    artifact_path.write_bytes(b"nust NS ns1.example.\n")
+
+    artifact = local_zone_artifact(tmp_path, "ac.zw", max_bytes=1024)
+
+    assert artifact is not None
+    assert artifact.name == "ac.zw.zone.gz"
+    assert artifact.size == artifact_path.stat().st_size
+    assert local_zone_artifact(tmp_path, "zw", max_bytes=1024) is None
+    assert local_zone_artifact(tmp_path, "ac.zw", max_bytes=1) is None
+    linked = tmp_path / "org.zw.zone.gz"
+    linked.symlink_to(artifact_path)
+    assert local_zone_artifact(tmp_path, "org.zw", max_bytes=1024) is None
+
+
+def test_local_zone_import_pins_the_exact_artifact_generation(tmp_path: Path) -> None:
+    database = Database(tmp_path / "catalog.sqlite3")
+    database.initialize()
+    artifact_path = tmp_path / "ac.zw.zone.gz"
+    artifact_path.write_bytes(
+        b"$ORIGIN ac.zw.\nnust 3600 IN NS ns1.example.\nuz 3600 IN NS ns2.example.\n"
+    )
+    artifact = local_zone_artifact(tmp_path, "ac.zw")
+    assert artifact is not None
+
+    imported, digest = import_local_zone(database, artifact, batch_size=1)
+
+    assert imported == 2
+    assert len(digest) == 64
+    assert [row.subdomain for row in database.search("nust.ac.zw")] == ["nust.ac.zw"]
+    state = database.get_ingest_state("zone-import:ac.zw")
+    assert state is not None
+    assert state["cursor"] == artifact.fingerprint
+    assert state["etag"] == digest

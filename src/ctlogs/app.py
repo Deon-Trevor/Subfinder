@@ -34,10 +34,13 @@ from ctlogs.control import (
     AdmissionRequest,
     ControlDatabase,
     ControlUnavailable,
+    EnrichmentJob,
+    EnrichmentQueueFull,
     IdempotencyConflict,
     RecordBatchJob,
     RecordBatchQueueFull,
 )
+from ctlogs.ingest.czds import LocalZoneArtifact, local_zone_artifact
 from ctlogs.database import (
     BatchResultTooLarge,
     Database,
@@ -55,6 +58,8 @@ STREAM_CHUNK_BYTES = 64 * 1024
 INTERNAL_REQUEST_MAX_BYTES = 512 * 1024
 QUEUED_BATCH_SCHEMA_VERSION = "subfinder.internal-record-batch.v1"
 QUEUED_SLICE_SCHEMA_VERSION = "subfinder.internal-record-batch-slice.v1"
+ENRICHMENT_SCHEMA_VERSION = "subfinder.enrichment-job.v1"
+ENRICHMENT_OPTIONS_SCHEMA_VERSION = "subfinder.enrichment-options.v1"
 LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 EXTRACT = tldextract.TLDExtract(
     suffix_list_urls=(),
@@ -94,6 +99,11 @@ class BatchRecordsResponse(BaseModel):
 
 class RecordBatchSubmission(BaseModel):
     apexes: list[str]
+
+
+class EnrichmentSubmission(BaseModel):
+    apex: str
+    actions: list[Literal["local_zone", "urlscan"]]
 
 
 class _ImmediateCapacity:
@@ -230,9 +240,17 @@ class _RequestCapacityMiddleware:
         return path in {
             "/v1/search",
             "/v1/records",
+            "/v1/enrichment-options",
+            "/v1/enrichment-jobs",
             "/internal/v1/records/batch",
             "/mcp",
-        } or path.startswith(("/internal/v1/record-batches", "/mcp/"))
+        } or path.startswith(
+            (
+                "/v1/enrichment-jobs/",
+                "/internal/v1/record-batches",
+                "/mcp/",
+            )
+        )
 
 
 class _InternalBodyTooLarge(Exception):
@@ -446,6 +464,43 @@ def normalize_apex(value: str) -> str:
     return candidate
 
 
+def zone_for_apex(apex: str) -> str:
+    """Return the exact public-suffix zone that owns a normalized apex."""
+    extracted = EXTRACT(apex)
+    if not extracted.suffix:
+        raise ValueError("apex does not have a recognized public-suffix zone")
+    return extracted.suffix
+
+
+def _enrichment_document(job: EnrichmentJob) -> dict[str, object]:
+    terminal = job.state in {"done", "partial", "failed"}
+    return {
+        "schema_version": ENRICHMENT_SCHEMA_VERSION,
+        "job_id": job.job_id,
+        "state": job.state,
+        "apex": job.apex,
+        "zone": job.zone,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "terminal": terminal,
+        "lanes": {
+            "local_zone": {
+                "state": job.zone_state,
+                "records_ingested": job.zone_records,
+                "artifact": job.artifact_name or None,
+            },
+            "urlscan": {
+                "state": job.urlscan_state,
+                "records_ingested": job.urlscan_records,
+            },
+        },
+        "error": job.error or None,
+        "result_url": (
+            f"/v1/search?apex={job.apex}&format=json&dates=1" if terminal else None
+        ),
+    }
+
+
 def _client_ip(request: Request) -> str:
     if request.client is None:
         raise HTTPException(status_code=500, detail="client IP is unavailable")
@@ -538,6 +593,10 @@ def create_app(
     queued_batch_max_apexes: int | None = None,
     queued_batch_max_pending: int | None = None,
     queued_batch_max_pending_per_token: int | None = None,
+    zone_directory: str | Path | None = None,
+    on_demand_zone_max_bytes: int | None = None,
+    enrichment_max_pending: int | None = None,
+    enrichment_max_pending_per_subject: int | None = None,
 ) -> FastAPI:
     if daily_request_limit < 1:
         raise ValueError("daily_request_limit must be positive")
@@ -603,6 +662,33 @@ def create_app(
         < 1
     ):
         raise ValueError("queued batch limits must be positive")
+    configured_zone_directory = Path(
+        zone_directory or os.environ.get("CTLOGS_CZDS_OUTPUT", "/data/czds")
+    )
+    configured_zone_max_bytes = (
+        on_demand_zone_max_bytes
+        if on_demand_zone_max_bytes is not None
+        else _get_env_int("CTLOGS_ON_DEMAND_ZONE_MAX_BYTES", 256 * 1024 * 1024)
+    )
+    configured_enrichment_max_pending = (
+        enrichment_max_pending
+        if enrichment_max_pending is not None
+        else _get_env_int("CTLOGS_ENRICHMENT_MAX_PENDING", 64)
+    )
+    configured_enrichment_max_pending_per_subject = (
+        enrichment_max_pending_per_subject
+        if enrichment_max_pending_per_subject is not None
+        else _get_env_int("CTLOGS_ENRICHMENT_MAX_PENDING_PER_SUBJECT", 2)
+    )
+    if (
+        min(
+            configured_zone_max_bytes,
+            configured_enrichment_max_pending,
+            configured_enrichment_max_pending_per_subject,
+        )
+        < 1
+    ):
+        raise ValueError("enrichment limits must be positive")
 
     path = Path(
         database_path or os.environ.get("CTLOGS_DB_PATH", "data/ctlogs.sqlite3")
@@ -697,6 +783,71 @@ def create_app(
             return await asyncio.to_thread(partial(function, *args, **kwargs))
         finally:
             catalog_slots.release()
+
+    async def enrichment_options_for(
+        apex: str,
+    ) -> tuple[dict[str, object], LocalZoneArtifact | None, bool, bool]:
+        zone = zone_for_apex(apex)
+        artifact = await asyncio.to_thread(
+            local_zone_artifact,
+            configured_zone_directory,
+            zone,
+            max_bytes=configured_zone_max_bytes,
+        )
+        try:
+            urlscan_capability = await asyncio.to_thread(
+                control.capability,
+                "urlscan-passive",
+            )
+            import_state = await catalog_call(
+                database.get_ingest_state,
+                f"zone-import:{zone}",
+            )
+        except (ControlUnavailable, sqlite3.Error, TimeoutError, RuntimeError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="enrichment capabilities are temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        urlscan_available = bool(urlscan_capability and urlscan_capability[0])
+        zone_current = bool(
+            artifact
+            and import_state
+            and import_state.get("cursor") == artifact.fingerprint
+        )
+        document: dict[str, object] = {
+            "schema_version": ENRICHMENT_OPTIONS_SCHEMA_VERSION,
+            "apex": apex,
+            "zone": zone,
+            "actions": {
+                "local_zone": {
+                    "available": artifact is not None,
+                    "current": zone_current,
+                    "actionable": artifact is not None and not zone_current,
+                    "artifact": artifact.name if artifact else None,
+                    "artifact_bytes": artifact.size if artifact else None,
+                    "reason": (
+                        "already indexed"
+                        if zone_current
+                        else (
+                            "local zone artifact is ready"
+                            if artifact
+                            else "no eligible local zone artifact"
+                        )
+                    ),
+                },
+                "urlscan": {
+                    "available": urlscan_available,
+                    "actionable": urlscan_available,
+                    "reason": (
+                        urlscan_capability[1]
+                        if urlscan_capability
+                        else "scheduler capability has not been published"
+                    ),
+                },
+            },
+        }
+        return document, artifact, urlscan_available, zone_current
 
     @mcp.tool()
     async def search(apex: str, ctx: Context) -> list[str]:
@@ -1174,6 +1325,180 @@ def create_app(
         return JSONResponse(
             _record_batch_document(job), headers={"Cache-Control": "no-store"}
         )
+
+    @app.get("/v1/enrichment-options")
+    async def enrichment_options(apex: str) -> JSONResponse:
+        try:
+            canonical = normalize_apex(apex)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        document, _artifact, _urlscan, _current = await enrichment_options_for(
+            canonical
+        )
+        return JSONResponse(document, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/enrichment-jobs")
+    async def submit_enrichment(
+        request: Request,
+        body: EnrichmentSubmission,
+    ) -> JSONResponse:
+        try:
+            canonical = normalize_apex(body.apex)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if (
+            not body.actions
+            or len(body.actions) > 2
+            or len(set(body.actions)) != len(body.actions)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="actions must contain one or both unique enrichment actions",
+            )
+        idempotency_key = request.headers.get("idempotency-key", "").strip()
+        if not idempotency_key:
+            raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+        subject, limit = quota_subject(
+            _client_ip(request),
+            request.headers.get("authorization"),
+        )
+        try:
+            replay = await asyncio.to_thread(
+                control.enrichment_replay,
+                subject,
+                limit,
+                idempotency_key,
+            )
+        except ControlUnavailable as error:
+            raise HTTPException(
+                status_code=503,
+                detail="enrichment admission is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        requested = set(body.actions)
+        if replay is not None:
+            replay_actions = {
+                *(["local_zone"] if replay.job.artifact_name else []),
+                *(["urlscan"] if replay.job.urlscan_state != "not_requested" else []),
+            }
+            if replay.job.apex != canonical or replay_actions != requested:
+                raise HTTPException(
+                    status_code=409,
+                    detail="idempotency key was already used for another request",
+                )
+            headers = _quota_headers(replay.quota)
+            headers.update(
+                {
+                    "Cache-Control": "no-store",
+                    "Location": f"/v1/enrichment-jobs/{replay.job.job_id}",
+                    "X-Idempotent-Replay": "1",
+                }
+            )
+            return JSONResponse(
+                status_code=202,
+                content=_enrichment_document(replay.job),
+                headers=headers,
+            )
+        (
+            options,
+            artifact,
+            urlscan_available,
+            zone_current,
+        ) = await enrichment_options_for(canonical)
+        if "local_zone" in requested and artifact is None:
+            raise HTTPException(
+                status_code=409,
+                detail="no eligible local zone artifact is available",
+            )
+        if "local_zone" in requested and zone_current:
+            raise HTTPException(
+                status_code=409,
+                detail="the local zone artifact is already indexed",
+            )
+        if "urlscan" in requested and not urlscan_available:
+            raise HTTPException(
+                status_code=409,
+                detail="passive URLScan enrichment is not configured",
+            )
+        zone = str(options["zone"])
+        selected_artifact = artifact if "local_zone" in requested else None
+        try:
+            admission = await asyncio.to_thread(
+                control.enqueue_enrichment,
+                subject,
+                limit,
+                canonical,
+                zone,
+                artifact_name=(selected_artifact.name if selected_artifact else ""),
+                artifact_fingerprint=(
+                    selected_artifact.fingerprint if selected_artifact else ""
+                ),
+                include_urlscan="urlscan" in requested,
+                idempotency_key=idempotency_key,
+                max_pending=configured_enrichment_max_pending,
+                max_pending_per_subject=(configured_enrichment_max_pending_per_subject),
+            )
+        except QuotaExceeded as error:
+            raise HTTPException(
+                status_code=429,
+                detail="daily request limit exceeded",
+                headers=_retry_headers(error.quota),
+            ) from error
+        except IdempotencyConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except EnrichmentQueueFull as error:
+            raise HTTPException(
+                status_code=503,
+                detail=str(error),
+                headers={
+                    "Retry-After": "5",
+                    "X-Overload-Reason": "enrichment-queue",
+                },
+            ) from error
+        except (ControlUnavailable, TimeoutError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="enrichment admission is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        headers = _quota_headers(admission.quota)
+        headers.update(
+            {
+                "Cache-Control": "no-store",
+                "Location": f"/v1/enrichment-jobs/{admission.job.job_id}",
+                "X-Idempotent-Replay": "0" if admission.created else "1",
+            }
+        )
+        return JSONResponse(
+            status_code=202,
+            content=_enrichment_document(admission.job),
+            headers=headers,
+        )
+
+    @app.get("/v1/enrichment-jobs/{job_id}")
+    async def enrichment_status(request: Request, job_id: str) -> JSONResponse:
+        subject, _limit = quota_subject(
+            _client_ip(request),
+            request.headers.get("authorization"),
+        )
+        try:
+            job = await asyncio.to_thread(
+                control.enrichment_job,
+                job_id,
+                subject=subject,
+            )
+        except ControlUnavailable as error:
+            raise HTTPException(
+                status_code=503,
+                detail="enrichment status is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
+        if job is None:
+            raise HTTPException(status_code=404, detail="enrichment job not found")
+        headers = {"Cache-Control": "no-store"}
+        if job.state in {"queued", "running"}:
+            headers["Retry-After"] = "2"
+        return JSONResponse(_enrichment_document(job), headers=headers)
 
     @app.get("/v1/search")
     async def search_api(

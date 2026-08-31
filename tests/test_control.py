@@ -11,6 +11,7 @@ from ctlogs.control import (
     AdmissionRequest,
     ControlDatabase,
     ControlUnavailable,
+    EnrichmentQueueFull,
 )
 from ctlogs.database import QuotaExceeded
 
@@ -110,7 +111,9 @@ def test_refresh_queue_is_bounded_and_rotates_incomplete_work(tmp_path: Path) ->
     now = datetime(2026, 8, 26, tzinfo=UTC)
 
     assert control.admit("one", 10, "one.example", now=now).refresh_status == "queued"
-    assert control.admit("two", 10, "two.example", now=now).refresh_status == "queue-full"
+    assert (
+        control.admit("two", 10, "two.example", now=now).refresh_status == "queue-full"
+    )
 
     control.finish_refresh_attempt(
         "one.example",
@@ -122,7 +125,136 @@ def test_refresh_queue_is_bounded_and_rotates_incomplete_work(tmp_path: Path) ->
     assert control.queued_refreshes(1) == []
 
 
-def test_schema_verification_is_read_only_and_requires_migration(tmp_path: Path) -> None:
+def test_composite_enrichment_is_idempotent_owned_and_durable(tmp_path: Path) -> None:
+    control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
+    control.initialize()
+    now = datetime(2026, 8, 31, tzinfo=UTC)
+
+    admitted = control.enqueue_enrichment(
+        "198.51.100.8",
+        10,
+        "nust.ac.zw",
+        "ac.zw",
+        artifact_name="ac.zw.zone.gz",
+        artifact_fingerprint="stat-v1:12:34",
+        include_urlscan=True,
+        idempotency_key="nust-both",
+        max_pending=4,
+        max_pending_per_subject=2,
+        now=now,
+    )
+    replay = control.enqueue_enrichment(
+        "198.51.100.8",
+        10,
+        "nust.ac.zw",
+        "ac.zw",
+        artifact_name="ac.zw.zone.gz",
+        artifact_fingerprint="stat-v1:12:34",
+        include_urlscan=True,
+        idempotency_key="nust-both",
+        max_pending=4,
+        max_pending_per_subject=2,
+        now=now,
+    )
+
+    assert admitted.created is True
+    assert admitted.quota.remaining == 9
+    assert replay.created is False
+    assert replay.job.job_id == admitted.job.job_id
+    assert replay.quota.remaining == 9
+    assert control.queued_refreshes(1) == ["nust.ac.zw"]
+    assert control.enrichment_job(admitted.job.job_id, subject="other") is None
+
+    claimed = control.claim_enrichment("scheduler", lease_seconds=60, now=1)
+    assert claimed is not None
+    assert claimed.zone_state == "running"
+    assert claimed.urlscan_state == "running"
+    checkpointed = control.checkpoint_enrichment(
+        claimed.job_id,
+        "scheduler",
+        zone_state="complete",
+        zone_records=7,
+        now=2,
+    )
+    assert checkpointed.zone_records == 7
+    control.checkpoint_enrichment(
+        claimed.job_id,
+        "scheduler",
+        urlscan_state="checkpointed",
+        urlscan_records=3,
+        now=3,
+    )
+    finished = control.finish_enrichment(claimed.job_id, "scheduler", now=4)
+    assert finished.state == "partial"
+    assert finished.zone_state == "complete"
+    assert finished.urlscan_state == "checkpointed"
+
+
+def test_enrichment_claim_recovers_only_unfinished_lanes(tmp_path: Path) -> None:
+    control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
+    control.initialize()
+    admitted = control.enqueue_enrichment(
+        "test",
+        10,
+        "nust.ac.zw",
+        "ac.zw",
+        artifact_name="ac.zw.zone.gz",
+        artifact_fingerprint="stat-v1:12:34",
+        include_urlscan=True,
+        idempotency_key="recover",
+        max_pending=4,
+        max_pending_per_subject=2,
+        now=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+    first = control.claim_enrichment("dead", lease_seconds=1, now=1)
+    assert first is not None
+    control.checkpoint_enrichment(
+        admitted.job.job_id,
+        "dead",
+        zone_state="complete",
+        zone_records=5,
+        now=1.5,
+    )
+
+    recovered = control.claim_enrichment("replacement", lease_seconds=60, now=3)
+
+    assert recovered is not None
+    assert recovered.zone_state == "complete"
+    assert recovered.urlscan_state == "running"
+
+
+def test_enrichment_rejects_a_full_continuation_queue_atomically(
+    tmp_path: Path,
+) -> None:
+    control = ControlDatabase(
+        tmp_path / "control.sqlite3",
+        busy_timeout_ms=1_000,
+        max_refresh_queue=1,
+    )
+    control.initialize()
+    now = datetime(2026, 8, 31, tzinfo=UTC)
+    control.enqueue_refresh("already.example")
+
+    with pytest.raises(EnrichmentQueueFull, match="refresh queue"):
+        control.enqueue_enrichment(
+            "test",
+            10,
+            "nust.ac.zw",
+            "ac.zw",
+            include_urlscan=True,
+            idempotency_key="full",
+            max_pending=4,
+            max_pending_per_subject=2,
+            now=now,
+        )
+
+    assert control.queued_refreshes(10) == ["already.example"]
+    assert control.consume("test", 10, 10, now=now).remaining == 0
+
+
+def test_schema_verification_is_read_only_and_requires_migration(
+    tmp_path: Path,
+) -> None:
     missing = ControlDatabase(tmp_path / "missing.sqlite3")
     with pytest.raises(ControlUnavailable, match="migration required"):
         missing.verify_schema()
