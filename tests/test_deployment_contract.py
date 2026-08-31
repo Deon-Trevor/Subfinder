@@ -36,3 +36,11 @@ def test_readme_does_not_restore_the_retired_provider_file() -> None:
 
     assert ".env.providers" not in readme
     assert "containing `$` in single quotes" in readme
+
+
+def test_edge_re_resolves_the_recreated_api_container() -> None:
+    nginx = (ROOT / "deploy" / "nginx.conf").read_text()
+
+    assert "resolver 127.0.0.11" in nginx
+    assert "zone subfinder_api" in nginx
+    assert "server ctlogs:8200 resolve;" in nginx
