@@ -51,8 +51,10 @@ runs optional URLScan breadth jobs. Search requests only enqueue the searched
 apex in the separate control database. The enrichment worker is the sole
 consumer of that priority FIFO, so provider calls cannot race.
 
-CZDS and urlscan have independent caps. CZDS checks the 25 least-recently
-checked approved zones per run. With `CTLOGS_URLSCAN_APEXES=*`, urlscan walks
+CZDS and URLScan have independent caps. CZDS first selects up to 25 zones that
+have never been ingested, alphabetically because the approved-links feed has no
+approval timestamp, then rotates through the least-recently checked zones. With
+`CTLOGS_URLSCAN_APEXES=*`, URLScan walks
 the full local apex index in batches of up to 69. Each apex keeps its own
 `search_after` cursor. Search requests add their apex to a persistent FIFO queue
 in the control database. Its job processes up to 14 apexes per run. Incomplete apexes rotate to the

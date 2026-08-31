@@ -384,16 +384,19 @@ The deployed cadence is intentionally explicit:
 | Historical RFC 6962 replay | About every 60 seconds; one rotating log and at most 8,192 entries per pass. |
 | Search-priority URLScan history | About every 60 seconds; up to 14 rotating apexes and one 1,000-result page per apex. |
 | URLScan breadth walk | About every 60 seconds; up to 69 indexed apexes per pass. |
-| ICANN CZDS | Daily; at most 25 approved zones. Never-seen approvals sort ahead of refreshes, then older refreshes rotate first. |
+| ICANN CZDS | Daily; at most 25 approved zones. Never-ingested zones sort ahead of refreshes; unseen ties are alphabetical because the link feed has no approval timestamp. Older refreshes then rotate first. |
 | IANA root, CISA `.gov`, configured artifacts | Daily, with conditional or digest-based no-op behavior where supported. |
 
-The CZDS cap means new approved zones normally arrive on the next daily pass,
-but the worst-case refresh interval for an unchanged approved catalog is about
-`ceil(approved zones / 25)` days. On-demand enrichment does not bypass that
-acquisition policy: it can only prioritize parsing an exact artifact already
-on disk. A dedicated worker checks the enrichment queue every two seconds and
-runs one composite job at a time. Catalog commits still use the shared writer
-lock, while long CT polling can no longer delay admission or job pickup.
+The CZDS cap means the acquisition backlog advances by at most 25 zones per
+daily pass. A newly granted link is not guaranteed to run next while other
+never-ingested zones remain, because the upstream list does not say when access
+was approved. The steady-state refresh interval for an unchanged approved
+catalog is about `ceil(approved zones / 25)` days. On-demand enrichment does
+not bypass that acquisition policy: it can only prioritize parsing an exact
+artifact already on disk. A dedicated worker checks the enrichment queue every
+two seconds and runs one composite job at a time. Catalog commits still use the
+shared writer lock, while long CT polling can no longer delay admission or job
+pickup.
 `CTLOGS_CZDS_MAX_ZONES`, `CTLOGS_CZDS_INTERVAL`, and
 `CTLOGS_CZDS_RETRY_INTERVAL` expose the acquisition cadence without coupling
 it to the other daily artifacts; raising them changes upstream traffic and
