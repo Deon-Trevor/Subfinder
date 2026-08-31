@@ -1336,6 +1336,8 @@ async function openEnrichment(apex) {
     retry: new Set(),
     lastActions: [],
     laneSignature: "",
+    nextPollAt: 0,
+    polling: false,
   };
 
   let options;
@@ -1716,15 +1718,34 @@ async function submitEnrichment() {
 function scheduleEnrichPoll(seconds) {
   if (!enrich) return;
   clearTimeout(enrich.timer);
+  enrich.nextPollAt = Date.now() + seconds * 1000;
   enrich.timer = setTimeout(pollEnrichment, seconds * 1000);
 }
+
+/* A hidden tab has its timers throttled hard - a two-second poll can be held
+   for a minute or more - so a reader coming back to the tab would be looking
+   at a report that went stale while they were away. Returning re-arms the
+   timer for whatever is left of the interval the server asked for, which by
+   then is usually nothing and fires at once. It cannot poll sooner than
+   Retry-After allowed: the deadline is the one the last response set. */
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  if (!enrich || !enrich.jobUrl || (enrich.job && enrich.job.terminal)) return;
+  clearTimeout(enrich.timer);
+  enrich.timer = setTimeout(pollEnrichment, Math.max(0, enrich.nextPollAt - Date.now()));
+});
 
 /* Watching costs nothing against the allowance - the status route identifies
    the requester but never admits a read - so the only thing to be careful
    about is how often, and for how long. */
 async function pollEnrichment() {
-  if (!enrich || !enrich.jobUrl) return;
+  if (!enrich || !enrich.jobUrl || enrich.polling) return;
   const apex = enrich.apex;
+  // Coming back to the tab re-arms the timer for whatever is left of the
+  // interval, which is nothing once a poll has been held past its deadline -
+  // so without this the re-armed timer could fire on top of the poll it was
+  // waiting for. One request at a time, whichever path asked for it.
+  enrich.polling = true;
 
   let response;
   try {
@@ -1733,10 +1754,14 @@ async function pollEnrichment() {
       signal: timeoutSignal(FETCH_TIMEOUT_MS),
     });
   } catch {
-    if (enrich && enrich.apex === apex) scheduleEnrichPoll(5);
+    if (enrich && enrich.apex === apex) {
+      enrich.polling = false;
+      scheduleEnrichPoll(5);
+    }
     return;
   }
   if (!enrich || enrich.apex !== apex) return;
+  enrich.polling = false;
 
   if (response.status === 503) {
     scheduleEnrichPoll(pollDelay(response.headers, 2));
@@ -1783,17 +1808,21 @@ async function finishEnrichment(job) {
   clearTimeout(enrich.timer);
   enrich.timer = null;
 
-  // A lane that failed can be asked for again. Nothing came of the attempt, and
-  // the key naming it has to be released first or the API would rightly replay
-  // the same finished job instead of starting a new one.
+  // The key has done its work the moment the job is terminal. It exists to make
+  // a retry of a submission still in flight safe - a dropped connection, a
+  // double click, a reload mid-run - not to bind this apex to one run forever.
+  // Holding it would make a later, genuinely new request replay this finished
+  // job instead of starting one, which is how "read the URLScan history again
+  // next week, now that there are new scans" would quietly do nothing at all.
+  forgetKey(job.apex, enrich.lastActions);
+
+  // A lane that failed can be asked for again in this flow too, since nothing
+  // came of the attempt.
   const lanes = job.lanes || {};
-  const broke = ENRICH_ORDER.filter((name) => lanes[name] && lanes[name].state === "failed");
-  if (broke.length) {
-    forgetKey(job.apex, enrich.lastActions);
-    for (const name of broke) {
-      enrich.ran.delete(name);
-      enrich.retry.add(name);
-    }
+  for (const name of ENRICH_ORDER) {
+    if (!lanes[name] || lanes[name].state !== "failed") continue;
+    enrich.ran.delete(name);
+    enrich.retry.add(name);
   }
 
   if (!job.result_url) return;
