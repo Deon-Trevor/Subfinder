@@ -12,7 +12,7 @@ dependencies = [
   "mcp>=2,<3",
   "tldextract>=5.3,<6",
   "uvicorn>=0.35,<1",
-  "cryptography>=44,<45",
+  "cryptography>=50,<51",
 ]
 
 [project.optional-dependencies]
