@@ -109,6 +109,28 @@ def test_capped_runs_advance_past_completed_zones(
     ]
 
 
+def test_run_czds_forwards_configured_download_size_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "czds.sqlite3")
+    database.initialize()
+    seen_limits: list[int | None] = []
+
+    class Client:
+        def approved_links(self) -> list[str]:
+            return ["https://czds-api.icann.org/czds/downloads/alpha.zone"]
+
+        def download(self, _url: str, _destination: Path, **kwargs):
+            seen_limits.append(kwargs.get("max_bytes"))
+            return 10, "Fri, 22 Aug 2026 00:00:00 GMT"
+
+    monkeypatch.setattr("ctlogs.ingest.czds.import_zone", lambda *_args: 1)
+
+    assert run_czds(database, Client(), tmp_path, max_zones=1, max_bytes=10) == (1, 1)  # type: ignore[arg-type]
+    assert seen_limits == [10]
+
+
 def test_completed_local_download_resumes_without_fetching(
     tmp_path: Path,
     monkeypatch,

@@ -280,6 +280,7 @@ def run_czds(
     *,
     tlds: set[str] | None = None,
     max_zones: int = 25,
+    max_bytes: int = 4 * 1024 * 1024 * 1024,
     refresh: bool = False,
 ) -> tuple[int, int]:
     candidates = []
@@ -315,6 +316,7 @@ def run_czds(
                 link,
                 path,
                 if_modified_since=state.get("etag") if state else None,
+                max_bytes=max_bytes,
             )
         )
         if result is None:
@@ -364,6 +366,7 @@ def main() -> None:
     parser.add_argument("--output", default="data/czds")
     parser.add_argument("--tld", action="append")
     parser.add_argument("--max-zones", type=int, default=25)
+    parser.add_argument("--max-bytes", type=int, default=4 * 1024 * 1024 * 1024)
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args()
@@ -382,6 +385,7 @@ def main() -> None:
         Path(args.output),
         tlds={item.lower().lstrip(".") for item in args.tld} if args.tld else None,
         max_zones=args.max_zones,
+        max_bytes=args.max_bytes,
         refresh=args.refresh,
     )
     print(f"czds: zones={zones} hostnames={hostnames}")

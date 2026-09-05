@@ -336,6 +336,10 @@ def build_jobs(
             "CTLOGS_CZDS_RETRY_INTERVAL",
             retry,
         )
+        czds_max_bytes = _positive_environment_integer(
+            "CTLOGS_CZDS_MAX_BYTES",
+            4 * 1024 * 1024 * 1024,
+        )
         jobs.append(
             ScheduledJob(
                 "czds",
@@ -346,6 +350,7 @@ def build_jobs(
                     CzdsClient(username, password, timeout=timeout),
                     zone_directory,
                     max_zones=max_zones,
+                    max_bytes=czds_max_bytes,
                     refresh=True,
                 ),
             )
