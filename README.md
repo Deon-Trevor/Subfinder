@@ -9,7 +9,7 @@ crawls, and optional account-backed services. A lookup reads that index and
 returns every hostname on file for one apex, oldest known first, with first-seen
 dates where the source provides them. When urlscan is configured, each lookup
 returns local results immediately and queues that apex for passive enrichment.
-The ingestion scheduler performs provider calls and catalog writes later.
+The ingestion scheduler makes the provider calls and catalog writes later.
 
 `GET /v1/search` and `POST /mcp` do not submit a urlscan scan and never probe the
 requested apex or the hostnames they return.
@@ -28,8 +28,8 @@ provider credentials from that file only where needed: CZDS goes to the
 scheduler, while URLScan goes to the scheduler and enrichment worker. Wrap
 values containing `$` in single quotes so Compose preserves them literally and
 does not interpret credential fragments as variable names. The API receives
-only the variables explicitly listed for it in `docker-compose.yml`; the file
-is never injected wholesale into a container.
+only the variables listed for it in `docker-compose.yml`. Compose never
+injects the whole file into a container.
 
 ```bash
 cp .env.example .env
@@ -38,17 +38,17 @@ docker compose up -d --build
 ```
 
 The API runs `uvicorn ctlogs.app:app --host 0.0.0.0 --port 8200`. The hostname
-catalog is persisted in `ctlogs-data`; quotas and the deduplicated refresh queue
-are persisted separately in `ctlogs-control`.
-Compose publishes the edge on port 8200 only on host loopback for the host
-NGINX and attaches only the API container to the external
-`syncpundit-data-plane` network under the `subfinder-index` alias. Create that
+catalog lives in `ctlogs-data`; quotas and the deduplicated refresh queue live
+separately in `ctlogs-control`.
+Compose publishes the edge on port 8200 on host loopback only, for the host
+NGINX. It attaches the API container alone to the external
+`syncpundit-data-plane` network, under the `subfinder-index` alias. Create that
 network once before the first deployment.
 The API opens the catalog read-only. Migration, the recurring scheduler, and
 the single enrichment worker are the only Compose services that can mutate
 it; every runtime write uses the same cross-process catalog lock.
 `CTLOGS_DATA_VOLUME`, `CTLOGS_CONTROL_VOLUME`, and `CTLOGS_DATA_NETWORK` in
-`.env` make ownership of those shared deployment surfaces explicit.
+`.env` name the owner of each shared volume and network.
 
 The first deployment must stop every old API and scheduler container before
 starting the new set. Old processes must not overlap the replacement. `docker
@@ -123,7 +123,7 @@ The response is `202` with a durable job and a `Location` header. Poll that
 location until `terminal` is true, then request `result_url`. The local-zone
 and URLScan lanes report their own state and ingested-record count. A bounded
 URLScan page with older history remaining is `checkpointed`, not complete;
-the ordinary priority queue continues from its existing cursor. “URLScan” here
+the ordinary priority queue continues from its existing cursor. "URLScan" here
 means a passive search of scans already on file. It never submits a scan or
 probes the apex. Jobs are bounded globally and per requester, consume one
 normal search allowance unit only when first admitted, and hide their status
@@ -153,9 +153,9 @@ Trusted services can read several complete index snapshots with
 {"apexes":["example.com","example.net"]}
 ```
 
-The route requires a bearer token configured in `CTLOGS_API_TOKENS`, is
-available only by calling the API container on the private data plane, and is
-explicitly hidden by the public NGINX edge. Its response schema is
+The route requires a bearer token configured in `CTLOGS_API_TOKENS` and
+answers only on the private data plane. The public NGINX edge hides it. Its
+response schema is
 `subfinder.internal-index-records-batch.v1`; `results` uses the existing
 `subfinder.index-records.v1` object for each apex in request order. One batch
 contains at most 100 unique apexes and 5,000 hostnames by default. Set
@@ -181,9 +181,9 @@ commit together. Cursor replay is safe. `GET .../{job_id}` reports exact
 queued, completed, failed, reserved, committed, released, and outstanding
 counts; `POST .../{job_id}/cancel` releases unstarted work.
 
-Two durable `batch-worker` replicas consume bounded slices by default. A large
-apex is isolated and reported in the chunk's `errors` collection instead of
-failing unrelated apexes. The catalog read uses one WAL snapshot and separate
+Two durable `batch-worker` replicas consume bounded slices by default. A worker
+isolates a large apex and reports it in the chunk's `errors` collection rather
+than failing unrelated apexes. The catalog read uses one WAL snapshot and separate
 hostname, provenance-row, and serialized-byte bounds. The queue is bounded
 globally and per service token; an idempotent retry of the same normalized
 request does not consume quota twice.
@@ -255,7 +255,7 @@ Run one Uvicorn worker. The in-process request limits apply per worker. Keep
 `/health` outside public edge limits so an overloaded instance remains
 observable. Threat Hunter should call `http://subfinder-index:8200` over the
 private data network with its service token; it must not loop through the
-public edge, where public DoS protection intentionally sheds excess traffic.
+public edge, where public DoS protection sheds excess traffic.
 
 ### Configure trusted client addresses
 
@@ -286,22 +286,22 @@ it sets `X-Forwarded-For` for Subfinder.
 returns a status string with the hostname count and the same timestamp. Neither
 route consumes the search allowance.
 
-`Host`/`Origin` for MCP are validated via `TransportSecuritySettings`. Add deployment hostnames to `CTLOGS_ALLOWED_HOSTS` and browser origins to `CTLOGS_ALLOWED_ORIGINS` (comma-separated).
+`TransportSecuritySettings` validates `Host` and `Origin` for MCP. Add deployment hostnames to `CTLOGS_ALLOWED_HOSTS` and browser origins to `CTLOGS_ALLOWED_ORIGINS` (comma-separated).
 
 ## Web interface
 
 `web/` holds the frontend with no build step: `index.html`, `app.css`, `app.js`,
 `robots.txt`, `site.webmanifest`, and the icon set.
 `ctlogs.web.mount_frontend` registers each one as an explicit named route at
-startup, so the page is served from the same origin as the API. Named routes
-rather than a `StaticFiles` mount, because `create_app` mounts the MCP app at
-`/` and a second directory mount on that prefix would swallow `/mcp`. Only
+startup, so the page and the API share an origin. They are named routes rather
+than a `StaticFiles` mount because `create_app` mounts the MCP app at `/`, and a
+second directory mount on that prefix would swallow `/mcp`. Only
 those names are servable, so a stray file dropped in `web/` is not reachable.
 
-`ASSETS` are served with `Cache-Control: no-cache`, because the markup and the
-assets it is versioned with ship together and a browser must not pair new
-markup with a cached script. `MEDIA` - the icons - carry no such pairing and
-are cached for a week instead. Brand sources live in [`brand/`](brand/), which
+Subfinder serves `ASSETS` with `Cache-Control: no-cache`, because the markup and
+the assets ship together and a browser must not pair new markup with a cached
+script. The icons in `MEDIA` carry no such pairing, so they are cached for a
+week instead. Brand sources live in [`brand/`](brand/), which
 is not served.
 
 `robots.txt` disallows `/v1/`, `/mcp`, and the `?apex=` form of the page. Those
@@ -317,7 +317,7 @@ dependency install so static edits do not invalidate that layer.
 
 Opening the page spends nothing from the search allowance. A visitor spends a
 read only when they search, and a repeat lookup of an apex already read in that
-browser session is answered from memory instead of the API. The counter in the
+browser session comes from memory instead of the API. The counter in the
 page header polls `/v1/stats` every 15 seconds and pauses while the tab is
 hidden. That polling is only safe while `/v1/stats` stays outside the
 allowance. At a 15 second interval a metered stats route would spend all 1,000
@@ -375,12 +375,12 @@ accounted for by `CTLOGS_URLSCAN_SEARCH_DAILY_LIMIT`. Search admission itself
 does not consume provider quota. Confirm
 that this fits the account quota and urlscan's usage terms before enabling it.
 
-The deployed cadence is intentionally explicit:
+The deployed cadence:
 
 | Ingestion family | Cadence and bound |
 | --- | --- |
 | Newest Chrome/Apple RFC 6962 logs | About every 60 seconds; at most 8 batches of 1,024 entries per usable log per pass, with four log polls in flight. |
-| Configured Static CT shards | The same live pass and bounds. The checked-in deployment pins the Let's Encrypt Willow `2026h2` shard; new shards must currently be added explicitly. |
+| Configured Static CT shards | The same live pass and bounds. The checked-in deployment pins the Let's Encrypt Willow `2026h2` shard; new shards must be added by hand. |
 | Historical RFC 6962 replay | About every 60 seconds; one rotating log and at most 8,192 entries per pass. |
 | Search-priority URLScan history | About every 60 seconds; up to 14 rotating apexes and one 1,000-result page per apex. |
 | URLScan breadth walk | About every 60 seconds; up to 69 indexed apexes per pass. |
@@ -466,8 +466,8 @@ harness sends one benchmark-network client address per public request through
 entire public workload. Uvicorn accepts either form only when the loopback test
 peer is trusted.
 
-Import configured global artifacts immediately when an unscheduled run is
-needed. Repeating the same file or ETag is a no-op.
+Import configured global artifacts immediately for an unscheduled run.
+Repeating the same file or ETag is a no-op.
 
 ```bash
 python -m ctlogs.ingest.backfill --db data/ctlogs.sqlite3 \
@@ -483,7 +483,7 @@ python -m ctlogs.ingest.backfill --db data/ctlogs.sqlite3 --defaults
 
 Historical RFC 6962 replay has a separate cursor and batch budget, so it does
 not move the live tail cursor. Compose runs both jobs through the single
-scheduler; the same history operation can be invoked manually:
+scheduler; the same history operation also runs manually:
 
 ```bash
 python -m ctlogs.ingest.history --db data/ctlogs.sqlite3 \
@@ -502,7 +502,7 @@ python -m ctlogs.ingest.enrich --db data/ctlogs.sqlite3 \
 ```
 
 With Docker Compose, run the same modules through the dormant `jobs` service.
-Credentials are consumed only by ingestion services. The public API never
+Only ingestion services read credentials. The public API never
 calls account-backed providers.
 
 ```bash
@@ -512,7 +512,7 @@ docker compose run --rm jobs -m ctlogs.ingest.enrich --db /data/ctlogs.sqlite3 \
 
 Approved ICANN CZDS zones can be downloaded and indexed without using the web
 portal. The default cap is 25 zones per run. Use `--tld` to select a subset.
-Completed zones are skipped on later capped runs. Use `--refresh` to make
+Later capped runs skip completed zones. Use `--refresh` to make
 conditional requests for zones that already have download state.
 
 ```bash
@@ -520,8 +520,8 @@ python -m ctlogs.ingest.czds --db data/ctlogs.sqlite3 \
   --output data/czds --max-zones 25
 ```
 
-Preview and remove only the known provenance-free development fixtures. An
-SQLite backup is mandatory for the modifying command.
+Preview and remove only the known provenance-free development fixtures. The
+modifying command requires an SQLite backup.
 
 ```bash
 python -m ctlogs.maintenance --db data/ctlogs.sqlite3
