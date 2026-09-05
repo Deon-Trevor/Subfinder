@@ -91,6 +91,42 @@ async def test_json_without_dates_only_returns_sub(client: httpx.AsyncClient) ->
 
 
 @pytest.mark.anyio
+async def test_stats_include_worker_queue_summary(tmp_path: Path) -> None:
+    app = create_app(
+        tmp_path / "catalog.sqlite3",
+        control_database_path=tmp_path / "control.sqlite3",
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as test_client,
+    ):
+        app.state.control_database.enqueue_ingest_job("czds", idempotency_key="daily")
+        live, _ = app.state.control_database.enqueue_ingest_job(
+            "live-ct",
+            idempotency_key="minute",
+        )
+        claimed = app.state.control_database.claim_ingest_job(
+            "live-ct",
+            "worker",
+            lease_seconds=60,
+        )
+        assert claimed is not None and claimed.job_id == live.job_id
+
+        response = await test_client.get("/v1/stats")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ingest_jobs"]["czds"]["queued"] == 1
+    assert body["ingest_jobs"]["live-ct"]["running"] == 1
+    assert body["ingest_jobs"]["czds"]["oldest_queued_age_seconds"] is not None
+
+
+@pytest.mark.anyio
 async def test_records_api_returns_local_provenance_without_discovery(
     tmp_path: Path,
 ) -> None:
@@ -1041,6 +1077,7 @@ async def test_stats_and_readiness_do_not_spend_search_quota(
         "dated_hostname_count": 2,
         "hostname_count": 3,
         "last_ingest_at": None,
+        "ingest_jobs": {},
         "source_count": 0,
     }
     assert stats.headers["cache-control"] == "no-cache"

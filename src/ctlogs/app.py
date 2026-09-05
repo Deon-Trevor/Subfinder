@@ -956,7 +956,13 @@ def create_app(
     async def index_stats() -> JSONResponse:
         try:
             stats = await catalog_call(database.stats)
-        except (sqlite3.Error, TimeoutError, RuntimeError) as error:
+            ingest_jobs = await asyncio.to_thread(control.ingest_job_summary)
+        except (
+            sqlite3.Error,
+            TimeoutError,
+            RuntimeError,
+            ControlUnavailable,
+        ) as error:
             raise HTTPException(
                 status_code=503,
                 detail="catalog statistics are temporarily unavailable",
@@ -971,6 +977,7 @@ def create_app(
                 "ct_log_count": stats.ct_log_count,
                 "last_ingest_at": stats.last_ingest_at,
                 "source_count": stats.source_count,
+                "ingest_jobs": ingest_jobs,
             },
             headers={"Cache-Control": "no-cache"},
         )

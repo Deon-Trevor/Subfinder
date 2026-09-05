@@ -707,6 +707,40 @@ class ControlDatabase:
         except sqlite3.Error as error_:
             raise ControlUnavailable("ingest job failure update failed") from error_
 
+    def ingest_job_summary(self) -> dict[str, dict[str, int | float | None]]:
+        now = epoch_seconds()
+        try:
+            with self._connect(read_only=True) as connection:
+                rows = connection.execute(
+                    "SELECT kind,state,COUNT(*) AS count,MIN(updated_at) AS oldest "
+                    "FROM ingest_jobs GROUP BY kind,state"
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise ControlUnavailable("ingest job summary failed") from error
+
+        summary: dict[str, dict[str, int | float | None]] = {}
+        for row in rows:
+            kind = str(row["kind"])
+            state = str(row["state"])
+            item = summary.setdefault(
+                kind,
+                {
+                    "queued": 0,
+                    "running": 0,
+                    "done": 0,
+                    "failed": 0,
+                    "oldest_queued_age_seconds": None,
+                    "oldest_running_age_seconds": None,
+                },
+            )
+            item[state] = int(row["count"])
+            if state in {"queued", "running"} and row["oldest"] is not None:
+                item[f"oldest_{state}_age_seconds"] = max(
+                    0.0,
+                    round(now - float(row["oldest"]), 3),
+                )
+        return summary
+
     def ingest_job(self, job_id: str) -> IngestJob | None:
         try:
             with self._connect(read_only=True) as connection:

@@ -329,6 +329,21 @@ def test_ingest_jobs_create_new_cycle_after_previous_completion(tmp_path: Path) 
     assert [job.state for job in control.ingest_jobs(kind="czds")] == ["done", "queued"]
 
 
+
+def test_ingest_job_summary_reports_counts_and_age(tmp_path: Path) -> None:
+    control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
+    control.initialize()
+    first, _ = control.enqueue_ingest_job("czds", idempotency_key="one", now=10)
+    second, _ = control.enqueue_ingest_job("live-ct", idempotency_key="one", now=20)
+    claimed = control.claim_ingest_job("live-ct", "worker", lease_seconds=60, now=25)
+    assert claimed is not None and claimed.job_id == second.job_id
+    summary = control.ingest_job_summary()
+
+    assert summary["czds"]["queued"] == 1
+    assert summary["live-ct"]["running"] == 1
+    assert summary["czds"]["oldest_queued_age_seconds"] is not None
+    assert summary["live-ct"]["oldest_running_age_seconds"] is not None
+
 def test_ingest_jobs_coalesce_new_cycle_while_previous_cycle_active(tmp_path: Path) -> None:
     control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
     control.initialize()
