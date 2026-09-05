@@ -4,7 +4,7 @@
  * allowance of 1000 successful reads per IP per UTC day. A browser UI is a new
  * caller on that shared pool, so it never spends a request the user did not ask
  * for. No search on load, no search per keystroke, and a repeat lookup of an
- * apex already read this session is served from memory instead of the API.
+ * apex already read this session comes from memory instead of the API.
  * Filtering, sorting and exporting all work on rows already in hand, so none of
  * them return to the API either.
  *
@@ -151,7 +151,7 @@ syncThemeToggle();
 /* ── the live index counter ──────────────────────────────────────── */
 /* /v1/stats is outside the search allowance, so this doubles as the liveness
    signal: an answer here means the index is up, and no separate /health ping
-   is needed. Every number shown is a reading the endpoint actually returned.
+   is needed. Every number shown is a reading the endpoint returned.
    The motion between two readings is a tween across real values, never an
    extrapolation, so the counter cannot run ahead of the index. */
 
@@ -413,7 +413,7 @@ function renderShape(rows) {
 
   // Give each year a fixed slice of width instead of a share of the page, so a
   // two-year record is a compact pair rather than two bars adrift in 1080px.
-  // Both the bars and the axis read this, which is what keeps a tick under its
+  // Both the bars and the axis read this, which keeps a tick under its
   // bar at every span.
   el.shape.style.setProperty("--shape-width", `min(100%, ${span * 92}px)`);
   el.shapePeak.textContent = `· peak ${plural(peak, "name")}`;
@@ -461,8 +461,8 @@ function renderShape(rows) {
 }
 
 /* Renders into whichever surface is live - the page's case or the shelf - and
-   returns how many rows it actually drew, which is what the lip reports as
-   still being behind the glass. `limit` cuts the list off after a whole number
+   returns how many rows it drew, which the lip reports as still behind the
+   glass. `limit` cuts the list off after a whole number
    of rows; the year it lands in keeps its true count in the gutter, because
    that year does hold that many names whether or not this pane lists them. */
 function renderLedger(apex, rows, target, limit = Infinity) {
@@ -798,7 +798,7 @@ function jumpTo(section) {
     // shorter than the list really is and the write clamps - but the clamp
     // still renders everything it passed, which grows the scroller and lets
     // the next pass reach further. Only a pass that moves nothing twice
-    // running means there is genuinely nothing left to give.
+    // running means there is nothing left to give.
     if (after === before && after === stuck) break;
     stuck = before;
   }
@@ -1130,7 +1130,7 @@ if ("IntersectionObserver" in window) {
   watcher.observe(el.form);
 }
 
-/* Both fields show the domain that was actually read, so the normalisation a
+/* Both fields show the domain that was read, so the normalisation a
    pasted URL goes through is visible rather than silent. */
 function syncInputs(apex) {
   el.input.value = apex;
@@ -1174,7 +1174,7 @@ document.addEventListener("keydown", (event) => {
 
 /* ── enrichment: an empty answer that need not stay empty ────────── */
 /* An apex with nothing on file is a real answer, not an error - but the
-   records sometimes exist and have simply not been read in yet. The API
+   records sometimes exist and have not been read in yet. The API
    reports which of two are already on hand: an approved zone artifact sitting
    in the managed directory, and URLScan history for scans that have already
    been taken.
@@ -1182,8 +1182,8 @@ document.addEventListener("keydown", (event) => {
    Neither one reaches the domain, and the copy below never suggests
    otherwise. Subfinder does not download a zone it does not have, so the offer
    is only ever to import a file already on that disk; and "URLScan" here is a
-   search of scans other people already ran, never a new one. That is what lets
-   this offer sit on a page whose whole claim is that a lookup sends the target
+   search of scans other people already ran, never a new one. It is why this
+   offer can sit on a page whose whole claim is that a lookup sends the target
    nothing. */
 
 const ENRICH_POLL_FLOOR_S = 1;
@@ -1307,7 +1307,7 @@ async function readEnrichmentOptions(apex) {
 
 /* A finished run keeps the panel it wrote. Re-reading the record is what ends
    the run, and clearing the report in the same breath would leave no account
-   of what the run actually did. */
+   of what the run did. */
 function enrichmentFor(apex) {
   if (enrich && enrich.apex === apex && enrich.job && enrich.job.terminal) {
     el.enrich.hidden = false;
@@ -1548,7 +1548,7 @@ function laneSummary(job, reports) {
   return "Read in.";
 }
 
-/* What a reader would actually hear as new. The lanes sit in a live region and
+/* What a reader would hear as new. The lanes sit in a live region and
    a poll lands every couple of seconds, so redrawing an unchanged report would
    have a screen reader read the whole thing out again on every one of them. */
 function laneSignature(job) {
@@ -1652,7 +1652,7 @@ async function submitEnrichment() {
   if (response.status === 409) {
     // Either the key has been used for a different request, or an action stopped
     // being actionable while the reader was deciding. Both are answered the
-    // same way: get the current options and offer what is actually left.
+    // same way: get the current options and offer what is left.
     forgetKey(apex, actions);
     const detail = await detailOf(response, "That is no longer available.");
     try {
@@ -1810,7 +1810,7 @@ async function finishEnrichment(job) {
   // The key has done its work the moment the job is terminal. It exists to make
   // a retry of a submission still in flight safe - a dropped connection, a
   // double click, a reload mid-run - not to bind this apex to one run forever.
-  // Holding it would make a later, genuinely new request replay this finished
+  // Holding it would make a later request replay this finished
   // job instead of starting one, which is how "read the URLScan history again
   // next week, now that there are new scans" would quietly do nothing at all.
   forgetKey(job.apex, enrich.lastActions);

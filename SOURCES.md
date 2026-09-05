@@ -48,8 +48,8 @@ One scheduler owns recurring catalog writes. It tails Chrome, Apple, RFC 6962,
 and configured Static CT logs; rotates through historical RFC 6962 entries with
 an independent cursor; runs IANA, CISA, configured artifacts, and CZDS; and
 runs optional URLScan breadth jobs. Search requests only enqueue the searched
-apex in the separate control database. The enrichment worker is the sole
-consumer of that priority FIFO, so provider calls cannot race.
+apex in the separate control database. Only the enrichment worker reads that
+priority FIFO, so provider calls cannot race.
 
 CZDS and URLScan have independent caps. CZDS first selects up to 25 zones that
 have never been ingested, alphabetically because the approved-links feed has no
@@ -57,15 +57,14 @@ approval timestamp, then rotates through the least-recently checked zones. With
 `CTLOGS_URLSCAN_APEXES=*`, URLScan walks
 the full local apex index in batches of up to 69. Each apex keeps its own
 `search_after` cursor. Search requests add their apex to a persistent FIFO queue
-in the control database. Its job processes up to 14 apexes per run. Incomplete apexes rotate to the
-back; completed apexes leave the queue. API refreshes do not overwrite those
+in the control database. The enrichment worker processes up to 14 apexes per
+run. Incomplete apexes rotate to the back; completed apexes leave the queue. API refreshes do not overwrite those
 cursors.
 
 Automated URLSCAN calls use separate daily classes under one 100,000-request
 ceiling: 20,000 queued-history requests, a retained 10,000-request reserve, and
 70,000 breadth requests. Searches do not make provider calls. The class
-maximums add up to the total, so breadth cannot silently consume the priority
-share. Artifact imports each have their own
+maximums add up to the total, so breadth cannot eat into the priority share. Artifact imports each have their own
 download and parser run, so adding one cannot consume another source's slot.
 
 The `.ee`, `.se`, `.nu`, `.ch`, `.li`, Chaos, Common Crawl, HaGeZi, and Geomys
@@ -80,13 +79,13 @@ also require the registry's purpose-approved TSIG access.
 | [ICANN CZDS](https://github.com/icann/czds-api-client-python) | ICANN account with approved zones | Authenticated registry zone downloads and broad gTLD backfill. |
 | [urlscan.io](https://urlscan.io/docs/api/) | API key for dependable automation | Per-apex hostname discovery from indexed scans. |
 
-These are enrichment sources. The planned no-credential pipeline must remain
-operable when all optional sources are disabled.
+These are enrichment sources. The no-credential pipeline must keep working
+when every optional source is disabled.
 
 ## Excluded from the free query path
 
-- Active DNS or HTTP probing. Probing belongs in a separate, explicitly
-  enabled indexing job and is never triggered by `/v1/search` or MCP.
+- Active DNS or HTTP probing. Probing belongs in a separate indexing job that
+  an operator turns on; neither `/v1/search` nor MCP ever triggers it.
 - The old public CertStream aggregator. Its public stream has been stale, so it
   is not a live ingestion dependency.
 - Paid-only APIs or sources whose terms do not allow storage and redistribution.

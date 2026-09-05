@@ -54,9 +54,9 @@ def _serve(
     async def route() -> FileResponse:
         if not path.is_file():
             raise HTTPException(status_code=404, detail="not found")
-        # The page and the assets it is versioned with ship together, so those
-        # revalidate rather than let a browser pair new markup with a cached
-        # script. Icons carry no such pairing and are cached outright.
+        # The page and its assets ship together, so those revalidate rather
+        # than let a browser pair new markup with a cached script. Icons carry
+        # no such pairing and are cached outright.
         return FileResponse(
             path,
             media_type=media_type,

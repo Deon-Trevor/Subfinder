@@ -11,7 +11,7 @@ class GeomysArchive:
     """Replays Geomys CT Archive / Internet Archive historical CT logs.
 
     Input is bulk JSONL or gzipped JSONL where each line is a CT entry
-    with hostnames. No token required. Used for historical backfill.
+    with hostnames. No token required. Feeds historical backfill.
     """
 
     name = "geomys"

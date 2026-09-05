@@ -17,8 +17,8 @@ def _is_hostname(value: str) -> bool:
 class EeSeNuAdapter:
     """Parses AXFR dumps for .ee (zone.internet.ee), .se and .nu (zonedata.iis.se).
 
-    Input is the raw AXFR text as returned by `dig AXFR`. Each line starts with
-    the owner name. We extract only delegated hostnames and ignore glue.
+    Input is the raw AXFR text that `dig AXFR` returns. Each line starts with
+    the owner name. The parser keeps delegated hostnames and ignores glue.
     """
 
     def __init__(self, zone: str) -> None:

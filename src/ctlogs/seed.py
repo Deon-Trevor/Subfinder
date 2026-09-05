@@ -23,9 +23,10 @@ _SEED_ROWS: dict[str, list[tuple[str, str | None]]] = {
 
 
 def seed_if_empty(database: Database) -> int:
-    """Populate DB if `subdomains` is empty. Returns number of hostnames inserted.
+    """Populate the database if `subdomains` is empty. Returns the number of
+    hostnames inserted.
 
-    Idempotent: if table already has rows, does nothing and returns 0.
+    Idempotent: if the table already has rows, does nothing and returns 0.
     Keeps earliest first_seen via Database.upsert_subdomains.
     """
     with database.connect() as conn:

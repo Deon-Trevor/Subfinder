@@ -17,9 +17,9 @@ def _is_hostname(value: str) -> bool:
 class ChLiAdapter:
     """Parses AXFR dumps for .ch and .li from zonedata.switch.ch.
 
-    Access requires TSIG key and is purpose-restricted (cybercrime/research).
-    Adapter is gated behind `CTLOGS_ENABLE_CH_LI=1` env flag; without it,
-    benchmark skips and ingest returns empty. See SOURCES.md.
+    Access needs a TSIG key and is restricted to cybercrime and research use.
+    `CTLOGS_ENABLE_CH_LI=1` gates the adapter; without it the benchmark skips
+    and ingest returns empty. See SOURCES.md.
     """
 
     def __init__(self, zone: str) -> None:
