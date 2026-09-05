@@ -19,6 +19,7 @@ from ctlogs.ingest.enrich import (
 )
 from ctlogs.scheduler import (
     ScheduledJob,
+    enqueue_worker_job,
     _run_ct_history_batch,
     _run_urlscan_apex,
     _run_urlscan_batch,
@@ -761,3 +762,112 @@ def test_priority_history_still_runs_after_breadth_budget_is_exhausted(
     with pytest.raises(QuotaExceeded):
         jobs["urlscan"].action()
     assert calls == ["priority.example"]
+
+
+def test_scheduler_can_enqueue_czds_and_live_ct_worker_jobs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    control = _control(tmp_path)
+    monkeypatch.setenv("CTLOGS_SCHEDULE_DEFAULTS", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_URLSCAN", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULER_ENQUEUE_WORKERS", "1")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "1")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_LIVE_CT", "1")
+    monkeypatch.setenv("CZDS_USERNAME", "user")
+    monkeypatch.setenv("CZDS_PASSWORD", "password")
+    monkeypatch.setenv("CTLOGS_CZDS_MAX_BYTES", "10")
+
+    jobs = {job.name: job for job in build_jobs(database, control)}
+
+    assert sorted(jobs) == ["czds", "live-ct"]
+    assert jobs["czds"].action() == {
+        "created": True,
+        "job_id": control.ingest_jobs(kind="czds")[0].job_id,
+        "kind": "czds",
+        "state": "queued",
+    }
+    czds = control.ingest_jobs(kind="czds")[0]
+    assert czds.payload_json == (
+        '{"max_bytes":10,"max_zones":25,'
+        '"output_directory":"/data/czds","refresh":true}'
+    )
+
+    assert jobs["live-ct"].action()["created"] is True
+    live = control.ingest_jobs(kind="live-ct")[0]
+    assert live.payload_json == (
+        '{"batch":1024,"initial_backfill":1024,"max_batches":8}'
+    )
+
+    assert jobs["czds"].action()["created"] is False
+    assert len(control.ingest_jobs(kind="czds", states=("queued", "running"))) == 1
+
+
+
+def test_scheduler_enqueue_uses_new_cycle_key_after_worker_finishes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    control = _control(tmp_path)
+    clock = {"now": 100.0}
+    monkeypatch.setattr("ctlogs.scheduler.time.time", lambda: clock["now"])
+    monkeypatch.setenv("CTLOGS_SCHEDULE_DEFAULTS", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_URLSCAN", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULER_ENQUEUE_WORKERS", "1")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "1")
+    monkeypatch.setenv("CTLOGS_CZDS_INTERVAL", "60")
+    monkeypatch.setenv("CZDS_USERNAME", "user")
+    monkeypatch.setenv("CZDS_PASSWORD", "password")
+
+    job = build_jobs(database, control)[0]
+    first = job.action()
+    claimed = control.claim_ingest_job("czds", "worker", lease_seconds=10, now=101)
+    assert claimed is not None
+    control.finish_ingest_job(claimed.job_id, "worker", now=102)
+    clock["now"] = 160.0
+    second = job.action()
+
+    assert first["created"] is True
+    assert second["created"] is True
+    assert first["job_id"] != second["job_id"]
+    assert [item.state for item in control.ingest_jobs(kind="czds")] == ["done", "queued"]
+
+def test_scheduler_requires_control_database_for_worker_enqueue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(tmp_path / "scheduler.sqlite3")
+    database.initialize()
+    monkeypatch.setenv("CTLOGS_SCHEDULE_DEFAULTS", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_URLSCAN", "0")
+    monkeypatch.setenv("CTLOGS_SCHEDULER_ENQUEUE_WORKERS", "1")
+    monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "1")
+    monkeypatch.setenv("CZDS_USERNAME", "user")
+    monkeypatch.setenv("CZDS_PASSWORD", "password")
+
+    with pytest.raises(ValueError, match="control_database is required"):
+        build_jobs(database)
+
+
+def test_enqueue_worker_job_preserves_active_job_idempotency(tmp_path: Path) -> None:
+    control = _control(tmp_path)
+
+    first = enqueue_worker_job(
+        control,
+        "czds",
+        idempotency_key="daily",
+        payload={"max_bytes": 10},
+    )
+    second = enqueue_worker_job(
+        control,
+        "czds",
+        idempotency_key="daily",
+        payload={"max_bytes": 10},
+    )
+
+    assert first["created"] is True
+    assert second == {**first, "created": False}

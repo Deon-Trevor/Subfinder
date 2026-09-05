@@ -12,6 +12,7 @@ from ctlogs.control import (
     ControlDatabase,
     ControlUnavailable,
     EnrichmentQueueFull,
+    IdempotencyConflict,
 )
 from ctlogs.database import QuotaExceeded
 
@@ -262,3 +263,135 @@ def test_schema_verification_is_read_only_and_requires_migration(
     migrated = ControlDatabase(tmp_path / "migrated.sqlite3")
     migrated.initialize()
     migrated.verify_schema()
+
+
+def test_ingest_jobs_are_idempotent_claimed_and_finished(tmp_path: Path) -> None:
+    control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
+    control.initialize()
+
+    first, created = control.enqueue_ingest_job(
+        "czds",
+        idempotency_key="czds",
+        payload={"max_bytes": 10},
+        now=1,
+    )
+    replay, replay_created = control.enqueue_ingest_job(
+        "czds",
+        idempotency_key="czds",
+        payload={"max_bytes": 10},
+        now=2,
+    )
+
+    assert created is True
+    assert replay_created is False
+    assert replay.job_id == first.job_id
+    assert replay.state == "queued"
+    with pytest.raises(IdempotencyConflict):
+        control.enqueue_ingest_job(
+            "czds",
+            idempotency_key="czds",
+            payload={"max_bytes": 11},
+            now=3,
+        )
+
+    claimed = control.claim_ingest_job("czds", "worker-a", lease_seconds=10, now=4)
+    assert claimed is not None
+    assert claimed.job_id == first.job_id
+    assert claimed.state == "running"
+    assert claimed.attempts == 1
+    assert claimed.lease_owner == "worker-a"
+    assert control.claim_ingest_job("czds", "worker-b", lease_seconds=10, now=5) is None
+
+    finished = control.finish_ingest_job(
+        claimed.job_id,
+        "worker-a",
+        result={"zones": 1, "hostnames": 2},
+        now=6,
+    )
+    assert finished.state == "done"
+    assert finished.result_json == '{"hostnames":2,"zones":1}'
+    assert finished.lease_owner == ""
+
+
+
+def test_ingest_jobs_create_new_cycle_after_previous_completion(tmp_path: Path) -> None:
+    control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
+    control.initialize()
+    first, _ = control.enqueue_ingest_job("czds", idempotency_key="cycle-1", now=1)
+    claimed = control.claim_ingest_job("czds", "worker", lease_seconds=10, now=2)
+    assert claimed is not None
+    control.finish_ingest_job(claimed.job_id, "worker", now=3)
+
+    second, created = control.enqueue_ingest_job("czds", idempotency_key="cycle-2", now=4)
+
+    assert created is True
+    assert second.job_id != first.job_id
+    assert [job.state for job in control.ingest_jobs(kind="czds")] == ["done", "queued"]
+
+
+def test_ingest_jobs_coalesce_new_cycle_while_previous_cycle_active(tmp_path: Path) -> None:
+    control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
+    control.initialize()
+    active, _ = control.enqueue_ingest_job("live-ct", idempotency_key="cycle-1", now=1)
+
+    replay, created = control.enqueue_ingest_job("live-ct", idempotency_key="cycle-2", now=2)
+
+    assert created is False
+    assert replay.job_id == active.job_id
+    assert len(control.ingest_jobs(kind="live-ct")) == 1
+
+
+def test_ingest_jobs_retry_failed_cycle_with_same_key(tmp_path: Path) -> None:
+    control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
+    control.initialize()
+    job, _ = control.enqueue_ingest_job("czds", idempotency_key="cycle", now=1)
+    claimed = control.claim_ingest_job("czds", "worker", lease_seconds=10, now=2)
+    assert claimed is not None
+    failed = control.fail_ingest_job(claimed.job_id, "worker", "boom", retry=False, now=3)
+    assert failed.state == "failed"
+
+    retry, created = control.enqueue_ingest_job("czds", idempotency_key="cycle", now=4)
+
+    assert created is True
+    assert retry.job_id != job.job_id
+    assert retry.state == "queued"
+
+
+def test_expired_ingest_lease_cannot_finish_or_fail(tmp_path: Path) -> None:
+    control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
+    control.initialize()
+    job, _ = control.enqueue_ingest_job("live-ct", idempotency_key="cycle", now=1)
+    claimed = control.claim_ingest_job("live-ct", "dead", lease_seconds=1, now=2)
+    assert claimed is not None
+
+    with pytest.raises(ControlUnavailable, match="lease was lost"):
+        control.finish_ingest_job(job.job_id, "dead", now=4)
+    with pytest.raises(ControlUnavailable, match="lease was lost"):
+        control.fail_ingest_job(job.job_id, "dead", "late", now=4)
+
+    replacement = control.claim_ingest_job("live-ct", "replacement", lease_seconds=10, now=4)
+    assert replacement is not None
+    assert replacement.lease_owner == "replacement"
+
+def test_ingest_job_claim_recovers_expired_leases_and_bounds_attempts(tmp_path: Path) -> None:
+    control = ControlDatabase(tmp_path / "control.sqlite3", busy_timeout_ms=1_000)
+    control.initialize()
+    job, _ = control.enqueue_ingest_job(
+        "live-ct",
+        idempotency_key="live-ct",
+        max_attempts=2,
+        now=1,
+    )
+
+    first = control.claim_ingest_job("live-ct", "dead", lease_seconds=1, now=2)
+    assert first is not None
+    second = control.claim_ingest_job("live-ct", "replacement", lease_seconds=1, now=4)
+    assert second is not None
+    assert second.job_id == job.job_id
+    assert second.attempts == 2
+
+    assert control.claim_ingest_job("live-ct", "late", lease_seconds=1, now=6) is None
+    failed = control.ingest_job(job.job_id)
+    assert failed is not None
+    assert failed.state == "failed"
+    assert failed.error == "lease expired after max attempts"

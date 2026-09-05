@@ -51,6 +51,27 @@ class ScheduledJob:
     action: Callable[[], object]
 
 
+def enqueue_worker_job(
+    control: ControlDatabase,
+    kind: str,
+    *,
+    idempotency_key: str | None = None,
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    key = idempotency_key or kind
+    job, created = control.enqueue_ingest_job(
+        kind,
+        idempotency_key=key,
+        payload=payload or {},
+    )
+    return {
+        "job_id": job.job_id,
+        "kind": job.kind,
+        "state": job.state,
+        "created": created,
+    }
+
+
 def _positive_environment_integer(name: str, default: int) -> int:
     value = os.environ.get(name)
     if value is None:
@@ -271,6 +292,7 @@ def _run_ct_history_batch(
 
 def build_jobs(
     database: Database,
+    control_database: ControlDatabase | None = None,
 ) -> list[ScheduledJob]:
     interval = _positive_environment_integer(
         "CTLOGS_SCHEDULER_INTERVAL",
@@ -286,6 +308,9 @@ def build_jobs(
         DEFAULT_MAX_BYTES,
     )
     zone_directory = Path(os.environ.get("CTLOGS_CZDS_OUTPUT", "/data/czds"))
+    use_worker_jobs = _enabled("CTLOGS_SCHEDULER_ENQUEUE_WORKERS", False)
+    if use_worker_jobs and control_database is None:
+        raise ValueError("control_database is required when enqueueing worker jobs")
     jobs: list[ScheduledJob] = []
 
     if _enabled("CTLOGS_SCHEDULE_DEFAULTS"):
@@ -340,21 +365,42 @@ def build_jobs(
             "CTLOGS_CZDS_MAX_BYTES",
             4 * 1024 * 1024 * 1024,
         )
-        jobs.append(
-            ScheduledJob(
-                "czds",
-                czds_interval,
-                czds_retry,
-                lambda: run_czds(
-                    database,
-                    CzdsClient(username, password, timeout=timeout),
-                    zone_directory,
-                    max_zones=max_zones,
-                    max_bytes=czds_max_bytes,
-                    refresh=True,
-                ),
+        if use_worker_jobs:
+            assert control_database is not None
+            jobs.append(
+                ScheduledJob(
+                    "czds",
+                    czds_interval,
+                    czds_retry,
+                    lambda: enqueue_worker_job(
+                        control_database,
+                        "czds",
+                        idempotency_key=f"czds:{int(time.time() // czds_interval)}",
+                        payload={
+                            "max_zones": max_zones,
+                            "max_bytes": czds_max_bytes,
+                            "output_directory": str(zone_directory),
+                            "refresh": True,
+                        },
+                    ),
+                )
             )
-        )
+        else:
+            jobs.append(
+                ScheduledJob(
+                    "czds",
+                    czds_interval,
+                    czds_retry,
+                    lambda: run_czds(
+                        database,
+                        CzdsClient(username, password, timeout=timeout),
+                        zone_directory,
+                        max_zones=max_zones,
+                        max_bytes=czds_max_bytes,
+                        refresh=True,
+                    ),
+                )
+            )
 
     if _enabled("CTLOGS_SCHEDULE_CT_HISTORY", False):
         ct_history_interval = _positive_environment_integer(
@@ -413,21 +459,41 @@ def build_jobs(
             "CTLOGS_LIVE_CT_MAX_BATCHES_PER_LOG",
             8,
         )
-        jobs.append(
-            ScheduledJob(
-                "live-ct",
-                live_ct_interval,
-                live_ct_retry,
-                lambda: asyncio.run(
-                    poll_once(
-                        database,
-                        batch=live_ct_batch_size,
-                        initial_backfill=live_ct_initial_backfill,
-                        max_batches=live_ct_max_batches,
-                    )
-                ),
+        if use_worker_jobs:
+            assert control_database is not None
+            jobs.append(
+                ScheduledJob(
+                    "live-ct",
+                    live_ct_interval,
+                    live_ct_retry,
+                    lambda: enqueue_worker_job(
+                        control_database,
+                        "live-ct",
+                        idempotency_key=f"live-ct:{int(time.time() // live_ct_interval)}",
+                        payload={
+                            "batch": live_ct_batch_size,
+                            "initial_backfill": live_ct_initial_backfill,
+                            "max_batches": live_ct_max_batches,
+                        },
+                    ),
+                )
             )
-        )
+        else:
+            jobs.append(
+                ScheduledJob(
+                    "live-ct",
+                    live_ct_interval,
+                    live_ct_retry,
+                    lambda: asyncio.run(
+                        poll_once(
+                            database,
+                            batch=live_ct_batch_size,
+                            initial_backfill=live_ct_initial_backfill,
+                            max_batches=live_ct_max_batches,
+                        )
+                    ),
+                )
+            )
 
     if _enabled("CTLOGS_SCHEDULE_URLSCAN"):
         urlscan_key = os.environ.get("URLSCAN_API_KEY")
@@ -584,7 +650,7 @@ def main() -> None:
     database.verify_schema()
     control_database = ControlDatabase(args.control_db)
     control_database.verify_schema()
-    jobs = build_jobs(database)
+    jobs = build_jobs(database, control_database)
     if (
         _enabled("CTLOGS_SCHEDULE_URLSCAN")
         and os.environ.get("URLSCAN_API_KEY")

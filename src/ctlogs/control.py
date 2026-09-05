@@ -97,6 +97,23 @@ class EnrichmentAdmission:
     created: bool
 
 
+@dataclass(frozen=True)
+class IngestJob:
+    job_id: str
+    kind: str
+    state: str
+    idempotency_key: str
+    payload_json: str
+    created_at: float
+    updated_at: float
+    lease_owner: str = ""
+    lease_expires: float = 0.0
+    attempts: int = 0
+    max_attempts: int = 3
+    result_json: str = ""
+    error: str = ""
+
+
 class ControlDatabase:
     """Small mutable state that must not share the catalog's writer lock."""
 
@@ -254,6 +271,29 @@ class ControlDatabase:
                     );
                     CREATE INDEX IF NOT EXISTS enrichment_jobs_claim
                         ON enrichment_jobs(state, updated_at, job_id);
+
+                    CREATE TABLE IF NOT EXISTS ingest_jobs (
+                        job_id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL,
+                        idempotency_key TEXT NOT NULL,
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        state TEXT NOT NULL CHECK (
+                            state IN ('queued','running','done','failed')
+                        ),
+                        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                        max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        lease_owner TEXT NOT NULL DEFAULT '',
+                        lease_expires REAL NOT NULL DEFAULT 0,
+                        result_json TEXT NOT NULL DEFAULT '',
+                        error TEXT NOT NULL DEFAULT '',
+                        UNIQUE(kind, idempotency_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS ingest_jobs_claim
+                        ON ingest_jobs(kind, state, updated_at, job_id);
+                    CREATE INDEX IF NOT EXISTS ingest_jobs_lease
+                        ON ingest_jobs(state, lease_expires);
                     """
                 )
                 connection.execute(
@@ -271,6 +311,11 @@ class ControlDatabase:
                 connection.execute(
                     "DELETE FROM enrichment_jobs "
                     "WHERE state IN ('done','partial','failed') "
+                    "AND updated_at < strftime('%s','now') - 604800"
+                )
+                connection.execute(
+                    "DELETE FROM ingest_jobs "
+                    "WHERE state IN ('done','failed') "
                     "AND updated_at < strftime('%s','now') - 604800"
                 )
         except sqlite3.Error as error:
@@ -300,6 +345,7 @@ class ControlDatabase:
             "record_batch_slices",
             "runtime_capabilities",
             "enrichment_jobs",
+            "ingest_jobs",
         } - present
         if missing:
             raise ControlUnavailable(
@@ -458,6 +504,243 @@ class ControlDatabase:
         if row is None:
             return None
         return bool(row["available"]), str(row["detail"]), float(row["updated_at"])
+
+
+    @staticmethod
+    def _ingest_job(row: sqlite3.Row) -> IngestJob:
+        return IngestJob(
+            job_id=str(row["job_id"]),
+            kind=str(row["kind"]),
+            state=str(row["state"]),
+            idempotency_key=str(row["idempotency_key"]),
+            payload_json=str(row["payload_json"]),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+            lease_owner=str(row["lease_owner"]),
+            lease_expires=float(row["lease_expires"]),
+            attempts=int(row["attempts"]),
+            max_attempts=int(row["max_attempts"]),
+            result_json=str(row["result_json"]),
+            error=str(row["error"]),
+        )
+
+    def enqueue_ingest_job(
+        self,
+        kind: str,
+        *,
+        idempotency_key: str,
+        payload: dict[str, object] | None = None,
+        max_attempts: int = 3,
+        now: float | None = None,
+    ) -> tuple[IngestJob, bool]:
+        if not kind or not idempotency_key:
+            raise ValueError("kind and idempotency_key are required")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        timestamp = epoch_seconds() if now is None else now
+        payload_json = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"))
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    "SELECT * FROM ingest_jobs WHERE kind=? AND idempotency_key=?",
+                    (kind, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    job = self._ingest_job(existing)
+                    if job.payload_json != payload_json:
+                        raise IdempotencyConflict(
+                            "idempotency key was already used for another ingest job"
+                        )
+                    if job.state != "failed":
+                        return job, False
+                    connection.execute(
+                        "DELETE FROM ingest_jobs WHERE job_id=? AND state='failed'",
+                        (job.job_id,),
+                    )
+                active = connection.execute(
+                    "SELECT * FROM ingest_jobs WHERE kind=? AND state IN ('queued','running') "
+                    "ORDER BY updated_at,job_id LIMIT 1",
+                    (kind,),
+                ).fetchone()
+                if active is not None:
+                    return self._ingest_job(active), False
+                job_id = uuid.uuid4().hex
+                connection.execute(
+                    "INSERT INTO ingest_jobs "
+                    "(job_id,kind,idempotency_key,payload_json,state,max_attempts,"
+                    "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        job_id,
+                        kind,
+                        idempotency_key,
+                        payload_json,
+                        "queued",
+                        max_attempts,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM ingest_jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                assert row is not None
+                return self._ingest_job(row), True
+        except (IdempotencyConflict,):
+            raise
+        except sqlite3.Error as error:
+            raise ControlUnavailable("ingest job enqueue failed") from error
+
+    def claim_ingest_job(
+        self,
+        kind: str,
+        worker_id: str,
+        *,
+        lease_seconds: float,
+        now: float | None = None,
+    ) -> IngestJob | None:
+        if not kind or not worker_id or lease_seconds <= 0:
+            raise ValueError("kind, worker, and positive lease are required")
+        timestamp = epoch_seconds() if now is None else now
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "UPDATE ingest_jobs SET state='queued',lease_owner='',"
+                    "lease_expires=0,updated_at=? "
+                    "WHERE kind=? AND state='running' AND lease_expires<=? "
+                    "AND attempts<max_attempts",
+                    (timestamp, kind, timestamp),
+                )
+                connection.execute(
+                    "UPDATE ingest_jobs SET state='failed',lease_owner='',"
+                    "lease_expires=0,updated_at=?,error='lease expired after max attempts' "
+                    "WHERE kind=? AND state='running' AND lease_expires<=? "
+                    "AND attempts>=max_attempts",
+                    (timestamp, kind, timestamp),
+                )
+                row = connection.execute(
+                    "SELECT * FROM ingest_jobs WHERE kind=? AND state='queued' "
+                    "ORDER BY updated_at,job_id LIMIT 1",
+                    (kind,),
+                ).fetchone()
+                if row is None:
+                    return None
+                job_id = str(row["job_id"])
+                changed = connection.execute(
+                    "UPDATE ingest_jobs SET state='running',lease_owner=?,"
+                    "lease_expires=?,attempts=attempts+1,updated_at=? "
+                    "WHERE job_id=? AND state='queued'",
+                    (worker_id, timestamp + lease_seconds, timestamp, job_id),
+                )
+                if not changed.rowcount:
+                    return None
+                claimed = connection.execute(
+                    "SELECT * FROM ingest_jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                assert claimed is not None
+                return self._ingest_job(claimed)
+        except sqlite3.Error as error:
+            raise ControlUnavailable("ingest job claim failed") from error
+
+    def finish_ingest_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        result: dict[str, object] | None = None,
+        now: float | None = None,
+    ) -> IngestJob:
+        timestamp = epoch_seconds() if now is None else now
+        result_json = json.dumps(result or {}, sort_keys=True, separators=(",", ":"))
+        try:
+            with self._connect() as connection:
+                changed = connection.execute(
+                    "UPDATE ingest_jobs SET state='done',updated_at=?,"
+                    "lease_owner='',lease_expires=0,result_json=?,error='' "
+                    "WHERE job_id=? AND state='running' AND lease_owner=? "
+                    "AND lease_expires>?",
+                    (timestamp, result_json, job_id, worker_id, timestamp),
+                )
+                if not changed.rowcount:
+                    raise ControlUnavailable("ingest job lease was lost")
+                row = connection.execute(
+                    "SELECT * FROM ingest_jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                assert row is not None
+                return self._ingest_job(row)
+        except sqlite3.Error as error:
+            raise ControlUnavailable("ingest job finish failed") from error
+
+    def fail_ingest_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        error: str,
+        *,
+        retry: bool = True,
+        now: float | None = None,
+    ) -> IngestJob:
+        timestamp = epoch_seconds() if now is None else now
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM ingest_jobs WHERE job_id=? AND state='running' "
+                    "AND lease_owner=? AND lease_expires>?",
+                    (job_id, worker_id, timestamp),
+                ).fetchone()
+                if row is None:
+                    raise ControlUnavailable("ingest job lease was lost")
+                attempts = int(row["attempts"])
+                max_attempts = int(row["max_attempts"])
+                state = "queued" if retry and attempts < max_attempts else "failed"
+                connection.execute(
+                    "UPDATE ingest_jobs SET state=?,updated_at=?,lease_owner='',"
+                    "lease_expires=0,error=? WHERE job_id=?",
+                    (state, timestamp, error[:500], job_id),
+                )
+                updated = connection.execute(
+                    "SELECT * FROM ingest_jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+                assert updated is not None
+                return self._ingest_job(updated)
+        except sqlite3.Error as error_:
+            raise ControlUnavailable("ingest job failure update failed") from error_
+
+    def ingest_job(self, job_id: str) -> IngestJob | None:
+        try:
+            with self._connect(read_only=True) as connection:
+                row = connection.execute(
+                    "SELECT * FROM ingest_jobs WHERE job_id=?", (job_id,)
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise ControlUnavailable("ingest job read failed") from error
+        return self._ingest_job(row) if row is not None else None
+
+    def ingest_jobs(
+        self,
+        *,
+        kind: str | None = None,
+        states: tuple[str, ...] = (),
+    ) -> list[IngestJob]:
+        query = "SELECT * FROM ingest_jobs"
+        clauses: list[str] = []
+        values: list[object] = []
+        if kind is not None:
+            clauses.append("kind=?")
+            values.append(kind)
+        if states:
+            clauses.append("state IN (" + ",".join("?" for _ in states) + ")")
+            values.extend(states)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at,job_id"
+        try:
+            with self._connect(read_only=True) as connection:
+                rows = connection.execute(query, values).fetchall()
+        except sqlite3.Error as error:
+            raise ControlUnavailable("ingest jobs read failed") from error
+        return [self._ingest_job(row) for row in rows]
 
     @staticmethod
     def _enrichment_job(row: sqlite3.Row) -> EnrichmentJob:
