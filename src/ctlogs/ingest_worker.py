@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
+import multiprocessing
 import os
 import signal
 import socket
@@ -15,12 +17,14 @@ from typing import Any
 from ctlogs.control import ControlDatabase, ControlUnavailable, IngestJob
 from ctlogs.database import Database
 from ctlogs.ingest.czds import CzdsClient, run_czds
+from ctlogs.worker import poll_once
 
 LOGGER = logging.getLogger("ctlogs.ingest_worker")
 DEFAULT_POLL_SECONDS = 5.0
 DEFAULT_LEASE_SECONDS = 6 * 60 * 60
 DEFAULT_CZDS_MAX_BYTES = 4 * 1024 * 1024 * 1024
 DEFAULT_CZDS_RUN_TIMEOUT_SECONDS = 6 * 60 * 60
+DEFAULT_LIVE_CT_RUN_TIMEOUT_SECONDS = 15 * 60
 
 
 def _positive_environment_float(name: str, default: float) -> float:
@@ -146,6 +150,106 @@ def run_czds_job(database: Database, job: IngestJob, *, timeout: int) -> dict[st
     return {"zones": zones, "hostnames": hostnames}
 
 
+def _live_ct_child(
+    database_path: str,
+    batch: int,
+    initial_backfill: int,
+    max_batches: int,
+    queue,
+) -> None:
+    try:
+        child_database = Database(database_path)
+        child_database.initialize()
+        hostnames = asyncio.run(
+            poll_once(
+                child_database,
+                batch=batch,
+                initial_backfill=initial_backfill,
+                max_batches=max_batches,
+            )
+        )
+        queue.put(("ok", hostnames))
+    except BaseException as error:
+        queue.put(("error", str(error)))
+
+
+def _run_live_ct_with_deadline(
+    database: Database,
+    *,
+    batch: int,
+    initial_backfill: int,
+    max_batches: int,
+    seconds: int,
+) -> int:
+    queue = multiprocessing.Queue(maxsize=1)
+    process = multiprocessing.Process(
+        target=_live_ct_child,
+        args=(
+            str(database.path),
+            batch,
+            initial_backfill,
+            max_batches,
+            queue,
+        ),
+    )
+    process.start()
+    process.join(seconds)
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        raise TimeoutError(f"live-ct cycle exceeded {seconds} seconds")
+    if process.exitcode != 0 and queue.empty():
+        raise RuntimeError(f"live-ct worker child exited with status {process.exitcode}")
+    status, value = queue.get()
+    if status == "ok":
+        return int(value)
+    raise RuntimeError(str(value))
+
+
+def run_live_ct_job(database: Database, job: IngestJob) -> dict[str, object]:
+    payload = _payload(job)
+    batch_bound = _positive_environment_integer("CTLOGS_LIVE_CT_BATCH_SIZE", 1024)
+    backfill_bound = _positive_environment_integer("CTLOGS_LIVE_CT_INITIAL_BACKFILL", 1024)
+    max_batches_bound = _positive_environment_integer(
+        "CTLOGS_LIVE_CT_MAX_BATCHES_PER_LOG",
+        8,
+    )
+    batch = _bounded_payload_integer(
+        payload,
+        "batch",
+        default=batch_bound,
+        upper_bound=batch_bound,
+    )
+    initial_backfill = _bounded_payload_integer(
+        payload,
+        "initial_backfill",
+        default=backfill_bound,
+        upper_bound=backfill_bound,
+    )
+    max_batches = _bounded_payload_integer(
+        payload,
+        "max_batches",
+        default=max_batches_bound,
+        upper_bound=max_batches_bound,
+    )
+    run_timeout = _positive_environment_integer(
+        "CTLOGS_LIVE_CT_CYCLE_TIMEOUT_SECONDS",
+        DEFAULT_LIVE_CT_RUN_TIMEOUT_SECONDS,
+    )
+
+    hostnames = _run_live_ct_with_deadline(
+        database,
+        batch=batch,
+        initial_backfill=initial_backfill,
+        max_batches=max_batches,
+        seconds=run_timeout,
+    )
+    return {"hostnames": hostnames}
+
+
 def execute_ingest_job(
     database: Database,
     control: ControlDatabase,
@@ -155,9 +259,12 @@ def execute_ingest_job(
     timeout: int,
 ) -> IngestJob:
     try:
-        if job.kind != "czds":
+        if job.kind == "czds":
+            result = run_czds_job(database, job, timeout=timeout)
+        elif job.kind == "live-ct":
+            result = run_live_ct_job(database, job)
+        else:
             raise RuntimeError(f"unsupported ingest job kind: {job.kind}")
-        result = run_czds_job(database, job, timeout=timeout)
         return control.finish_ingest_job(job.job_id, owner, result=result)
     except Exception as error:
         LOGGER.exception("ingest job failed", extra={"job_id": job.job_id, "kind": job.kind})

@@ -184,6 +184,33 @@ services:
     deploy:
       replicas: 1
 
+  live-ct-worker:
+    build: .
+    image: ctlogs:latest
+    entrypoint: ["python", "-m", "ctlogs.ingest_worker", "--kind", "live-ct"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ctlogs-data:/data
+      - ctlogs-control:/control
+    environment:
+      CTLOGS_DB_PATH: /data/ctlogs.sqlite3
+      CTLOGS_CONTROL_DB_PATH: /control/control.sqlite3
+      CTLOGS_INGEST_WORKER_KIND: live-ct
+      CTLOGS_INGEST_WORKER_POLL_SECONDS: ${CTLOGS_INGEST_WORKER_POLL_SECONDS:-5}
+      CTLOGS_INGEST_WORKER_LEASE_SECONDS: ${CTLOGS_LIVE_CT_WORKER_LEASE_SECONDS:-900}
+      CTLOGS_LIVE_CT_CYCLE_TIMEOUT_SECONDS: ${CTLOGS_LIVE_CT_CYCLE_TIMEOUT_SECONDS:-900}
+      CTLOGS_LIVE_CT_BATCH_SIZE: ${CTLOGS_LIVE_CT_BATCH_SIZE:-1024}
+      CTLOGS_LIVE_CT_INITIAL_BACKFILL: ${CTLOGS_LIVE_CT_INITIAL_BACKFILL:-1024}
+      CTLOGS_LIVE_CT_MAX_BATCHES_PER_LOG: ${CTLOGS_LIVE_CT_MAX_BATCHES_PER_LOG:-8}
+      CTLOGS_STATIC_CT_URLS: "https://mon.willow.ct.letsencrypt.org/2026h2"
+    deploy:
+      replicas: 1
+
   enrichment-worker:
     build: .
     image: ctlogs:latest
