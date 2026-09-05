@@ -123,7 +123,7 @@
       <div>
         <p class="eyebrow">Passive subdomain enumeration</p>
         <h1 class="hero-title">Every subdomain on record. <em>Zero packets to the target.</em></h1>
-        <p class="hero-lede">Type a domain and browse every hostname the index has seen under it, oldest first, with the date each name first appeared. A lookup reads the committed local index immediately and queues passive enrichment in the background. The domain you look up is never probed and never learns you looked.</p>
+        <p class="hero-lede">Type a domain and browse every hostname the index has seen under it, oldest first, with the date each name first appeared. A lookup answers from the committed index and queues passive enrichment behind it. The domain you look up is never probed and never learns you looked.</p>
 
         <form class="search" id="search-form" autocomplete="off">
           <div class="search-row">
@@ -321,7 +321,7 @@ curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com&amp;form
       <div class="doc-block">
         <h3>Index size</h3>
         <code class="doc-endpoint"><span class="doc-verb">GET</span> /v1/stats</code>
-        <p>Counts for the whole index and the timestamp of the last ingest run. It costs nothing against the search allowance, which is what lets the counter above keep itself current.</p>
+        <p>Counts for the whole index and the timestamp of the last ingest run. It costs nothing against the search allowance, so the counter above can keep itself current.</p>
       </div>
       <div class="doc-block">
         <h3>Allowance</h3>

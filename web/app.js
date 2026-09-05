@@ -566,7 +566,7 @@ function renderEmpty(apex, target) {
   title.textContent = "Nothing on file for this domain.";
   const body = document.createElement("p");
   body.className = "state-body";
-  body.textContent = `The index holds no name under ${apex}. That is an answer, not an error, and the domain was not contacted to produce it.`;
+  body.textContent = `The index holds no name under ${apex}. That is an answer, not an error, and Subfinder did not contact the domain to reach it.`;
   box.append(title, body);
   target.replaceChildren(box);
 }
@@ -579,7 +579,7 @@ function renderNoMatches(term, target) {
   title.textContent = "No name matches that filter.";
   const body = document.createElement("p");
   body.className = "state-body";
-  body.textContent = `Nothing on this page contains "${term}". Clearing the filter brings the page back; it never returns to the API.`;
+  body.textContent = `Nothing on this page contains "${term}". Clearing the filter brings the page back without another read.`;
   box.append(title, body);
   target.replaceChildren(box);
 }
@@ -880,7 +880,7 @@ async function nextPage() {
   };
   current.loading = true;
   syncPager();
-  el.shelfState.textContent = "Reading the next page...";
+  el.shelfState.textContent = "Reading the next page.";
   try {
     const page = await readPage(current.apex, cursor);
     current.back.push(previous);
@@ -1200,8 +1200,8 @@ const ENRICH_NAMES = { local_zone: "Zone file", urlscan: "URLScan history" };
    carries lane states but no prose; only the options document explains itself,
    and by the time a lane reports in, that document may be a minute stale. */
 const ENRICH_ABSENT = {
-  local_zone: "No approved zone artifact is on disk for this zone.",
-  urlscan: "Passive URLScan reading is not configured on this deployment.",
+  local_zone: "No approved zone artifact on disk for this zone.",
+  urlscan: "URLScan reading is not configured here.",
 };
 
 let enrich = null;
@@ -1349,7 +1349,7 @@ async function openEnrichment(apex) {
     // overload earns a line, because that one is worth coming back from.
     if (error.status === 503 && enrich && enrich.apex === apex) {
       el.enrichLede.textContent =
-        `Whether anything is on hand for ${apex} cannot be read right now.`;
+        `Subfinder cannot tell what is on hand for ${apex} right now.`;
       el.enrichActions.replaceChildren();
       el.enrichBlocked.hidden = true;
       el.enrichRun.hidden = false;
@@ -1390,13 +1390,13 @@ function actionRow(name, action, zone) {
     title.textContent = `Import the ${zone} zone file`;
     const size = bytesText(Number(action.artifact_bytes));
     note.textContent =
-      `The approved artifact is already on this disk${size ? ` (${size})` : ""}`
-      + " and is read from there. Nothing is fetched to produce it.";
+      `The approved artifact is already on this disk${size ? ` (${size})` : ""}.`
+      + " Subfinder reads it there and downloads nothing.";
   } else {
-    title.textContent = "Read the URLScan history already on file";
+    title.textContent = "Read the URLScan history on file";
     note.textContent =
-      "A passive search of scans that have already been run by others."
-      + " No scan is submitted, and the domain is not contacted.";
+      "A search of scans other people already ran. Subfinder submits no scan"
+      + " of its own and never touches the domain.";
   }
 
   row.append(box, title, note);
@@ -1433,20 +1433,19 @@ function renderOffer() {
   const ran = Boolean(enrich.job && enrich.job.terminal);
   if (!ran && open.length) {
     el.enrichLede.textContent =
-      `Nothing was read from ${apex} to produce this empty answer, and nothing`
-      + " below would be either. These records already exist elsewhere; they"
-      + " have just not been read into the index yet.";
+      "These records exist somewhere else and have never been read into the"
+      + ` index. Reading them in sends nothing to ${apex}.`;
   } else if (!ran) {
-    el.enrichLede.textContent = `Nothing is on hand to read in for ${apex} right now.`;
+    el.enrichLede.textContent = `Nothing on hand to read in for ${apex} right now.`;
   } else if (open.some((name) => enrich.retry.has(name))) {
     el.enrichLede.textContent =
-      "Nothing was read in from that one, so it is worth another go."
-      + " Asking again starts a fresh attempt rather than replaying the last.";
+      "That one read in nothing, so it is worth another go. Asking again"
+      + " starts a new run, not a replay of the last.";
   } else if (open.length) {
     el.enrichLede.textContent =
-      `One more record is on hand for ${apex}, and reads the same way: without contacting it.`;
+      `One more record is on hand for ${apex}. Reading it sends nothing to the domain either.`;
   } else {
-    el.enrichLede.textContent = `Nothing further is on hand for ${apex}.`;
+    el.enrichLede.textContent = `Nothing else is on hand for ${apex}.`;
   }
 
   el.enrichRun.hidden = open.length === 0;
@@ -1498,7 +1497,7 @@ function laneReport(name, lane, zone) {
       return {
         tone: "good",
         text: (read ? `Read in ${plural(read, "name")} so far.` : "Nothing new in this pass.")
-          + " Older history is queued and lands on its own; nothing more to do here.",
+          + " The rest of the history is queued and lands on its own.",
       };
     case "unavailable":
       return { tone: "quiet", text: ENRICH_ABSENT[name] };
@@ -1534,7 +1533,7 @@ function laneRow(name, report) {
    that failed and a lane that checkpointed - one of which is bad news and one
    of which is not. Reporting them the same way would misinform. */
 function laneSummary(job, reports) {
-  if (job.state === "failed") return "Nothing could be read in.";
+  if (job.state === "failed") return "Nothing read in.";
   const more = reports.some(([, report]) => report.more);
   const broke = reports.some(([, report]) => report.tone === "bad");
   const absent = reports.some(([, report]) => report.tone === "quiet");
@@ -1671,7 +1670,7 @@ async function submitEnrichment() {
   if (response.status === 429) {
     const wait = retryAfter(response.headers, 60);
     setEnrichNote(
-      `The daily allowance is spent, so this was not started. It resets in about ${plural(Math.ceil(wait / 60), "minute")}.`,
+      `The daily allowance is spent, so nothing started. It resets in about ${plural(Math.ceil(wait / 60), "minute")}.`,
       true,
     );
     syncEnrichSubmit();
@@ -1705,7 +1704,7 @@ async function submitEnrichment() {
   el.enrichBlocked.hidden = true;
   el.enrichRun.hidden = true;
   el.enrichLede.textContent =
-    `Reading records that already exist into the index. ${apex} is not contacted by any of it.`;
+    `Reading records that already exist into the index. None of it touches ${apex}.`;
   renderLanes(job);
 
   if (job.terminal) {
