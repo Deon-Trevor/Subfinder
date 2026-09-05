@@ -132,6 +132,7 @@ services:
       CTLOGS_CZDS_OUTPUT: /data/czds
       CTLOGS_SCHEDULER_INTERVAL: "86400"
       CTLOGS_SCHEDULER_RETRY_INTERVAL: "3600"
+      CTLOGS_SCHEDULER_ENQUEUE_WORKERS: "1"
       CTLOGS_CZDS_MAX_ZONES: ${CTLOGS_CZDS_MAX_ZONES:-25}
       CTLOGS_CZDS_MAX_BYTES: ${CTLOGS_CZDS_MAX_BYTES:-10737418240}
       CTLOGS_CZDS_INTERVAL: ${CTLOGS_CZDS_INTERVAL:-86400}
@@ -142,8 +143,6 @@ services:
       CTLOGS_STATIC_CT_URLS: "https://mon.willow.ct.letsencrypt.org/2026h2"
       CTLOGS_URLSCAN_APEXES_PER_RUN: "69"
       URLSCAN_API_KEY: ${URLSCAN_API_KEY:-}
-      CZDS_USERNAME: ${CZDS_USERNAME:-}
-      CZDS_PASSWORD: ${CZDS_PASSWORD:-}
       CTLOGS_URLSCAN_APEXES: ${CTLOGS_URLSCAN_APEXES:-*}
       CTLOGS_SCHEDULED_ARTIFACTS: ${CTLOGS_SCHEDULED_ARTIFACTS:-[]}
       CTLOGS_URLSCAN_DAILY_LIMIT: ${CTLOGS_URLSCAN_DAILY_LIMIT:-100000}
@@ -156,6 +155,34 @@ services:
       CTLOGS_CT_HISTORY_MAX_BATCHES_PER_LOG: "8"
       CTLOGS_CT_HISTORY_INTERVAL: "60"
       CTLOGS_CT_HISTORY_RETRY_INTERVAL: "3600"
+
+  czds-worker:
+    build: .
+    image: ctlogs:latest
+    entrypoint: ["python", "-m", "ctlogs.ingest_worker", "--kind", "czds"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ctlogs-data:/data
+      - ctlogs-control:/control
+    environment:
+      CTLOGS_DB_PATH: /data/ctlogs.sqlite3
+      CTLOGS_CONTROL_DB_PATH: /control/control.sqlite3
+      CTLOGS_CZDS_OUTPUT: /data/czds
+      CTLOGS_INGEST_WORKER_KIND: czds
+      CTLOGS_INGEST_WORKER_POLL_SECONDS: ${CTLOGS_INGEST_WORKER_POLL_SECONDS:-5}
+      CTLOGS_INGEST_WORKER_LEASE_SECONDS: ${CTLOGS_CZDS_WORKER_LEASE_SECONDS:-21600}
+      CTLOGS_CZDS_RUN_TIMEOUT_SECONDS: ${CTLOGS_CZDS_RUN_TIMEOUT_SECONDS:-21600}
+      CTLOGS_CZDS_MAX_ZONES: ${CTLOGS_CZDS_MAX_ZONES:-25}
+      CTLOGS_CZDS_MAX_BYTES: ${CTLOGS_CZDS_MAX_BYTES:-10737418240}
+      CZDS_USERNAME: ${CZDS_USERNAME:-}
+      CZDS_PASSWORD: ${CZDS_PASSWORD:-}
+    deploy:
+      replicas: 1
 
   enrichment-worker:
     build: .

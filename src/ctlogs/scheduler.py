@@ -349,9 +349,9 @@ def build_jobs(
 
     username = os.environ.get("CZDS_USERNAME")
     password = os.environ.get("CZDS_PASSWORD")
-    if bool(username) != bool(password):
+    if bool(username) != bool(password) and not use_worker_jobs:
         raise ValueError("CZDS_USERNAME and CZDS_PASSWORD must be set together")
-    if username and password and _enabled("CTLOGS_SCHEDULE_CZDS"):
+    if _enabled("CTLOGS_SCHEDULE_CZDS") and (use_worker_jobs or (username and password)):
         max_zones = _positive_environment_integer("CTLOGS_CZDS_MAX_ZONES", 25)
         czds_interval = _positive_environment_integer(
             "CTLOGS_CZDS_INTERVAL",

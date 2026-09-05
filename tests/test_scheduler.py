@@ -776,8 +776,8 @@ def test_scheduler_can_enqueue_czds_and_live_ct_worker_jobs(
     monkeypatch.setenv("CTLOGS_SCHEDULER_ENQUEUE_WORKERS", "1")
     monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "1")
     monkeypatch.setenv("CTLOGS_SCHEDULE_LIVE_CT", "1")
-    monkeypatch.setenv("CZDS_USERNAME", "user")
-    monkeypatch.setenv("CZDS_PASSWORD", "password")
+    monkeypatch.delenv("CZDS_USERNAME", raising=False)
+    monkeypatch.delenv("CZDS_PASSWORD", raising=False)
     monkeypatch.setenv("CTLOGS_CZDS_MAX_BYTES", "10")
 
     jobs = {job.name: job for job in build_jobs(database, control)}
@@ -820,8 +820,8 @@ def test_scheduler_enqueue_uses_new_cycle_key_after_worker_finishes(
     monkeypatch.setenv("CTLOGS_SCHEDULER_ENQUEUE_WORKERS", "1")
     monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "1")
     monkeypatch.setenv("CTLOGS_CZDS_INTERVAL", "60")
-    monkeypatch.setenv("CZDS_USERNAME", "user")
-    monkeypatch.setenv("CZDS_PASSWORD", "password")
+    monkeypatch.delenv("CZDS_USERNAME", raising=False)
+    monkeypatch.delenv("CZDS_PASSWORD", raising=False)
 
     job = build_jobs(database, control)[0]
     first = job.action()
@@ -846,8 +846,8 @@ def test_scheduler_requires_control_database_for_worker_enqueue(
     monkeypatch.setenv("CTLOGS_SCHEDULE_URLSCAN", "0")
     monkeypatch.setenv("CTLOGS_SCHEDULER_ENQUEUE_WORKERS", "1")
     monkeypatch.setenv("CTLOGS_SCHEDULE_CZDS", "1")
-    monkeypatch.setenv("CZDS_USERNAME", "user")
-    monkeypatch.setenv("CZDS_PASSWORD", "password")
+    monkeypatch.delenv("CZDS_USERNAME", raising=False)
+    monkeypatch.delenv("CZDS_PASSWORD", raising=False)
 
     with pytest.raises(ValueError, match="control_database is required"):
         build_jobs(database)
