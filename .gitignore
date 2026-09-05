@@ -13,3 +13,4 @@ data/
 .agents/
 .DS_Store
 .codex/
+main.py
