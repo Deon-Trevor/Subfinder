@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from ctlogs.database import Database
@@ -20,6 +21,12 @@ DEFAULT_INITIAL_BACKFILL = 1024
 DEFAULT_MAX_BATCHES_PER_LOG = 8
 DEFAULT_MAX_LOGS_PER_CYCLE = 8
 LIVE_CT_CYCLE_SOURCE = "direct_ct:cycle"
+
+
+@dataclass(frozen=True)
+class PollAttempt:
+    hostname_count: int
+    succeeded: bool = True
 
 
 def _usable_log_urls() -> list[str]:
@@ -53,7 +60,7 @@ def _poll_one_log(
     batch: int = DEFAULT_BATCH_SIZE,
     initial_backfill: int = DEFAULT_INITIAL_BACKFILL,
     max_batches: int = DEFAULT_MAX_BATCHES_PER_LOG,
-) -> int:
+) -> PollAttempt:
     client = DirectCTClient(database)
     try:
         sth = client.get_sth(log_url)
@@ -65,7 +72,7 @@ def _poll_one_log(
             log.debug("get-sth skipped %s: %s", log_url, e)
         else:
             log.warning("get-sth failed %s: %s", log_url, e)
-        return 0
+        return PollAttempt(0, succeeded=False)
     source = f"direct_ct:{log_url}"
     state = database.get_ingest_state(source)
     try:
@@ -77,7 +84,7 @@ def _poll_one_log(
     except Exception:
         cursor = max(0, tree_size - initial_backfill)
     if cursor >= tree_size:
-        return 0
+        return PollAttempt(0)
 
     hostname_count = 0
     for _attempt in range(max_batches):
@@ -88,10 +95,10 @@ def _poll_one_log(
             result = client.poll_and_store(log_url, cursor, end)
         except Exception as e:
             log.warning("poll_and_store failed %s %s-%s: %s", log_url, cursor, end, e)
-            break
+            return PollAttempt(hostname_count, succeeded=False)
         if result.entry_count < 1:
             log.warning("get-entries returned no entries for %s %s-%s", log_url, cursor, end)
-            break
+            return PollAttempt(hostname_count, succeeded=False)
 
         cursor += result.entry_count
         hostname_count += result.hostname_count
@@ -100,7 +107,7 @@ def _poll_one_log(
             cursor=str(cursor),
             updated_at=datetime.now(UTC).isoformat(),
         )
-    return hostname_count
+    return PollAttempt(hostname_count)
 
 
 def _poll_one_static_log(
@@ -109,13 +116,13 @@ def _poll_one_static_log(
     batch: int = DEFAULT_BATCH_SIZE,
     initial_backfill: int = DEFAULT_INITIAL_BACKFILL,
     max_batches: int = DEFAULT_MAX_BATCHES_PER_LOG,
-) -> int:
+) -> PollAttempt:
     client = StaticCTClient(database)
     try:
         tree_size = client.get_tree_size(monitoring_url)
     except Exception as error:
         log.warning("Static CT checkpoint failed %s: %s", monitoring_url, error)
-        return 0
+        return PollAttempt(0, succeeded=False)
 
     source = f"static_ct:{monitoring_url}"
     state = database.get_ingest_state(source)
@@ -125,7 +132,7 @@ def _poll_one_static_log(
         else max(0, tree_size - initial_backfill)
     )
     if cursor >= tree_size:
-        return 0
+        return PollAttempt(0)
 
     hostname_count = 0
     for _attempt in range(max_batches):
@@ -147,7 +154,7 @@ def _poll_one_static_log(
                 end,
                 error,
             )
-            break
+            return PollAttempt(hostname_count, succeeded=False)
         if result.entry_count < 1:
             log.warning(
                 "Static CT returned no entries for %s %s-%s",
@@ -155,7 +162,7 @@ def _poll_one_static_log(
                 cursor,
                 end,
             )
-            break
+            return PollAttempt(hostname_count, succeeded=False)
         cursor += result.entry_count
         hostname_count += result.hostname_count
         database.upsert_ingest_state(
@@ -163,7 +170,7 @@ def _poll_one_static_log(
             cursor=str(cursor),
             updated_at=datetime.now(UTC).isoformat(),
         )
-    return hostname_count
+    return PollAttempt(hostname_count)
 
 
 async def poll_once(
@@ -181,10 +188,10 @@ async def poll_once(
 
     semaphore = asyncio.Semaphore(MAX_PARALLEL_LOG_POLLS)
 
-    async def _run(kind: str, url: str) -> int:
+    async def _run(kind: str, url: str) -> PollAttempt:
         async with semaphore:
             poller = _poll_one_log if kind == "rfc6962" else _poll_one_static_log
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 poller,
                 database,
                 url,
@@ -192,6 +199,9 @@ async def poll_once(
                 initial_backfill,
                 max_batches,
             )
+            if isinstance(result, PollAttempt):
+                return result
+            return PollAttempt(int(result))
 
     jobs = [
         *(('rfc6962', url) for url in urls),
@@ -208,9 +218,16 @@ async def poll_once(
         jobs = jobs[offset:] + jobs[:offset]
         jobs = jobs[:max_logs]
         next_cycle_offset = (offset + max_logs) % len(urls + static_urls)
-    for n in await asyncio.gather(*(_run(kind, url) for kind, url in jobs)):
-        total += n
+    results = await asyncio.gather(*(_run(kind, url) for kind, url in jobs))
+    for result in results:
+        total += result.hostname_count
     if next_cycle_offset is not None:
+        succeeded_count = 0
+        for result in results:
+            if not result.succeeded:
+                break
+            succeeded_count += 1
+        next_cycle_offset = (next_cycle_offset - (len(results) - succeeded_count)) % len(urls + static_urls)
         await asyncio.to_thread(
             database.upsert_ingest_state,
             LIVE_CT_CYCLE_SOURCE,
@@ -226,6 +243,7 @@ async def worker_loop(
     batch: int = DEFAULT_BATCH_SIZE,
     initial_backfill: int = DEFAULT_INITIAL_BACKFILL,
     max_batches: int = DEFAULT_MAX_BATCHES_PER_LOG,
+    max_logs: int = DEFAULT_MAX_LOGS_PER_CYCLE,
 ) -> None:
     if interval < 1:
         raise ValueError("interval must be a positive integer")
@@ -235,6 +253,8 @@ async def worker_loop(
         raise ValueError("initial_backfill must be a positive integer")
     if max_batches < 1:
         raise ValueError("max_batches must be a positive integer")
+    if max_logs < 1:
+        raise ValueError("max_logs must be a positive integer")
 
     log.info("ct worker started: polling %s logs every %ss", "all usable", interval)
     while True:
@@ -244,6 +264,7 @@ async def worker_loop(
                 batch=batch,
                 initial_backfill=initial_backfill,
                 max_batches=max_batches,
+                max_logs=max_logs,
             )
             if n:
                 log.info("ct worker inserted %s hostnames", n)

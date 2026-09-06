@@ -115,6 +115,70 @@ async def test_poll_once_does_not_advance_rotation_when_cycle_fails(
 
 
 @pytest.mark.anyio
+async def test_poll_once_does_not_advance_rotation_on_swallowed_log_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    urls = ["https://bad.example", "https://good.example"]
+    database = Database(tmp_path / "worker.sqlite3")
+    database.initialize()
+
+    monkeypatch.setattr(worker, "_usable_log_urls", lambda: urls)
+    monkeypatch.setattr(worker, "_static_log_urls", lambda: [])
+
+    class Client:
+        def __init__(self, _database: Database) -> None:
+            pass
+
+        def get_sth(self, _log_url: str) -> dict[str, int]:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(worker, "DirectCTClient", Client)
+    monkeypatch.setattr(
+        worker.asyncio,
+        "to_thread",
+        lambda function, *args, **kwargs: asyncio.sleep(0, result=function(*args, **kwargs)),
+    )
+
+    assert await worker.poll_once(database, max_logs=1) == 0
+
+    cycle_state = database.get_ingest_state(worker.LIVE_CT_CYCLE_SOURCE)
+    assert cycle_state is not None
+    assert cycle_state["cursor"] == "0"
+
+
+@pytest.mark.anyio
+async def test_poll_once_advances_rotation_past_contiguous_successes_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    urls = ["https://good-1.example", "https://bad.example", "https://good-2.example"]
+    database = Database(tmp_path / "worker.sqlite3")
+    database.initialize()
+
+    monkeypatch.setattr(worker, "_usable_log_urls", lambda: urls)
+    monkeypatch.setattr(worker, "_static_log_urls", lambda: [])
+
+    def poll_one(_database: Database, url: str, *_args) -> worker.PollAttempt:
+        if "bad" in url:
+            return worker.PollAttempt(0, succeeded=False)
+        return worker.PollAttempt(1)
+
+    monkeypatch.setattr(worker, "_poll_one_log", poll_one)
+    monkeypatch.setattr(
+        worker.asyncio,
+        "to_thread",
+        lambda function, *args, **kwargs: asyncio.sleep(0, result=function(*args, **kwargs)),
+    )
+
+    assert await worker.poll_once(database, max_logs=2) == 1
+
+    cycle_state = database.get_ingest_state(worker.LIVE_CT_CYCLE_SOURCE)
+    assert cycle_state is not None
+    assert cycle_state["cursor"] == "1"
+
+
+@pytest.mark.anyio
 async def test_poll_once_returns_zero_without_logs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -161,7 +225,7 @@ def test_new_log_starts_near_tail_and_checkpoints_actual_response_count(
         max_batches=1,
     )
 
-    assert count == 3
+    assert count == worker.PollAttempt(3)
     assert ranges == [(9_900, 9_999)]
     assert database.get_ingest_state("direct_ct:https://log.example")["cursor"] == "9902"
 
