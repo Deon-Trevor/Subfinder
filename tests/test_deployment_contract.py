@@ -14,6 +14,12 @@ def _example_keys() -> set[str]:
     }
 
 
+def _compose_default(name: str, compose: str) -> int:
+    match = re.search(rf"{name}:-([0-9]+)", compose)
+    assert match is not None
+    return int(match.group(1))
+
+
 def test_compose_uses_one_deployment_env_file() -> None:
     compose = (ROOT / "docker-compose.yml").read_text()
 
@@ -44,3 +50,16 @@ def test_edge_re_resolves_the_recreated_api_container() -> None:
     assert "resolver 127.0.0.11" in nginx
     assert "zone subfinder_api" in nginx
     assert "server ctlogs:8200 resolve;" in nginx
+
+
+def test_live_ct_worker_lease_outlives_cycle_timeout_and_work_is_bounded() -> None:
+    compose = (ROOT / "docker-compose.yml").read_text()
+
+    lease = _compose_default("CTLOGS_LIVE_CT_WORKER_LEASE_SECONDS", compose)
+    timeout = _compose_default("CTLOGS_LIVE_CT_CYCLE_TIMEOUT_SECONDS", compose)
+    max_batches = _compose_default("CTLOGS_LIVE_CT_MAX_BATCHES_PER_LOG", compose)
+
+    assert lease > timeout
+    assert lease - timeout >= 300
+    assert timeout == 900
+    assert max_batches == 2
