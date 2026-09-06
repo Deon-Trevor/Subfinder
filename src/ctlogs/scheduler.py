@@ -459,6 +459,10 @@ def build_jobs(
             "CTLOGS_LIVE_CT_MAX_BATCHES_PER_LOG",
             8,
         )
+        live_ct_max_logs = _positive_environment_integer(
+            "CTLOGS_LIVE_CT_MAX_LOGS_PER_CYCLE",
+            8,
+        )
         if use_worker_jobs:
             assert control_database is not None
             jobs.append(
@@ -474,6 +478,7 @@ def build_jobs(
                             "batch": live_ct_batch_size,
                             "initial_backfill": live_ct_initial_backfill,
                             "max_batches": live_ct_max_batches,
+                            "max_logs": live_ct_max_logs,
                         },
                     ),
                 )
@@ -490,6 +495,7 @@ def build_jobs(
                             batch=live_ct_batch_size,
                             initial_backfill=live_ct_initial_backfill,
                             max_batches=live_ct_max_batches,
+                            max_logs=live_ct_max_logs,
                         )
                     ),
                 )

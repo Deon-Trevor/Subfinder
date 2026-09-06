@@ -218,7 +218,13 @@ def test_live_ct_worker_claims_runs_and_finishes_job(tmp_path: Path, monkeypatch
     assert finished.job_id == job.job_id
     assert finished.state == "done"
     assert json.loads(finished.result_json) == {"hostnames": 11}
-    assert seen == {"batch": 8, "initial_backfill": 9, "max_batches": 2, "seconds": 900}
+    assert seen == {
+        "batch": 8,
+        "initial_backfill": 9,
+        "max_batches": 2,
+        "max_logs": 8,
+        "seconds": 900,
+    }
 
 
 def test_live_ct_worker_clamps_payload_to_environment_bounds(tmp_path: Path, monkeypatch) -> None:
@@ -240,6 +246,7 @@ def test_live_ct_worker_clamps_payload_to_environment_bounds(tmp_path: Path, mon
     monkeypatch.setenv("CTLOGS_LIVE_CT_BATCH_SIZE", "3")
     monkeypatch.setenv("CTLOGS_LIVE_CT_INITIAL_BACKFILL", "4")
     monkeypatch.setenv("CTLOGS_LIVE_CT_MAX_BATCHES_PER_LOG", "5")
+    monkeypatch.setenv("CTLOGS_LIVE_CT_MAX_LOGS_PER_CYCLE", "6")
     monkeypatch.setattr(
         "ctlogs.ingest_worker._run_live_ct_with_deadline",
         fake_run_live_ct_with_deadline,
@@ -250,6 +257,7 @@ def test_live_ct_worker_clamps_payload_to_environment_bounds(tmp_path: Path, mon
         "batch": 3,
         "initial_backfill": 4,
         "max_batches": 5,
+        "max_logs": 6,
         "seconds": 900,
     }
 

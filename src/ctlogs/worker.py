@@ -18,6 +18,8 @@ MAX_PARALLEL_LOG_POLLS = 4
 DEFAULT_BATCH_SIZE = 1024
 DEFAULT_INITIAL_BACKFILL = 1024
 DEFAULT_MAX_BATCHES_PER_LOG = 8
+DEFAULT_MAX_LOGS_PER_CYCLE = 8
+LIVE_CT_CYCLE_SOURCE = "direct_ct:cycle"
 
 
 def _usable_log_urls() -> list[str]:
@@ -169,6 +171,7 @@ async def poll_once(
     batch: int = DEFAULT_BATCH_SIZE,
     initial_backfill: int = DEFAULT_INITIAL_BACKFILL,
     max_batches: int = DEFAULT_MAX_BATCHES_PER_LOG,
+    max_logs: int | None = None,
 ) -> int:
     urls = await asyncio.to_thread(_usable_log_urls)
     static_urls = await asyncio.to_thread(_static_log_urls)
@@ -194,8 +197,26 @@ async def poll_once(
         *(('rfc6962', url) for url in urls),
         *(('static', url) for url in static_urls),
     ]
+    next_cycle_offset: int | None = None
+    if max_logs is not None and max_logs > 0 and len(jobs) > max_logs:
+        state = await asyncio.to_thread(database.get_ingest_state, LIVE_CT_CYCLE_SOURCE)
+        try:
+            offset = int(state["cursor"]) if state and str(state.get("cursor", "")).isdigit() else 0
+        except Exception:
+            offset = 0
+        offset %= len(jobs)
+        jobs = jobs[offset:] + jobs[:offset]
+        jobs = jobs[:max_logs]
+        next_cycle_offset = (offset + max_logs) % len(urls + static_urls)
     for n in await asyncio.gather(*(_run(kind, url) for kind, url in jobs)):
         total += n
+    if next_cycle_offset is not None:
+        await asyncio.to_thread(
+            database.upsert_ingest_state,
+            LIVE_CT_CYCLE_SOURCE,
+            cursor=str(next_cycle_offset),
+            updated_at=datetime.now(UTC).isoformat(),
+        )
     return total
 
 

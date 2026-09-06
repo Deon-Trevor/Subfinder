@@ -155,6 +155,7 @@ def _live_ct_child(
     batch: int,
     initial_backfill: int,
     max_batches: int,
+    max_logs: int,
     queue,
 ) -> None:
     try:
@@ -166,6 +167,7 @@ def _live_ct_child(
                 batch=batch,
                 initial_backfill=initial_backfill,
                 max_batches=max_batches,
+                max_logs=max_logs,
             )
         )
         queue.put(("ok", hostnames))
@@ -179,6 +181,7 @@ def _run_live_ct_with_deadline(
     batch: int,
     initial_backfill: int,
     max_batches: int,
+    max_logs: int,
     seconds: int,
 ) -> int:
     queue = multiprocessing.Queue(maxsize=1)
@@ -189,6 +192,7 @@ def _run_live_ct_with_deadline(
             batch,
             initial_backfill,
             max_batches,
+            max_logs,
             queue,
         ),
     )
@@ -217,6 +221,10 @@ def run_live_ct_job(database: Database, job: IngestJob) -> dict[str, object]:
         "CTLOGS_LIVE_CT_MAX_BATCHES_PER_LOG",
         8,
     )
+    max_logs_bound = _positive_environment_integer(
+        "CTLOGS_LIVE_CT_MAX_LOGS_PER_CYCLE",
+        8,
+    )
     batch = _bounded_payload_integer(
         payload,
         "batch",
@@ -235,6 +243,12 @@ def run_live_ct_job(database: Database, job: IngestJob) -> dict[str, object]:
         default=max_batches_bound,
         upper_bound=max_batches_bound,
     )
+    max_logs = _bounded_payload_integer(
+        payload,
+        "max_logs",
+        default=max_logs_bound,
+        upper_bound=max_logs_bound,
+    )
     run_timeout = _positive_environment_integer(
         "CTLOGS_LIVE_CT_CYCLE_TIMEOUT_SECONDS",
         DEFAULT_LIVE_CT_RUN_TIMEOUT_SECONDS,
@@ -245,6 +259,7 @@ def run_live_ct_job(database: Database, job: IngestJob) -> dict[str, object]:
         batch=batch,
         initial_backfill=initial_backfill,
         max_batches=max_batches,
+        max_logs=max_logs,
         seconds=run_timeout,
     )
     return {"hostnames": hostnames}

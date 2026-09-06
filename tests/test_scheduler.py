@@ -645,10 +645,10 @@ def test_live_ct_job_is_explicit_and_runs_inside_the_writer_scheduler(
     monkeypatch.setenv("CTLOGS_SCHEDULE_LIVE_CT", "1")
     monkeypatch.delenv("CZDS_USERNAME", raising=False)
     monkeypatch.delenv("CZDS_PASSWORD", raising=False)
-    calls: list[tuple[int, int, int]] = []
+    calls: list[tuple[int, int, int, int]] = []
 
-    async def poll(_database, *, batch, initial_backfill, max_batches):
-        calls.append((batch, initial_backfill, max_batches))
+    async def poll(_database, *, batch, initial_backfill, max_batches, max_logs):
+        calls.append((batch, initial_backfill, max_batches, max_logs))
         return 7
 
     monkeypatch.setattr("ctlogs.scheduler.poll_once", poll)
@@ -656,7 +656,7 @@ def test_live_ct_job_is_explicit_and_runs_inside_the_writer_scheduler(
 
     assert [job.name for job in jobs] == ["live-ct"]
     assert jobs[0].action() == 7
-    assert calls == [(1024, 1024, 8)]
+    assert calls == [(1024, 1024, 8, 8)]
 
 
 def test_singleton_lock_rejects_a_second_scheduler(tmp_path: Path) -> None:
@@ -798,7 +798,7 @@ def test_scheduler_can_enqueue_czds_and_live_ct_worker_jobs(
     assert jobs["live-ct"].action()["created"] is True
     live = control.ingest_jobs(kind="live-ct")[0]
     assert live.payload_json == (
-        '{"batch":1024,"initial_backfill":1024,"max_batches":8}'
+        '{"batch":1024,"initial_backfill":1024,"max_batches":8,"max_logs":8}'
     )
 
     assert jobs["czds"].action()["created"] is False

@@ -59,9 +59,11 @@ def test_live_ct_worker_lease_outlives_cycle_timeout_and_work_is_bounded() -> No
     timeout = _compose_default("CTLOGS_LIVE_CT_CYCLE_TIMEOUT_SECONDS", compose)
     batch_size = _compose_default("CTLOGS_LIVE_CT_BATCH_SIZE", compose)
     max_batches = _compose_default("CTLOGS_LIVE_CT_MAX_BATCHES_PER_LOG", compose)
+    max_logs = _compose_default("CTLOGS_LIVE_CT_MAX_LOGS_PER_CYCLE", compose)
 
     assert lease > timeout
     assert lease - timeout >= 300
     assert timeout == 900
     assert batch_size == 512
     assert max_batches == 1
+    assert max_logs == 8

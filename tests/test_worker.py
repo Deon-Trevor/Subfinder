@@ -59,6 +59,62 @@ async def test_poll_once_processes_every_log_within_the_parallel_cap(
 
 
 @pytest.mark.anyio
+async def test_poll_once_limits_and_rotates_logs_per_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    urls = [f"https://log-{number}.example" for number in range(10)]
+    database = Database(tmp_path / "worker.sqlite3")
+    database.initialize()
+    visited: list[str] = []
+
+    monkeypatch.setattr(worker, "_usable_log_urls", lambda: urls)
+    monkeypatch.setattr(worker, "_static_log_urls", lambda: [])
+    monkeypatch.setattr(worker, "_poll_one_log", lambda _db, url, *_args: visited.append(url) or 1)
+    monkeypatch.setattr(
+        worker.asyncio,
+        "to_thread",
+        lambda function, *args, **kwargs: asyncio.sleep(0, result=function(*args, **kwargs)),
+    )
+
+    assert await worker.poll_once(database, max_logs=4) == 4
+    assert await worker.poll_once(database, max_logs=4) == 4
+
+    assert visited == [*urls[:4], *urls[4:8]]
+    cycle_state = database.get_ingest_state(worker.LIVE_CT_CYCLE_SOURCE)
+    assert cycle_state is not None
+    assert cycle_state["cursor"] == "8"
+
+
+@pytest.mark.anyio
+async def test_poll_once_does_not_advance_rotation_when_cycle_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    urls = [f"https://log-{number}.example" for number in range(10)]
+    database = Database(tmp_path / "worker.sqlite3")
+    database.initialize()
+
+    monkeypatch.setattr(worker, "_usable_log_urls", lambda: urls)
+    monkeypatch.setattr(worker, "_static_log_urls", lambda: [])
+
+    def fail_poll(*_args) -> int:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(worker, "_poll_one_log", fail_poll)
+    monkeypatch.setattr(
+        worker.asyncio,
+        "to_thread",
+        lambda function, *args, **kwargs: asyncio.sleep(0, result=function(*args, **kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await worker.poll_once(database, max_logs=4)
+
+    assert database.get_ingest_state(worker.LIVE_CT_CYCLE_SOURCE) is None
+
+
+@pytest.mark.anyio
 async def test_poll_once_returns_zero_without_logs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -68,7 +124,7 @@ async def test_poll_once_returns_zero_without_logs(
     monkeypatch.setattr(
         worker.asyncio,
         "to_thread",
-        lambda function, *args: asyncio.sleep(0, result=function(*args)),
+        lambda function, *args, **kwargs: asyncio.sleep(0, result=function(*args, **kwargs)),
     )
 
     assert await worker.poll_once(Database(tmp_path / "worker.sqlite3")) == 0
