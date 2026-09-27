@@ -1,12 +1,72 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
+import { Container, ContainerProxy } from "@cloudflare/containers";
 
 import {
+  appendCzdsChunk,
+  beginCzdsArtifact,
   claimCzdsJob,
+  completeCzdsArtifact,
+  czdsJobUsesContainer,
   failCzdsJob,
+  inspectCzdsContainerJob,
   publishCzdsJob,
   scheduleCzds,
   stageCzdsJob,
+  startCzdsContainerJob,
 } from "./core.js";
+
+export { ContainerProxy };
+
+
+export class CzdsParser extends Container {
+  defaultPort = 8080;
+  sleepAfter = "5m";
+}
+
+
+CzdsParser.outboundByHost = {
+  "czds.internal": async (request, env) => {
+    if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
+    const url = new URL(request.url);
+    const body = await request.json();
+    try {
+      if (url.pathname === "/begin") {
+        await beginCzdsArtifact(env, body.job_id, body.fingerprint);
+      } else if (url.pathname === "/chunk") {
+        await appendCzdsChunk(env, body.job_id, body.chunk_index, body.records);
+      } else if (url.pathname === "/complete") {
+        return Response.json(await completeCzdsArtifact(
+          env, body.job_id, body.chunk_count, body.hostname_count,
+        ));
+      } else {
+        return new Response("not found", { status: 404 });
+      }
+      return Response.json({ ok: true });
+    } catch (error) {
+      return Response.json({ detail: String(error) }, { status: 409 });
+    }
+  },
+};
+
+
+async function stageInContainer(env, step, jobId) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const launched = await step.do(`start CZDS parser ${attempt}`, async () => (
+      await startCzdsContainerJob(env, jobId)
+    ));
+    if (launched.state === "staged" || launched.state === "complete") return launched;
+    for (let poll = 0; poll < 720; poll += 1) {
+      await step.sleep(`wait for CZDS parser ${attempt}-${poll}`, "1 minute");
+      const status = await step.do(`inspect CZDS parser ${attempt}-${poll}`, async () => (
+        await inspectCzdsContainerJob(env, jobId)
+      ));
+      if (status.state === "staged") return status;
+      if (status.state === "failed" || status.state === "idle") break;
+      if (status.state !== "running") throw new Error("CZDS parser returned an invalid state");
+    }
+  }
+  throw new Error("CZDS parser did not complete after three attempts");
+}
 
 
 export class CzdsIngestionWorkflow extends WorkflowEntrypoint {
@@ -17,14 +77,20 @@ export class CzdsIngestionWorkflow extends WorkflowEntrypoint {
         await claimCzdsJob(this.env, jobId)
       ));
       if (claim.state === "complete") return claim;
-      await step.do(
-        "download and stage CZDS deltas",
-        {
-          retries: { limit: 3, delay: "1 minute", backoff: "exponential" },
-          timeout: "30 minutes",
-        },
-        async () => await stageCzdsJob(this.env, jobId),
-      );
+      if (await step.do("select CZDS parser", async () => (
+        await czdsJobUsesContainer(this.env, jobId)
+      ))) {
+        await stageInContainer(this.env, step, jobId);
+      } else {
+        await step.do(
+          "download and stage CZDS deltas",
+          {
+            retries: { limit: 3, delay: "1 minute", backoff: "exponential" },
+            timeout: "30 minutes",
+          },
+          async () => await stageCzdsJob(this.env, jobId),
+        );
+      }
       return await step.do(
         "publish CZDS deltas",
         async () => await publishCzdsJob(this.env, jobId),

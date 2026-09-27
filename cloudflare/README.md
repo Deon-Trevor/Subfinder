@@ -59,7 +59,9 @@ npx wrangler d1 migrations apply subfinder-czds-control --remote --config wrangl
 
 The Worker accepts download URLs only from the two documented ICANN CZDS hosts and requires an artifact fingerprint before parsing. `CZDS_MAX_ZONES` limits zones selected per scheduled pass; it does not truncate a selected zone. `CZDS_ONLY_ZONE` restricts a staging deployment to one approved zone. The download step currently has a 30-minute timeout.
 
-The staging `.com` run on 2026-09-27 exposed the limit of the single-step parser. The compressed artifact was 4,961,932,317 bytes. Two attempts exceeded Worker CPU time; the third lost its network connection. The failed test left 140,000 records in seven partial staging deltas. The job is `failed`, its R2 objects remain in the staging bucket, and no delta was sent to compaction. The staging Cron is disabled. Do not enable `.com` in production until a chunked or Container parser completes a full artifact and publishes its deltas.
+The first staging `.com` run on 2026-09-27 exceeded Worker CPU time while parsing a 4,961,932,317-byte compressed artifact. The replacement parser runs in a Cloudflare Container for the zones listed in `CZDS_CONTAINER_ZONES`. The Workflow polls its state without holding a long CPU-bound step. The Container streams the zone, and its private outbound handler writes bounded deltas through the existing R2 and D1 bindings. Only a complete gzip stream with matching artifact length and contiguous delta counts can move the job to `staged`. The earlier seven partial staging deltas were not published. The staging Cron remains disabled.
+
+The staging compaction Queue consumer was temporarily removed while the new `.com` run is verified. This prevents its large delta set from reducing against an empty catalog before the seed is staged. Reconcile the queued `.com` deltas with the seed before reconnecting the consumer. Do not enable `.com` in production until the full staging run completes and its cost and result counts are reviewed.
 
 ## Generation reduction and publication
 

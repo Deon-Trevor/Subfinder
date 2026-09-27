@@ -7,7 +7,10 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { Miniflare } from "miniflare";
 
 import {
+  appendCzdsChunk,
+  beginCzdsArtifact,
   claimCzdsJob,
+  completeCzdsArtifact,
   publishCzdsJob,
   scheduleCzds,
   stageCzdsJob,
@@ -236,4 +239,29 @@ test("completed zone publishes large delta sets in bounded queue batches", async
     state: "complete", duplicate: false, deltas: 105,
   });
   assert.deepEqual(batchSizes, [100, 5]);
+});
+
+
+test("container callbacks refuse incomplete, reordered, or changed artifacts", async () => {
+  const env = {
+    CONTROL: database,
+    CATALOG: bucket,
+    CZDS_USERNAME: "user",
+    CZDS_PASSWORD: "password",
+    CZDS_DELTA_RECORDS: "2",
+    CZDS_FETCHER: { fetch: fakeFetcher(gzipSync("example 3600 IN NS ns.example.\n")) },
+    CZDS_WORKFLOW: { create: async () => {} },
+  };
+  await scheduleCzds(env, new Date("2026-09-27T05:00:00.000Z"));
+  const jobId = (await database.prepare("SELECT job_id FROM czds_jobs").first()).job_id;
+  await claimCzdsJob(env, jobId);
+  await beginCzdsArtifact(env, jobId, '"artifact"||100');
+  const first = [{ apex: "example.com", hostname: "example.com", first_seen: null }];
+  await assert.rejects(appendCzdsChunk(env, jobId, 1, first), /in order/);
+  await appendCzdsChunk(env, jobId, 0, first);
+  await assert.rejects(completeCzdsArtifact(env, jobId, 2, 1), /do not match/);
+  await assert.rejects(beginCzdsArtifact(env, jobId, '"different"||100'), /changed/);
+  assert.deepEqual(await completeCzdsArtifact(env, jobId, 1, 1), {
+    state: "staged", deltaCount: 1, hostnameCount: 1,
+  });
 });

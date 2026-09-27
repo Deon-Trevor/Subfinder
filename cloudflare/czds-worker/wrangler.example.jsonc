@@ -4,6 +4,16 @@
   "main": "src/index.js",
   "compatibility_date": "2026-09-27",
   "triggers": { "crons": ["0 2 * * *"] },
+  "containers": [
+    { "class_name": "CzdsParser", "image": "../Dockerfile.czds",
+      "max_instances": 2, "instance_type": "standard-2" }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "CZDS_PARSER", "class_name": "CzdsParser" }]
+  },
+  "migrations": [
+    { "tag": "v1-czds-parser", "new_sqlite_classes": ["CzdsParser"] }
+  ],
   "r2_buckets": [
     { "binding": "CATALOG", "bucket_name": "subfinder-index-spike" }
   ],
@@ -28,6 +38,7 @@
     }
   ],
   "vars": {
+    "CZDS_CONTAINER_ZONES": "com",
     "CZDS_DELTA_RECORDS": "20000",
     "CZDS_MAX_ZONES": "25",
     "CZDS_REFRESH_SECONDS": "86400"

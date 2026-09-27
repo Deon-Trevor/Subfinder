@@ -319,6 +319,81 @@ async function writeChunk(env, job, chunkIndex, records) {
 }
 
 
+export async function beginCzdsArtifact(env, jobId, fingerprint) {
+  if (typeof fingerprint !== "string" || fingerprint === "||" || !fingerprint) {
+    throw new Error("CZDS zone response has no stable artifact fingerprint");
+  }
+  const job = await env.CONTROL.prepare(
+    "SELECT state, source_fingerprint FROM czds_jobs WHERE job_id = ?",
+  ).bind(jobId).first();
+  if (job?.state !== "running") throw new Error("CZDS job is not running");
+  if (job.source_fingerprint !== null && job.source_fingerprint !== fingerprint) {
+    throw new Error("CZDS zone artifact changed while its job was running");
+  }
+  await env.CONTROL.batch([
+    env.CONTROL.prepare(
+      "UPDATE czds_jobs SET source_fingerprint = ?, updated_at = ? WHERE job_id = ?",
+    ).bind(fingerprint, new Date().toISOString(), jobId),
+    env.CONTROL.prepare("DELETE FROM czds_job_deltas WHERE job_id = ?").bind(jobId),
+  ]);
+}
+
+
+export async function appendCzdsChunk(env, jobId, chunkIndex, records) {
+  const limit = positiveInteger(env.CZDS_DELTA_RECORDS, 20000);
+  if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0 ||
+      !Array.isArray(records) || records.length < 1 || records.length > limit) {
+    throw new Error("CZDS chunk is invalid");
+  }
+  const job = await env.CONTROL.prepare(
+    "SELECT job_id, zone, state, source_fingerprint, created_at FROM czds_jobs WHERE job_id = ?",
+  ).bind(jobId).first();
+  if (job?.state !== "running" || job.source_fingerprint === null) {
+    throw new Error("CZDS artifact has not started");
+  }
+  for (const record of records) {
+    if (typeof record?.hostname !== "string" ||
+        normalizeHostname(record.hostname) !== record.hostname ||
+        apexForHostname(record.hostname) !== record.apex ||
+        !record.hostname.endsWith(`.${job.zone}`) ||
+        record.first_seen !== null) {
+      throw new Error("CZDS chunk has an invalid record");
+    }
+  }
+  const last = await env.CONTROL.prepare(
+    "SELECT MAX(chunk_index) AS last_index FROM czds_job_deltas WHERE job_id = ?",
+  ).bind(jobId).first();
+  if (chunkIndex !== Number(last.last_index ?? -1) + 1) {
+    throw new Error("CZDS chunks must be appended in order");
+  }
+  await writeChunk(env, job, chunkIndex, records);
+}
+
+
+export async function completeCzdsArtifact(env, jobId, chunkCount, hostnameCount) {
+  if (!Number.isSafeInteger(chunkCount) || chunkCount < 1 ||
+      !Number.isSafeInteger(hostnameCount) || hostnameCount < 1) {
+    throw new Error("CZDS completion counts are invalid");
+  }
+  const counts = await env.CONTROL.prepare(
+    `SELECT COUNT(*) AS chunks, COALESCE(SUM(record_count), 0) AS hostnames,
+            MAX(chunk_index) AS last_index FROM czds_job_deltas WHERE job_id = ?`,
+  ).bind(jobId).first();
+  if (counts.chunks !== chunkCount || counts.hostnames !== hostnameCount ||
+      counts.last_index !== chunkCount - 1) {
+    throw new Error("CZDS staged delta counts do not match the completed artifact");
+  }
+  const updated = await env.CONTROL.prepare(
+    `UPDATE czds_jobs SET state = 'staged', hostname_count = ?, delta_count = ?,
+       error = NULL, updated_at = ? WHERE job_id = ? AND state = 'running'`,
+  ).bind(hostnameCount, chunkCount, new Date().toISOString(), jobId).run();
+  if (Number(updated.meta?.changes ?? 0) !== 1) {
+    throw new Error("CZDS job is not running");
+  }
+  return { state: "staged", deltaCount: chunkCount, hostnameCount };
+}
+
+
 export async function stageCzdsJob(env, jobId) {
   requireCredentials(env);
   const job = await env.CONTROL.prepare(
@@ -346,18 +421,7 @@ export async function stageCzdsJob(env, jobId) {
     response.headers.get("last-modified") ?? "",
     response.headers.get("content-length") ?? "",
   ].join("|");
-  if (fingerprint === "||") {
-    throw new Error("CZDS zone response has no stable artifact fingerprint");
-  }
-  if (job.source_fingerprint !== null && job.source_fingerprint !== fingerprint) {
-    throw new Error("CZDS zone artifact changed while its job was running");
-  }
-  await env.CONTROL.batch([
-    env.CONTROL.prepare(
-      `UPDATE czds_jobs SET source_fingerprint = ?, updated_at = ? WHERE job_id = ?`,
-    ).bind(fingerprint, new Date().toISOString(), jobId),
-    env.CONTROL.prepare("DELETE FROM czds_job_deltas WHERE job_id = ?").bind(jobId),
-  ]);
+  await beginCzdsArtifact(env, jobId, fingerprint);
 
   const maxRecords = positiveInteger(env.CZDS_DELTA_RECORDS, 20000);
   const stream = await bodyWithDetectedCompression(response.body);
@@ -374,7 +438,7 @@ export async function stageCzdsJob(env, jobId) {
     const values = [...records.values()].sort((left, right) => (
       left.apex.localeCompare(right.apex) || left.hostname.localeCompare(right.hostname)
     ));
-    await writeChunk(env, job, chunkIndex, values);
+    await appendCzdsChunk(env, jobId, chunkIndex, values);
     hostnameCount += values.length;
     chunkIndex += 1;
     records = new Map();
@@ -383,17 +447,59 @@ export async function stageCzdsJob(env, jobId) {
     const values = [...records.values()].sort((left, right) => (
       left.apex.localeCompare(right.apex) || left.hostname.localeCompare(right.hostname)
     ));
-    await writeChunk(env, job, chunkIndex, values);
+    await appendCzdsChunk(env, jobId, chunkIndex, values);
     hostnameCount += values.length;
     chunkIndex += 1;
   }
   if (chunkIndex === 0) throw new Error("CZDS zone produced no registrable NS owners");
-  await env.CONTROL.prepare(
-    `UPDATE czds_jobs
-     SET state = 'staged', hostname_count = ?, delta_count = ?,
-         error = NULL, updated_at = ? WHERE job_id = ?`,
-  ).bind(hostnameCount, chunkIndex, new Date().toISOString(), jobId).run();
-  return { state: "staged", deltaCount: chunkIndex, hostnameCount };
+  return await completeCzdsArtifact(env, jobId, chunkIndex, hostnameCount);
+}
+
+
+export async function startCzdsContainerJob(env, jobId) {
+  requireCredentials(env);
+  if (env.CZDS_PARSER === undefined) throw new Error("CZDS_PARSER is not configured");
+  const job = await env.CONTROL.prepare(
+    "SELECT zone, download_url, state FROM czds_jobs WHERE job_id = ?",
+  ).bind(jobId).first();
+  if (job?.state === "staged" || job?.state === "complete") return { state: job.state };
+  if (job?.state !== "running") throw new Error("CZDS job is not running");
+  const link = validatedDownloadLink(job.download_url);
+  if (link.zone !== job.zone) throw new Error("CZDS job zone does not match its download link");
+  const token = await authenticate(env);
+  const response = await env.CZDS_PARSER.getByName(jobId).fetch(
+    new Request("http://localhost/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        job_id: jobId,
+        zone: job.zone,
+        url: link.url,
+        token,
+        max_records: positiveInteger(env.CZDS_DELTA_RECORDS, 20000),
+      }),
+    }),
+  );
+  if (!response.ok) throw new Error(`CZDS parser start returned HTTP ${response.status}`);
+  return await response.json();
+}
+
+
+export async function inspectCzdsContainerJob(env, jobId) {
+  const response = await env.CZDS_PARSER.getByName(jobId).fetch(
+    new Request("http://localhost/status"),
+  );
+  if (!response.ok) throw new Error(`CZDS parser status returned HTTP ${response.status}`);
+  return await response.json();
+}
+
+
+export async function czdsJobUsesContainer(env, jobId) {
+  const job = await env.CONTROL.prepare(
+    "SELECT zone FROM czds_jobs WHERE job_id = ?",
+  ).bind(jobId).first();
+  if (job === null) throw new Error("CZDS job does not exist");
+  return (env.CZDS_CONTAINER_ZONES ?? "").split(",").includes(job.zone);
 }
 
 
