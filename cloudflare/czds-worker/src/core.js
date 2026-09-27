@@ -291,6 +291,7 @@ export function zoneRecord(rawLine, zone, previousOwner) {
 async function writeChunk(env, job, chunkIndex, records) {
   const deltaId = await sha256(`${job.job_id}:${chunkIndex}`);
   const objectKey = `ingest/czds/${job.zone}/${job.job_id}-${chunkIndex}.json.gz`;
+  const recordsHash = await sha256(JSON.stringify(records));
   await env.CATALOG.put(objectKey, await gzipJson({
     schema_version: DELTA_SCHEMA_VERSION,
     source: `czds:${job.zone}`,
@@ -302,7 +303,11 @@ async function writeChunk(env, job, chunkIndex, records) {
     records,
   }), {
     httpMetadata: { contentType: "application/json", contentEncoding: "gzip" },
-    customMetadata: { delta_id: deltaId, schema_version: DELTA_SCHEMA_VERSION },
+    customMetadata: {
+      delta_id: deltaId,
+      schema_version: DELTA_SCHEMA_VERSION,
+      records_sha256: recordsHash,
+    },
   });
   await env.CONTROL.prepare(
     `INSERT OR REPLACE INTO czds_job_deltas(
@@ -361,9 +366,19 @@ export async function appendCzdsChunk(env, jobId, chunkIndex, records) {
     }
   }
   const last = await env.CONTROL.prepare(
-    "SELECT MAX(chunk_index) AS last_index FROM czds_job_deltas WHERE job_id = ?",
+    `SELECT chunk_index, object_key, record_count FROM czds_job_deltas
+     WHERE job_id = ? ORDER BY chunk_index DESC LIMIT 1`,
   ).bind(jobId).first();
-  if (chunkIndex !== Number(last.last_index ?? -1) + 1) {
+  const lastIndex = last === null ? -1 : Number(last.chunk_index);
+  if (chunkIndex === lastIndex) {
+    const object = await env.CATALOG.head(last.object_key);
+    if (Number(last.record_count) === records.length &&
+        object?.customMetadata?.records_sha256 === await sha256(JSON.stringify(records))) {
+      return;
+    }
+    throw new Error("CZDS repeated chunk does not match the staged object");
+  }
+  if (chunkIndex !== lastIndex + 1) {
     throw new Error("CZDS chunks must be appended in order");
   }
   await writeChunk(env, job, chunkIndex, records);

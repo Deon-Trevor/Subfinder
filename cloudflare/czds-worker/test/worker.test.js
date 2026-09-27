@@ -259,6 +259,13 @@ test("container callbacks refuse incomplete, reordered, or changed artifacts", a
   const first = [{ apex: "example.com", hostname: "example.com", first_seen: null }];
   await assert.rejects(appendCzdsChunk(env, jobId, 1, first), /in order/);
   await appendCzdsChunk(env, jobId, 0, first);
+  await appendCzdsChunk(env, jobId, 0, first);
+  assert.equal((await database.prepare(
+    "SELECT COUNT(*) AS count FROM czds_job_deltas WHERE job_id = ?",
+  ).bind(jobId).first()).count, 1);
+  await assert.rejects(appendCzdsChunk(env, jobId, 0, [
+    { apex: "other.com", hostname: "other.com", first_seen: null },
+  ]), /does not match/);
   await assert.rejects(completeCzdsArtifact(env, jobId, 2, 1), /do not match/);
   await assert.rejects(beginCzdsArtifact(env, jobId, '"different"||100'), /changed/);
   assert.deepEqual(await completeCzdsArtifact(env, jobId, 1, 1), {

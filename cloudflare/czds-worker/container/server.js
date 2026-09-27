@@ -10,14 +10,27 @@ import { zoneRecord } from "../src/core.js";
 const INTERNAL_URL = "http://czds.internal";
 
 
-async function postInternal(path, body) {
-  const response = await fetch(`${INTERNAL_URL}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) throw new Error(`CZDS ${path} rejected with HTTP ${response.status}`);
-  return await response.json();
+export async function postInternal(path, body, send = fetch) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const response = await send(`${INTERNAL_URL}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (response.ok) return await response.json();
+      const payload = await response.json().catch(() => ({}));
+      const detail = typeof payload.detail === "string" ? payload.detail.slice(0, 500) : "";
+      if (path !== "/chunk" ||
+          (response.status !== 429 && response.status < 500) || attempt === 3) {
+        throw new Error(`CZDS ${path} rejected with HTTP ${response.status}: ${detail}`);
+      }
+    } catch (error) {
+      if (path !== "/chunk" || attempt === 3 ||
+          (error instanceof Error && error.message.startsWith("CZDS "))) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+  }
 }
 
 

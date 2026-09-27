@@ -43,7 +43,10 @@ CzdsParser.outboundByHost = {
       }
       return Response.json({ ok: true });
     } catch (error) {
-      return Response.json({ detail: String(error) }, { status: 409 });
+      const detail = String(error);
+      const status = detail.startsWith("Error: CZDS ") ? 409 : 503;
+      console.error("CZDS parser callback failed", url.pathname, status, detail);
+      return Response.json({ detail }, { status });
     }
   },
 };

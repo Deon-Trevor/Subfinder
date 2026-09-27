@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
-import { createParserServer, processZone } from "../container/server.js";
+import { createParserServer, postInternal, processZone } from "../container/server.js";
 
 
 const job = {
@@ -85,4 +85,24 @@ test("parser server exposes running and terminal state without returning a token
   } finally {
     server.close();
   }
+});
+
+
+test("chunk callbacks retry transient failures but report validation errors", async () => {
+  let calls = 0;
+  const result = await postInternal("/chunk", { chunk_index: 1 }, async () => {
+    calls += 1;
+    return calls === 1
+      ? Response.json({ detail: "temporary D1 failure" }, { status: 503 })
+      : Response.json({ ok: true });
+  });
+  assert.deepEqual(result, { ok: true });
+  assert.equal(calls, 2);
+
+  calls = 0;
+  await assert.rejects(postInternal("/chunk", {}, async () => {
+    calls += 1;
+    return Response.json({ detail: "CZDS chunk has an invalid record" }, { status: 409 });
+  }), /invalid record/);
+  assert.equal(calls, 1);
 });
