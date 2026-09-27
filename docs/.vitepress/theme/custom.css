@@ -18,6 +18,11 @@
   --vp-home-hero-image-background-image: radial-gradient(circle, #1a625d 0%, transparent 68%);
 }
 
+.dark .VPNavBarTitle .logo,
+.dark .VPHomeHero .image-src {
+  filter: brightness(0) invert(1);
+}
+
 .VPHomeHero .image-src {
   max-width: 210px;
   max-height: 210px;
