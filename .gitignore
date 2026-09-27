@@ -1,5 +1,7 @@
 .venv/
 node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
 .env
 .env.*
 !.env.example

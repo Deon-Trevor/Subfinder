@@ -1,0 +1,54 @@
+import { defineConfig } from 'vitepress'
+
+export default defineConfig({
+  title: 'Subfinder',
+  description: 'Passive subdomain index documentation',
+  cleanUrls: true,
+  srcExclude: ['README.md'],
+  head: [
+    ['link', { rel: 'icon', href: '/mark.svg', type: 'image/svg+xml' }],
+    ['meta', { name: 'theme-color', content: '#101a26' }]
+  ],
+  themeConfig: {
+    logo: '/mark.svg',
+    siteTitle: 'Subfinder Docs',
+    search: { provider: 'local' },
+    nav: [
+      { text: 'Get started', link: '/getting-started' },
+      { text: 'API', link: '/reference/api' },
+      { text: 'Operations', link: '/operations/compose' },
+      { text: 'GitHub', link: 'https://github.com/Deon-Trevor/Subfinder' }
+    ],
+    sidebar: [
+      {
+        text: 'Start here',
+        items: [
+          { text: 'Overview', link: '/' },
+          { text: 'Get started', link: '/getting-started' }
+        ]
+      },
+      {
+        text: 'Use Subfinder',
+        items: [
+          { text: 'API and MCP', link: '/reference/api' },
+          { text: 'Source catalog', link: '/reference/sources' },
+          { text: 'Ingest source data', link: '/how-to/ingestion' }
+        ]
+      },
+      {
+        text: 'Operate Subfinder',
+        items: [
+          { text: 'Compose service', link: '/operations/compose' },
+          { text: 'Cloudflare migration', link: '/operations/cloudflare' },
+          { text: 'Web interface', link: '/explanation/web-interface' }
+        ]
+      }
+    ],
+    socialLinks: [
+      { icon: 'github', link: 'https://github.com/Deon-Trevor/Subfinder' }
+    ],
+    footer: {
+      message: 'Passive collection. Exact-apex lookups. No live probing on search.'
+    }
+  }
+})
