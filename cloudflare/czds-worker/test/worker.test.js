@@ -259,16 +259,24 @@ test("container callbacks refuse incomplete, reordered, or changed artifacts", a
   const first = [{ apex: "example.com", hostname: "example.com", first_seen: null }];
   await assert.rejects(appendCzdsChunk(env, jobId, 1, first), /in order/);
   await appendCzdsChunk(env, jobId, 0, first);
+  await beginCzdsArtifact(env, jobId, '"artifact"||100');
   await appendCzdsChunk(env, jobId, 0, first);
   assert.equal((await database.prepare(
     "SELECT COUNT(*) AS count FROM czds_job_deltas WHERE job_id = ?",
   ).bind(jobId).first()).count, 1);
+  const second = [{ apex: "second.com", hostname: "second.com", first_seen: null }];
+  await appendCzdsChunk(env, jobId, 1, second);
+  await appendCzdsChunk(env, jobId, 0, first);
+  const objectKey = `ingest/czds/com/${jobId}-0.json.gz`;
+  const prior = await bucket.get(objectKey);
+  await bucket.put(objectKey, await prior.arrayBuffer());
+  await appendCzdsChunk(env, jobId, 0, first);
   await assert.rejects(appendCzdsChunk(env, jobId, 0, [
     { apex: "other.com", hostname: "other.com", first_seen: null },
   ]), /does not match/);
   await assert.rejects(completeCzdsArtifact(env, jobId, 2, 1), /do not match/);
   await assert.rejects(beginCzdsArtifact(env, jobId, '"different"||100'), /changed/);
-  assert.deepEqual(await completeCzdsArtifact(env, jobId, 1, 1), {
-    state: "staged", deltaCount: 1, hostnameCount: 1,
+  assert.deepEqual(await completeCzdsArtifact(env, jobId, 2, 2), {
+    state: "staged", deltaCount: 2, hostnameCount: 2,
   });
 });

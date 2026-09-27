@@ -335,12 +335,9 @@ export async function beginCzdsArtifact(env, jobId, fingerprint) {
   if (job.source_fingerprint !== null && job.source_fingerprint !== fingerprint) {
     throw new Error("CZDS zone artifact changed while its job was running");
   }
-  await env.CONTROL.batch([
-    env.CONTROL.prepare(
-      "UPDATE czds_jobs SET source_fingerprint = ?, updated_at = ? WHERE job_id = ?",
-    ).bind(fingerprint, new Date().toISOString(), jobId),
-    env.CONTROL.prepare("DELETE FROM czds_job_deltas WHERE job_id = ?").bind(jobId),
-  ]);
+  await env.CONTROL.prepare(
+    "UPDATE czds_jobs SET source_fingerprint = ?, updated_at = ? WHERE job_id = ?",
+  ).bind(fingerprint, new Date().toISOString(), jobId).run();
 }
 
 
@@ -370,11 +367,25 @@ export async function appendCzdsChunk(env, jobId, chunkIndex, records) {
      WHERE job_id = ? ORDER BY chunk_index DESC LIMIT 1`,
   ).bind(jobId).first();
   const lastIndex = last === null ? -1 : Number(last.chunk_index);
-  if (chunkIndex === lastIndex) {
-    const object = await env.CATALOG.head(last.object_key);
-    if (Number(last.record_count) === records.length &&
-        object?.customMetadata?.records_sha256 === await sha256(JSON.stringify(records))) {
-      return;
+  if (chunkIndex <= lastIndex) {
+    const existing = await env.CONTROL.prepare(
+      `SELECT object_key, record_count FROM czds_job_deltas
+       WHERE job_id = ? AND chunk_index = ?`,
+    ).bind(jobId, chunkIndex).first();
+    if (Number(existing?.record_count) !== records.length) {
+      throw new Error("CZDS repeated chunk does not match the staged object");
+    }
+    const object = await env.CATALOG.head(existing.object_key);
+    const expectedHash = await sha256(JSON.stringify(records));
+    if (object?.customMetadata?.records_sha256 === expectedHash) return;
+    if (object?.customMetadata?.records_sha256 === undefined) {
+      const legacyObject = await env.CATALOG.get(existing.object_key);
+      if (legacyObject !== null) {
+        const payload = await new Response(
+          legacyObject.body.pipeThrough(new DecompressionStream("gzip")),
+        ).json();
+        if (JSON.stringify(payload.records) === JSON.stringify(records)) return;
+      }
     }
     throw new Error("CZDS repeated chunk does not match the staged object");
   }
