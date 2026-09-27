@@ -1,0 +1,22 @@
+{
+  "name": "subfinder-index-worker-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dev:fixture": "node scripts/dev-fixture.js",
+    "test": "node --test test/*.test.js",
+    "generate:domain-policy": "../../.venv/bin/python scripts/generate-domain-policy.py",
+    "verify:export": "node scripts/verify-export.js",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.1.0",
+    "miniflare": "^5.20260925.0-alpha",
+    "wrangler": "^4.141.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.1.0",
+    "zod": "^4.6.5"
+  }
+}

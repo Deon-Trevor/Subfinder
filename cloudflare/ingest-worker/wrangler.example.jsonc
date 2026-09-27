@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "subfinder-ingest",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-27",
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "r2_buckets": [
+    {
+      "binding": "CATALOG",
+      "bucket_name": "subfinder-index-spike"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "CONTROL",
+      "database_name": "subfinder-ingest-control",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "INGEST_QUEUE", "queue": "subfinder-direct-ct" },
+      { "binding": "COMPACTION_QUEUE", "queue": "subfinder-compaction" }
+    ],
+    "consumers": [
+      {
+        "queue": "subfinder-direct-ct",
+        "max_batch_size": 5,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "subfinder-direct-ct-dead"
+      }
+    ]
+  },
+  "vars": {
+    "CT_ALLOWED_HOSTS": "ct.googleapis.com,ct.cloudflare.com",
+    "CT_RANGE_SIZE": "256",
+    "CT_SOURCE_LIMIT": "20"
+  }
+}

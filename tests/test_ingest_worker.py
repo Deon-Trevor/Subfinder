@@ -270,12 +270,25 @@ def test_live_ct_worker_enforces_cycle_deadline(tmp_path: Path, monkeypatch) -> 
     control.initialize()
     job, _ = control.enqueue_ingest_job("live-ct", idempotency_key="cycle")
 
-    async def slow_poll_once(_db, **_kwargs):
-        time.sleep(3)
-        return 1
+    class SlowProcess:
+        def __init__(self, **_kwargs):
+            self.running = False
+            self.exitcode = -15
+
+        def start(self):
+            self.running = True
+
+        def join(self, _seconds=None):
+            return None
+
+        def is_alive(self):
+            return self.running
+
+        def terminate(self):
+            self.running = False
 
     monkeypatch.setenv("CTLOGS_LIVE_CT_CYCLE_TIMEOUT_SECONDS", "1")
-    monkeypatch.setattr("ctlogs.ingest_worker.poll_once", slow_poll_once)
+    monkeypatch.setattr("ctlogs.ingest_worker.multiprocessing.Process", SlowProcess)
     started = time.monotonic()
 
     with pytest.raises(TimeoutError, match="live-ct cycle exceeded"):
@@ -290,10 +303,10 @@ def test_live_ct_worker_failure_is_retried_then_failed(tmp_path: Path, monkeypat
     control.initialize()
     job, _ = control.enqueue_ingest_job("live-ct", idempotency_key="cycle", max_attempts=2)
 
-    async def fail_poll_once(_db, **_kwargs):
+    def fail_poll_once(_db, **_kwargs):
         raise RuntimeError("ct boom")
 
-    monkeypatch.setattr("ctlogs.ingest_worker.poll_once", fail_poll_once)
+    monkeypatch.setattr("ctlogs.ingest_worker._run_live_ct_with_deadline", fail_poll_once)
 
     first = run_once(
         database,

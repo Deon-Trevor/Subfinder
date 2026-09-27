@@ -622,7 +622,7 @@ def create_app(
     authenticated_limit = (
         token_request_limit
         if token_request_limit is not None
-        else _get_env_int("CTLOGS_TOKEN_REQUEST_LIMIT", 10_000)
+        else _get_env_int("CTLOGS_TOKEN_REQUEST_LIMIT", 250_000)
     )
     if authenticated_limit < 1:
         raise ValueError("token_request_limit must be positive")
@@ -641,7 +641,7 @@ def create_app(
     configured_queued_max_apexes = (
         queued_batch_max_apexes
         if queued_batch_max_apexes is not None
-        else _get_env_int("CTLOGS_QUEUED_BATCH_MAX_APEXES", 1_000)
+        else _get_env_int("CTLOGS_QUEUED_BATCH_MAX_APEXES", 25_000)
     )
     configured_queued_max_pending = (
         queued_batch_max_pending

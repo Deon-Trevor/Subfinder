@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "subfinder-compaction",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-27",
+  "limits": { "cpu_ms": 300000 },
+  "triggers": { "crons": ["*/2 * * * *"] },
+  "r2_buckets": [
+    { "binding": "CATALOG", "bucket_name": "subfinder-index-spike" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "LEDGER",
+      "database_name": "subfinder-generation-ledger",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "COMPACTION_QUEUE", "queue": "subfinder-compaction" }
+    ],
+    "consumers": [
+      {
+        "queue": "subfinder-compaction",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 8,
+        "dead_letter_queue": "subfinder-compaction-dead"
+      }
+    ]
+  },
+  "vars": {
+    "GENERATION_DELTA_LIMIT": "500",
+    "MAX_DELTA_BYTES": "33554432",
+    "PARTITION_NIBBLES": "2"
+  }
+}

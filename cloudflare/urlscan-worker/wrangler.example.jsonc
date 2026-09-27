@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "subfinder-urlscan-ingest",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-27",
+  "triggers": { "crons": ["* * * * *"] },
+  "r2_buckets": [
+    { "binding": "CATALOG", "bucket_name": "subfinder-index-spike" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "CONTROL",
+      "database_name": "subfinder-urlscan-control",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "URLSCAN_QUEUE", "queue": "subfinder-urlscan" },
+      { "binding": "COMPACTION_QUEUE", "queue": "subfinder-compaction" }
+    ],
+    "consumers": [
+      {
+        "queue": "subfinder-urlscan",
+        "max_batch_size": 5,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "subfinder-urlscan-dead"
+      }
+    ]
+  },
+  "vars": {
+    "URLSCAN_BREADTH_DAILY_LIMIT": "70000",
+    "URLSCAN_PAGE_SIZE": "1000",
+    "URLSCAN_REFRESH_SECONDS": "86400",
+    "URLSCAN_SOURCE_LIMIT": "50"
+  }
+}

@@ -206,3 +206,45 @@ async def test_queued_api_submit_poll_replay_and_cancel(tmp_path: Path) -> None:
         "released": 1,
         "outstanding": 0,
     }
+
+
+@pytest.mark.anyio
+async def test_default_normal_hunt_admits_twenty_five_thousand_apexes(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        tmp_path / "api.sqlite3",
+        api_tokens=["service"],
+        allowed_hosts=["testserver"],
+        allowed_origins=[],
+    )
+    headers = {
+        "Authorization": "Bearer service",
+        "Idempotency-Key": "normal-hunt-limit",
+    }
+    apexes = [f"brand-{index}.com" for index in range(25_000)]
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client,
+    ):
+        admitted = await client.post(
+            "/internal/v1/record-batches",
+            headers=headers,
+            json={"apexes": apexes},
+        )
+        oversized = await client.post(
+            "/internal/v1/record-batches",
+            headers={**headers, "Idempotency-Key": "over-normal-hunt-limit"},
+            json={"apexes": [*apexes, "brand-25000.com"]},
+        )
+
+    assert admitted.status_code == 202
+    assert admitted.json()["total_apexes"] == 25_000
+    assert admitted.headers["x-ratelimit-limit"] == "250000"
+    assert admitted.headers["x-ratelimit-remaining"] == "225000"
+    assert oversized.status_code == 413
+    assert oversized.json()["detail"] == (
+        "batch contains too many apexes; maximum is 25000"
+    )

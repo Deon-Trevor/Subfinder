@@ -1,0 +1,18 @@
+{
+  "name": "subfinder-ingest-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@peculiar/x509": "2.0.0",
+    "reflect-metadata": "0.2.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "miniflare": "^5.20260925.0-alpha",
+    "wrangler": "^4.141.0"
+  }
+}

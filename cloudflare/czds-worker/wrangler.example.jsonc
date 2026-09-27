@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "subfinder-czds-ingest",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-27",
+  "triggers": { "crons": ["0 2 * * *"] },
+  "r2_buckets": [
+    { "binding": "CATALOG", "bucket_name": "subfinder-index-spike" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "CONTROL",
+      "database_name": "subfinder-czds-control",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "COMPACTION_QUEUE", "queue": "subfinder-compaction" }
+    ]
+  },
+  "workflows": [
+    {
+      "name": "subfinder-czds-ingestion",
+      "binding": "CZDS_WORKFLOW",
+      "class_name": "CzdsIngestionWorkflow"
+    }
+  ],
+  "vars": {
+    "CZDS_DELTA_RECORDS": "20000",
+    "CZDS_MAX_ZONES": "25",
+    "CZDS_REFRESH_SECONDS": "86400"
+  }
+}
