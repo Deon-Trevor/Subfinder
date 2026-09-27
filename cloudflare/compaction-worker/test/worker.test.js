@@ -378,3 +378,65 @@ test("reduces immutable bundles, publishes a candidate, activates and rolls back
   ).bind("2".repeat(64)).first()).state, "registered");
   assert.notEqual((await startGeneration(env)).generationId, second);
 });
+
+
+test("production-sized CZDS delta maps across partitions and reducer fails closed", {
+  skip: process.env.SUBFINDER_STRESS !== "1",
+  timeout: 120000,
+}, async () => {
+  const recordCount = Number(process.env.SUBFINDER_STRESS_RECORDS || 20000);
+  const deltaId = "f".repeat(64);
+  const key = `ingest/czds/com/${deltaId}.json.gz`;
+  const records = Array.from({ length: recordCount }, (_, index) => {
+    const apex = `stress-${index.toString().padStart(6, "0")}.com`;
+    return { apex, hostname: apex, first_seen: null };
+  });
+  await bucket.put(key, await gzipJson({
+    schema_version: "subfinder.ingest-delta.v1",
+    source: "czds:com",
+    source_id: "com",
+    created_at: "2026-09-27T00:00:00.000Z",
+    entry_count: recordCount,
+    hostname_count: recordCount,
+    records,
+  }));
+  const messages = [];
+  const env = {
+    LEDGER: database,
+    CATALOG: bucket,
+    PARTITION_NIBBLES: "2",
+    COMPACTION_QUEUE: { send: async (message) => messages.push(message) },
+  };
+  await registerDelta(env, {
+    schema_version: "subfinder.delta-ready.v1",
+    delta_id: deltaId,
+    source_kind: "czds",
+    object_key: key,
+  });
+  const started = await startGeneration(env);
+  const mapStarted = performance.now();
+  const mapped = await mapDelta(env, messages.shift());
+  const mapMs = Math.round(performance.now() - mapStarted);
+  assert.equal(mapped.state, "mapped");
+  assert.equal(mapped.fragments, 256);
+  const totals = await database.prepare(
+    `SELECT COUNT(*) AS partitions, SUM(record_count) AS records
+     FROM generation_partitions WHERE generation_id = ?`,
+  ).bind(started.generationId).first();
+  assert.equal(totals.partitions, 256);
+  assert.equal(totals.records, recordCount);
+  await startReduce(env);
+  const reduceMessage = messages.shift();
+  await assert.rejects(runReduce({ ...env, MAX_REDUCE_RECORDS: "1" }, reduceMessage),
+    /memory bound/);
+  const reduceStarted = performance.now();
+  assert.equal((await runReduce(env, reduceMessage)).state, "reduced");
+  const reduceMs = Math.round(performance.now() - reduceStarted);
+  const partition = await database.prepare(
+    `SELECT state, record_count FROM generation_partitions
+     WHERE generation_id = ? AND prefix = ?`,
+  ).bind(started.generationId, reduceMessage.prefix).first();
+  assert.equal(partition.state, "reduced");
+  console.log(JSON.stringify({ stress: "czds-delta", recordCount, mapMs, reduceMs,
+    partitions: totals.partitions, reduced_partition_records: partition.record_count }));
+});
