@@ -21,6 +21,10 @@ export { ContainerProxy };
 export class CzdsParser extends Container {
   defaultPort = 8080;
   sleepAfter = "5m";
+
+  onStop({ exitCode, reason }) {
+    console.error("CZDS Container stopped", { exitCode, reason });
+  }
 }
 
 

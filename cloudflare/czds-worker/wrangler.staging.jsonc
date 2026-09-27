@@ -5,6 +5,7 @@
   "compatibility_date": "2026-09-27",
   "workers_dev": false,
   "preview_urls": false,
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } },
   "triggers": { "crons": [] },
   "containers": [
     { "class_name": "CzdsParser", "image": "../Dockerfile.czds",
