@@ -6,7 +6,7 @@ function json(value, status = 200) {
 }
 
 
-function utcWindow(now = Date.now()) {
+export function utcWindow(now = Date.now()) {
   const date = new Date(now);
   const day = date.toISOString().slice(0, 10);
   const resetAt = Date.UTC(
@@ -92,7 +92,7 @@ export class QuotaLedger {
 }
 
 
-async function subjectShard(subject) {
+export async function subjectShard(subject) {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(subject),

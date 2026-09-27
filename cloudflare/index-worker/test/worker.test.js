@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
@@ -452,6 +453,264 @@ test("batch result bounds reject before quota is consumed", async () => {
     assert.match((await rejected.json()).detail, /maximum is 1/);
     assert.equal(accepted.status, 200);
     assert.equal(accepted.headers.get("x-ratelimit-remaining"), "2");
+  } finally {
+    await worker.dispose();
+  }
+});
+
+
+test("durable batches replay admission and deliver cursor-stable chunks", async () => {
+  const worker = createMiniflare(workerRoot, {
+    envOverrides: {
+      CLIENT_TOKENS: JSON.stringify([{
+        id: "threat-hunter",
+        sha256: "e200c300499b48616df8fbe5a089e1eebf525e826ed03163a4868985d9123ccb",
+        limit: 10,
+      }, {
+        id: "other-client",
+        sha256: createHash("sha256").update("other-client-test").digest("hex"),
+        limit: 10,
+      }]),
+    },
+  });
+  const headers = {
+    authorization: "Bearer threat-hunter-test",
+    "content-type": "application/json",
+    "idempotency-key": "th-test-batch",
+  };
+  try {
+    await uploadFixture(worker);
+    const base = "http://worker.test/internal/v1/record-batches";
+    const body = JSON.stringify({ apexes: ["example.com", "example.net", "large.dev"] });
+    const unauthorized = await worker.dispatchFetch(base, {
+      method: "POST", headers: { "content-type": "application/json" }, body,
+    });
+    assert.equal(unauthorized.status, 401);
+    const admitted = await worker.dispatchFetch(base, { method: "POST", headers, body });
+    assert.equal(admitted.status, 202);
+    assert.equal(admitted.headers.get("x-ratelimit-remaining"), "7");
+    const job = await admitted.json();
+    assert.equal(job.total_apexes, 3);
+    assert.equal(job.state, "queued");
+    const ordinaryRead = await worker.dispatchFetch(
+      "http://worker.test/v1/records?apex=example.com",
+      { headers },
+    );
+    assert.equal(ordinaryRead.status, 200);
+    assert.equal(ordinaryRead.headers.get("x-ratelimit-remaining"), "6");
+    const replay = await worker.dispatchFetch(base, { method: "POST", headers, body });
+    assert.equal(replay.status, 202);
+    assert.equal(replay.headers.get("x-idempotent-replay"), "1");
+    assert.equal(replay.headers.get("x-ratelimit-remaining"), "6");
+    assert.equal((await replay.json()).job_id, job.job_id);
+    const conflict = await worker.dispatchFetch(base, {
+      method: "POST", headers, body: JSON.stringify({ apexes: ["example.net"] }),
+    });
+    assert.equal(conflict.status, 409);
+    const chunksUrl = `${base}/${job.job_id}/chunks`;
+    let delivered;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const response = await worker.dispatchFetch(`${chunksUrl}?after=-1&limit=10&wait=0`, {
+        headers,
+      });
+      assert.equal(response.status, 200);
+      const payload = await response.json();
+      if (payload.job.state === "done") {
+        delivered = payload;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(delivered, "durable batch did not finish");
+    assert.equal(delivered.job.completed_apexes, 3);
+    assert.equal(delivered.job.quota.committed, 3);
+    assert.equal(delivered.chunks.reduce((count, chunk) => count + chunk.results.length, 0), 3);
+    assert.equal(delivered.chunks[0].results[0].records.length, 3);
+    const next = await worker.dispatchFetch(
+      `${chunksUrl}?after=${delivered.next_cursor}&limit=10`, { headers },
+    );
+    assert.deepEqual((await next.json()).chunks, []);
+    const otherToken = await worker.dispatchFetch(chunksUrl, {
+      headers: { authorization: "Bearer wrong" },
+    });
+    assert.equal(otherToken.status, 401);
+    const otherClient = await worker.dispatchFetch(chunksUrl, {
+      headers: { authorization: "Bearer other-client-test" },
+    });
+    assert.equal(otherClient.status, 404);
+  } finally {
+    await worker.dispose();
+  }
+});
+
+
+test("a 25K batch admits atomically and cancellation releases outstanding quota", async () => {
+  const worker = createMiniflare(workerRoot, {
+    envOverrides: {
+      CLIENT_TOKENS: JSON.stringify([{
+        id: "threat-hunter",
+        sha256: "e200c300499b48616df8fbe5a089e1eebf525e826ed03163a4868985d9123ccb",
+        limit: 25000,
+      }]),
+    },
+  });
+  const base = "http://worker.test/internal/v1/record-batches";
+  const apexes = Array.from({ length: 25000 }, (_, index) => `batch-${index}.com`);
+  const headers = {
+    authorization: "Bearer threat-hunter-test",
+    "content-type": "application/json",
+    "idempotency-key": "th-25k",
+  };
+  try {
+    await uploadFixture(worker);
+    const body = JSON.stringify({ apexes });
+    const oversized = await worker.dispatchFetch(base, {
+      method: "POST", headers,
+      body: JSON.stringify({ apexes: [...apexes, "extra.com"] }),
+    });
+    assert.equal(oversized.status, 413);
+    const admitted = await worker.dispatchFetch(base, { method: "POST", headers, body });
+    assert.equal(admitted.status, 202, await admitted.clone().text());
+    const job = await admitted.json();
+    assert.equal(job.total_apexes, 25000);
+    assert.equal(admitted.headers.get("x-ratelimit-remaining"), "0");
+    const overLimit = await worker.dispatchFetch(base, {
+      method: "POST", headers: { ...headers, "idempotency-key": "th-over" },
+      body: JSON.stringify({ apexes: ["example.com"] }),
+    });
+    assert.equal(overLimit.status, 429);
+    const cancelled = await worker.dispatchFetch(`${base}/${job.job_id}/cancel`, {
+      method: "POST", headers,
+    });
+    assert.equal(cancelled.status, 200);
+    const closed = await cancelled.json();
+    assert.equal(closed.state, "cancelled");
+    assert.equal(closed.quota.reserved, 25000);
+    assert.equal(closed.quota.outstanding, 0);
+    const next = await worker.dispatchFetch(base, {
+      method: "POST", headers: { ...headers, "idempotency-key": "th-after-cancel" },
+      body: JSON.stringify({ apexes: ["example.com"] }),
+    });
+    assert.equal(next.status, 202);
+  } finally {
+    await worker.dispose();
+  }
+});
+
+
+test("durable batch retries a transient catalog read without losing its cursor", async () => {
+  const worker = createMiniflare(workerRoot, {
+    envOverrides: {
+      CLIENT_TOKENS: JSON.stringify([{
+        id: "threat-hunter",
+        sha256: "e200c300499b48616df8fbe5a089e1eebf525e826ed03163a4868985d9123ccb",
+        limit: 3,
+      }]),
+    },
+  });
+  const headers = {
+    authorization: "Bearer threat-hunter-test",
+    "content-type": "application/json",
+    "idempotency-key": "th-retry-catalog",
+  };
+  try {
+    await uploadFixture(worker);
+    const bucket = await worker.getR2Bucket("CATALOG");
+    const root = await (await bucket.get("catalog/root.json")).json();
+    const prefix = createHash("sha256").update("example.com").digest("hex")
+      .slice(0, root.partition_nibbles);
+    const key = root.partitions[prefix].index;
+    const contents = readFileSync(resolve(fixtureRoot, key));
+    await bucket.delete(key);
+    const base = "http://worker.test/internal/v1/record-batches";
+    const admitted = await worker.dispatchFetch(base, {
+      method: "POST", headers, body: JSON.stringify({ apexes: ["example.com"] }),
+    });
+    assert.equal(admitted.status, 202);
+    const job = await admitted.json();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const pending = await worker.dispatchFetch(`${base}/${job.job_id}/chunks?after=-1`, {
+      headers,
+    });
+    assert.deepEqual((await pending.json()).chunks, []);
+    await bucket.put(key, contents);
+    let completed;
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const response = await worker.dispatchFetch(`${base}/${job.job_id}/chunks?after=-1`, {
+        headers,
+      });
+      const payload = await response.json();
+      if (payload.job.state === "done") {
+        completed = payload;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(completed, "batch did not recover after the index returned");
+    assert.equal(completed.chunks.length, 1);
+    assert.equal(completed.chunks[0].results[0].records.length, 3);
+    assert.equal(completed.next_cursor, 0);
+    assert.equal(completed.job.quota.committed, 1);
+  } finally {
+    await worker.dispose();
+  }
+});
+
+
+test("a full 25K batch delivers every apex once", {
+  skip: process.env.SUBFINDER_STRESS !== "1",
+  timeout: 180000,
+}, async () => {
+  const worker = createMiniflare(workerRoot, {
+    envOverrides: {
+      CLIENT_TOKENS: JSON.stringify([{
+        id: "threat-hunter",
+        sha256: "e200c300499b48616df8fbe5a089e1eebf525e826ed03163a4868985d9123ccb",
+        limit: 25000,
+      }]),
+    },
+  });
+  const base = "http://worker.test/internal/v1/record-batches";
+  const apexes = Array.from({ length: 25000 }, (_, index) => `batch-${index}.com`);
+  const headers = {
+    authorization: "Bearer threat-hunter-test",
+    "content-type": "application/json",
+    "idempotency-key": "th-25k-full",
+  };
+  try {
+    await uploadFixture(worker);
+    const admitted = await worker.dispatchFetch(base, {
+      method: "POST", headers, body: JSON.stringify({ apexes }),
+    });
+    assert.equal(admitted.status, 202);
+    const job = await admitted.json();
+    const seen = new Set();
+    let cursor = -1;
+    let finalState = "queued";
+    const started = performance.now();
+    while (performance.now() - started < 170000) {
+      const response = await worker.dispatchFetch(
+        `${base}/${job.job_id}/chunks?after=${cursor}&limit=50`, { headers },
+      );
+      assert.equal(response.status, 200);
+      const payload = await response.json();
+      finalState = payload.job.state;
+      for (const chunk of payload.chunks) {
+        for (const item of chunk.results) {
+          assert.equal(seen.has(item.apex), false);
+          seen.add(item.apex);
+        }
+      }
+      cursor = payload.next_cursor;
+      if (finalState === "done") break;
+      assert.notEqual(finalState, "failed", payload.job.error);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(finalState, "done");
+    assert.equal(seen.size, 25000);
+    assert.equal(cursor, 999);
+    console.log(JSON.stringify({ stress: "25k-durable-batch", ms: Math.round(
+      performance.now() - started), chunks: cursor + 1 }));
   } finally {
     await worker.dispose();
   }
