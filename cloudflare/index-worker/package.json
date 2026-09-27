@@ -8,6 +8,8 @@
     "test": "node --test test/*.test.js",
     "generate:domain-policy": "../../.venv/bin/python scripts/generate-domain-policy.py",
     "verify:export": "node scripts/verify-export.js",
+    "verify:staging-preseed": "node scripts/verify-staging-preseed.js",
+    "deploy:staging": "wrangler deploy --config wrangler.staging.jsonc",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {

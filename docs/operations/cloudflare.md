@@ -18,6 +18,20 @@ deployment does not change the current Subfinder hostname or activate a catalog.
 
 `index-worker` serves the static UI, HTTP API, and the single MCP `search` tool. Public browser requests do not need a token. A valid bearer token gets its configured allowance and is required only for `/internal/v1/records/batch`.
 
+`index-worker/wrangler.staging.jsonc` deploys the same API code at
+`subfinder-index-stage.pundit.workers.dev` with the private
+`subfinder-catalog-stage` R2 bucket. It has no static asset binding or custom
+domain. Its root key remains `catalog/root.json`, which is absent during the
+seed upload. The Worker therefore reports `/ready` as unavailable until a
+separate, reviewed staging activation. From `cloudflare/index-worker`, run
+`npm run deploy:staging` and `npm run verify:staging-preseed` to check that boundary.
+The staging-only `CLIENT_TOKENS` secret uses a separate token from production.
+On the Mac used for staging, its raw value is stored in the keychain item
+`subfinder-stage-threat-hunter` for account `threat-hunter`; only its SHA-256
+digest is stored in the Worker secret. To include the authenticated smoke check,
+set `SUBFINDER_STAGE_TOKEN` from that keychain item when running
+`npm run verify:staging-preseed`. Do not put the raw token in Wrangler configuration.
+
 Set `CLIENT_TOKENS` as a Worker secret. It is a JSON array of client IDs, SHA-256 token digests, and optional limits. Raw tokens do not belong in Wrangler configuration or source control.
 
 ```json
