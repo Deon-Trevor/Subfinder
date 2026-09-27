@@ -1,7 +1,9 @@
 .venv/
+.wrangler/
 node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+cloudflare/static-worker/dist/
 .env
 .env.*
 !.env.example

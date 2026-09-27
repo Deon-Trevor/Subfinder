@@ -6,6 +6,14 @@ The [documentation site](/) is a third, static deployment on Cloudflare
 Pages. It has no R2, D1, Queue, or secret binding. Building it does not publish a
 catalog generation or change the read Worker.
 
+The `static-worker` serves `subfinder.pundit.workers.dev` as an isolated
+preview of the files in `web/`.
+It has no script, catalog binding, or API routes. Build and deploy it with
+`npm ci && npm run deploy` from `cloudflare/static-worker`. The preview is
+marked `noindex`; searches and MCP calls return 404 until the read Worker is
+ready. Verify the deployed assets with `npm run verify -- <preview URL>`. This
+deployment does not change the current Subfinder hostname or activate a catalog.
+
 ## Read worker
 
 `index-worker` serves the static UI, HTTP API, and the single MCP `search` tool. Public browser requests do not need a token. A valid bearer token gets its configured allowance and is required only for `/internal/v1/records/batch`.

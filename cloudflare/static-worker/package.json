@@ -1,0 +1,13 @@
+{
+  "name": "subfinder-static-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/prepare-assets.mjs",
+    "deploy": "npm run build && wrangler deploy",
+    "verify": "node scripts/verify-assets.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.141.0"
+  }
+}
