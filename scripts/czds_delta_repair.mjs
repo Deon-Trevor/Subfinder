@@ -64,12 +64,25 @@ export function repairDocument(document, expectedCount) {
 }
 
 function wrangler(args, options = {}) {
-  return execFileSync(WRANGLER,
-    args[0] === "auth" ? args : [...args, "--config", "wrangler.staging.jsonc"], {
-    cwd: WORKER, encoding: options.encoding, input: options.input,
-    maxBuffer: 32 * 1024 * 1024, timeout: 120000,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const readOnly = (args[0] === "r2" && args[2] === "get") ||
+    (args[0] === "d1" && args.includes("--command") &&
+      /^SELECT\b/i.test(args[args.indexOf("--command") + 1]));
+  const command = args[0] === "auth" ? args : [...args, "--config", "wrangler.staging.jsonc"];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return execFileSync(WRANGLER, command, {
+        cwd: WORKER, encoding: options.encoding, input: options.input,
+        maxBuffer: 32 * 1024 * 1024, timeout: 120000,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      if (args[0] === "r2" &&
+          /object.*not found|does not exist|404/i.test(String(error.stderr ?? error.message))) {
+        throw error;
+      }
+      if (!readOnly || attempt === 2) throw error;
+    }
+  }
 }
 
 function sql(text, database = "subfinder-czds-stage-control") {
