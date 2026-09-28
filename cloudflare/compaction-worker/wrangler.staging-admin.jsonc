@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "subfinder-compaction-stage-admin-dev",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-27",
+  "workers_dev": false,
+  "preview_urls": false,
+  "r2_buckets": [
+    { "binding": "CATALOG", "bucket_name": "subfinder-catalog-stage", "remote": true }
+  ],
+  "d1_databases": [
+    {
+      "binding": "LEDGER",
+      "database_name": "subfinder-generation-stage-ledger",
+      "database_id": "f195a017-ef05-405b-9c9d-09919d5a3bc8",
+      "remote": true
+    }
+  ]
+}

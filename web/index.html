@@ -123,7 +123,7 @@
       <div>
         <p class="eyebrow">Passive subdomain enumeration</p>
         <h1 class="hero-title">Every subdomain on record. <em>Zero packets to the target.</em></h1>
-        <p class="hero-lede">Type a domain and browse every hostname the index has seen under it, oldest first, with the date each name first appeared. A lookup answers from the committed index and queues passive enrichment behind it. The domain you look up is never probed and never learns you looked.</p>
+        <p class="hero-lede">Type a domain and browse every hostname the index has seen under it, oldest first, with the date each name first appeared. A lookup reads the committed index. The domain you look up is never probed and never learns you looked.</p>
 
         <form class="search" id="search-form" autocomplete="off">
           <div class="search-row">
@@ -341,6 +341,7 @@ curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com&amp;form
       <span>Subfinder</span>
       <span>passive, no probes</span>
       <a href="https://github.com/Deon-Trevor/Subfinder">Source</a>
+      <a href="/docs/">Docs</a>
       <span class="topbar-spacer"></span>
       <span>Sync_Pundit</span>
     </footer>

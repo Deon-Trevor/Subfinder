@@ -440,3 +440,78 @@ test("production-sized CZDS delta maps across partitions and reducer fails close
   console.log(JSON.stringify({ stress: "czds-delta", recordCount, mapMs, reduceMs,
     partitions: totals.partitions, reduced_partition_records: partition.record_count }));
 });
+
+
+test("one real CZDS partition merges with the exported seed and rolls back locally", {
+  skip: !process.env.SUBFINDER_REAL_DELTA || !process.env.SUBFINDER_EXPORT,
+  timeout: 120000,
+}, async () => {
+  const prefix = process.env.SUBFINDER_REAL_PREFIX || "b4";
+  const exportDir = process.env.SUBFINDER_EXPORT;
+  const root = JSON.parse(readFileSync(resolve(exportDir, "catalog/root.json")));
+  const sourceBytes = readFileSync(process.env.SUBFINDER_REAL_DELTA);
+  const delta = JSON.parse(
+    sourceBytes[0] === 0x1f ? gunzipSync(sourceBytes) : sourceBytes,
+  );
+  const records = delta.records.filter((record) =>
+    createHash("sha256").update(record.apex).digest("hex").startsWith(prefix));
+  assert.ok(records.length > 0);
+  assert.ok(root.partitions[prefix]);
+  const metadata = root.partitions[prefix];
+  await bucket.put("catalog/root.json", JSON.stringify({
+    ...root, partitions: { [prefix]: metadata },
+  }) + "\n");
+  await bucket.put(metadata.index, readFileSync(resolve(exportDir, metadata.index)));
+  await bucket.put(metadata.bundle, readFileSync(resolve(exportDir, metadata.bundle)));
+
+  const reducedDelta = { ...delta, records,
+    entry_count: records.length, hostname_count: records.length };
+  const bytes = await gzipJson(reducedDelta);
+  const deltaId = createHash("sha256").update(new Uint8Array(bytes)).digest("hex");
+  const key = `ingest/czds/com/${deltaId}.json.gz`;
+  await bucket.put(key, bytes);
+  const messages = [];
+  const env = {
+    LEDGER: database, CATALOG: bucket, PARTITION_NIBBLES: "2",
+    MAX_REDUCE_RECORDS: "200000",
+    COMPACTION_QUEUE: { send: async (message) => messages.push(message) },
+  };
+  await registerDelta(env, {
+    schema_version: "subfinder.delta-ready.v1", source_kind: "czds",
+    delta_id: deltaId, object_key: key,
+  });
+  const started = await startGeneration(env);
+  const mapped = await mapDelta(env, messages.shift());
+  assert.equal(mapped.fragments, 1);
+  assert.equal((await startReduce(env)).queued, 1);
+  assert.equal((await runReduce(env, messages.shift())).state, "reduced");
+  const candidate = await (await bucket.get(
+    `catalog/candidates/${started.generationId}.json`,
+  )).json();
+  const output = candidate.partitions[prefix];
+  const index = JSON.parse(gunzipSync(new Uint8Array(await (
+    await bucket.get(output.index)
+  ).arrayBuffer())));
+  const sample = records[0];
+  const block = index.blocks.find((item) =>
+    item.first_apex <= sample.apex && sample.apex <= item.last_apex);
+  assert.ok(block);
+  const member = await bucket.get(output.bundle, {
+    range: { offset: block.offset, length: block.length },
+  });
+  const documents = gunzipSync(new Uint8Array(await member.arrayBuffer()))
+    .toString().trim().split("\n").map(JSON.parse);
+  const found = documents.find((item) => item.a === sample.apex)?.r.find(
+    (item) => item.h === sample.hostname,
+  );
+  assert.ok(found?.s.some((source) => source.n === "czds:com"));
+  await activateGeneration(env, started.generationId);
+  assert.equal((await (await bucket.get("catalog/root.json")).json()).generation,
+    started.generationId);
+  await rollbackGeneration(env, started.generationId);
+  assert.equal((await (await bucket.get("catalog/root.json")).json()).generation,
+    root.generation);
+  console.log(JSON.stringify({ pilot: "real-com-local", prefix,
+    original_records: delta.records.length, pilot_records: records.length,
+    published: true, activated: true, rolled_back: true }));
+});

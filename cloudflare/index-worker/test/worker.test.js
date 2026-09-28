@@ -11,6 +11,7 @@ import {
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
 import { createMiniflare } from "./miniflare.js";
+import { docsPage } from "../src/index.js";
 
 
 const workerRoot = resolve(import.meta.dirname, "..");
@@ -191,6 +192,55 @@ test("non-API GET and HEAD requests fall through to the static asset binding", a
     method: "POST",
   });
   assert.equal(post.status, 405);
+});
+
+
+test("docs proxy keeps the worker path and does not send credentials upstream", async () => {
+  const origin = "https://subfinder-docs.pages.dev";
+  const request = new Request("https://subfinder.pundit.workers.dev/docs/reference/api?x=1", {
+    headers: { authorization: "Bearer private", cookie: "session=private", accept: "text/html" },
+  });
+  let destination;
+  const response = await docsPage(request, { DOCS_ORIGIN: origin }, new URL(request.url),
+    async (url, options) => {
+      destination = url.toString();
+      assert.equal(options.headers.get("authorization"), null);
+      assert.equal(options.headers.get("cookie"), null);
+      assert.equal(options.headers.get("accept"), "text/html");
+      return new Response("docs", { headers: { "set-cookie": "origin=private" } });
+    });
+  assert.equal(destination, `${origin}/reference/api?x=1`);
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "docs");
+  assert.equal(response.headers.get("set-cookie"), null);
+  assert.equal(response.headers.get("x-robots-tag"), "noindex");
+
+  const assetRequest = new Request(
+    "https://subfinder.pundit.workers.dev/docs/assets/style.ABC12345.css",
+  );
+  const asset = await docsPage(assetRequest, { DOCS_ORIGIN: origin },
+    new URL(assetRequest.url), async () => new Response("css"));
+  assert.equal(asset.headers.get("cache-control"),
+    "public, max-age=31536000, immutable");
+  assert.equal(asset.headers.get("x-robots-tag"), "noindex");
+  const unversionedRequest = new Request(
+    "https://subfinder.pundit.workers.dev/docs/assets/custom.css",
+  );
+  const unversioned = await docsPage(unversionedRequest, { DOCS_ORIGIN: origin },
+    new URL(unversionedRequest.url), async () => new Response("css"));
+  assert.equal(unversioned.headers.get("cache-control"), null);
+
+  const productionRequest = new Request("https://subfinder.syncpundit.io/docs/");
+  const production = await docsPage(productionRequest, { DOCS_ORIGIN: origin },
+    new URL(productionRequest.url), async () => new Response("docs", {
+      headers: { "x-robots-tag": "noindex" },
+    }));
+  assert.equal(production.headers.get("x-robots-tag"), null);
+
+  const slash = await docsPage(new Request("https://subfinder.pundit.workers.dev/docs"),
+    { DOCS_ORIGIN: origin }, new URL("https://subfinder.pundit.workers.dev/docs"));
+  assert.equal(slash.status, 308);
+  assert.equal(slash.headers.get("location"), "https://subfinder.pundit.workers.dev/docs/");
 });
 
 

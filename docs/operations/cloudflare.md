@@ -3,16 +3,17 @@
 The read worker and direct CT ingestion worker are separate deployments. Search traffic does not load certificate parsing code, and queue work cannot consume a request's CPU budget.
 
 The [documentation site](/) is a third, static deployment on Cloudflare
-Pages. It has no R2, D1, Queue, or secret binding. Building it does not publish a
-catalog generation or change the read Worker.
+Pages. The read Worker serves it at `/docs/`. The Pages project has no R2, D1,
+Queue, or secret binding. Building it does not publish a catalog generation.
 
-The `static-worker` serves `subfinder.pundit.workers.dev` as an isolated
-preview of the files in `web/`.
-It has no script, catalog binding, or API routes. Build and deploy it with
-`npm ci && npm run deploy` from `cloudflare/static-worker`. The preview is
-marked `noindex`; searches and MCP calls return 404 until the read Worker is
-ready. Verify the deployed assets with `npm run verify -- <preview URL>`. This
-deployment does not change the current Subfinder hostname or activate a catalog.
+`subfinder.pundit.workers.dev` now runs `index-worker` with the static UI,
+HTTP API, MCP, the active staging R2 seed, and the Pages proxy. The earlier
+`static-worker` configuration remains in the repository as an assets-only
+fallback. Do not deploy it over the live read Worker.
+The Workers preview and direct Pages site send `X-Robots-Tag: noindex`. The
+Worker's static rule is scoped to `subfinder.pundit.workers.dev`, and its docs
+proxy strips the Pages rule on other hosts. This keeps a future production
+hostname indexable without changing the preview site.
 
 ## Read worker
 
@@ -21,16 +22,15 @@ deployment does not change the current Subfinder hostname or activate a catalog.
 `index-worker/wrangler.staging.jsonc` deploys the same API code at
 `subfinder-index-stage.pundit.workers.dev` with the private
 `subfinder-catalog-stage` R2 bucket. It has no static asset binding or custom
-domain. Its root key remains `catalog/root.json`, which is absent during the
-seed upload. The Worker therefore reports `/ready` as unavailable until a
-separate, reviewed staging activation. From `cloudflare/index-worker`, run
-`npm run deploy:staging` and `npm run verify:staging-preseed` to check that boundary.
-The staging-only `CLIENT_TOKENS` secret uses a separate token from production.
+domain. Both Workers currently read the staging root `seed-20260927`; neither
+changes `subfinder.syncpundit.io`. The pre-seed verification command applies
+only before root activation.
+
+The preview `CLIENT_TOKENS` secret uses a separate token from production.
 On the Mac used for staging, its raw value is stored in the keychain item
 `subfinder-stage-threat-hunter` for account `threat-hunter`; only its SHA-256
-digest is stored in the Worker secret. To include the authenticated smoke check,
-set `SUBFINDER_STAGE_TOKEN` from that keychain item when running
-`npm run verify:staging-preseed`. Do not put the raw token in Wrangler configuration.
+digest is stored in each preview Worker secret. Do not put the raw token in
+Wrangler configuration.
 
 Set `CLIENT_TOKENS` as a Worker secret. It is a JSON array of client IDs, SHA-256 token digests, and optional limits. Raw tokens do not belong in Wrangler configuration or source control.
 
@@ -110,7 +110,14 @@ The Worker accepts download URLs only from the two documented ICANN CZDS hosts a
 
 The first staging `.com` run on 2026-09-27 exceeded Worker CPU time while parsing a 4,961,932,317-byte compressed artifact. The replacement parser runs in a Cloudflare Container for the zones listed in `CZDS_CONTAINER_ZONES`. The Workflow polls its state without holding a long CPU-bound step. The Container streams the zone, and its private outbound handler writes bounded deltas through the existing R2 and D1 bindings. Only a complete gzip stream with matching artifact length and contiguous delta counts can move the job to `staged`. The earlier seven partial staging deltas were not published. The staging Cron remains disabled.
 
-The staging compaction Queue consumer was temporarily removed while the new `.com` run is verified. This prevents its large delta set from reducing against an empty catalog before the seed is staged. Reconcile the queued `.com` deltas with the seed before reconnecting the consumer. Do not enable `.com` in production until the full staging run completes and its cost and result counts are reviewed.
+The staging `.com` Workflow completed on 2026-09-28 with 8,760 contiguous
+deltas and 175,195,918 records. The staging seed is active, but the compaction
+Queue consumer remains disconnected and the Cron remains disabled. A local
+pilot reduced one partition from a real `.com` delta against the seed, then
+activated and rolled back the candidate in disposable storage. It did not
+process the full delta or backlog. Reconcile the queued deltas with the seed
+and measure the full reduction cost before reconnecting the consumer. Do not
+switch the production hostname until the operator approves the cutover.
 
 ## Generation reduction and publication
 

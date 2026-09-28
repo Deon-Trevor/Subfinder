@@ -1,0 +1,71 @@
+{
+  "task": {
+    "id": "task-subfinder-staging-activation",
+    "slug": "subfinder-staging-activation",
+    "title": "Validate the Cloudflare seed and stage the Subfinder cutover"
+  },
+  "status": {
+    "state": "in_progress",
+    "active_criterion": "bounded-com-compaction-pilot",
+    "decision": "no_go_for_production_cutover"
+  },
+  "scope": {
+    "touched_files": [
+      "cloudflare/compaction-worker/wrangler.staging.jsonc",
+      "cloudflare/compaction-worker/wrangler.staging-admin.jsonc",
+      "cloudflare/compaction-worker/test/staging-config.test.js",
+      "cloudflare/compaction-worker/test/worker.test.js",
+      "cloudflare/index-worker/src/index.js",
+      "cloudflare/index-worker/test/staging-config.test.js",
+      "cloudflare/index-worker/test/worker.test.js",
+      "cloudflare/index-worker/wrangler.jsonc",
+      "docs/.vitepress/config.mjs",
+      "docs/public/_redirects",
+      "docs/README.md",
+      "docs/operations/cloudflare.md",
+      "web/index.html",
+      "README.md"
+    ],
+    "planned_slices": [
+      "safe-staging-admin",
+      "staging-seed-activation",
+      "read-path-parity",
+      "bounded-com-compaction-pilot",
+      "production-readiness"
+    ],
+    "completed_slices": [
+      "safe-staging-admin",
+      "staging-seed-activation",
+      "read-path-parity",
+      "bounded-local-com-pilot",
+      "production-readiness-audit"
+    ]
+  },
+  "evidence": {
+    "criteria_coverage": ".codex/evidence/task-subfinder-staging-activation/criteria-coverage.json",
+    "validation_commands": ".codex/evidence/task-subfinder-staging-activation/validation-commands.txt",
+    "scenario_artifacts": [
+      ".codex/evidence/task-subfinder-staging-activation/scenario-staging-activation.txt",
+      ".codex/evidence/task-subfinder-staging-activation/scenario-read-worker-docs.txt",
+      ".codex/evidence/task-subfinder-staging-activation/scenario-com-pilot.txt",
+      ".codex/evidence/task-subfinder-staging-activation/scenario-production-readiness.txt"
+    ],
+    "cleanup_receipts": [
+      ".codex/evidence/task-subfinder-staging-activation/scenario-staging-activation.txt",
+      ".codex/evidence/task-subfinder-staging-activation/scenario-com-pilot.txt"
+    ]
+  },
+  "risks": {
+    "open_questions": [
+      "What bounded remote staging generation can measure reducer time and cost before the 8760-delta backlog is released?"
+    ],
+    "residual_risk": [
+      "The initial seed has no prior Cloudflare root for rollback.",
+      "The .com backlog contains 8760 deltas and has not been reduced end to end.",
+      "The local pilot covered one partition of one real delta, not remote staging throughput or cost."
+    ]
+  },
+  "notes": {
+    "summary": "Production cutover is explicitly out of scope until the user returns and approves it."
+  }
+}

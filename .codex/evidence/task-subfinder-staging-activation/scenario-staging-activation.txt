@@ -1,0 +1,10 @@
+Staging activation, 2026-09-28 UTC
+
+Staging compaction configuration: no Cron and no Queue consumer. Remote Queue consumer list: [].
+Local admin configuration: remote R2 subfinder-catalog-stage and remote D1 subfinder-generation-stage-ledger. No route, Cron or Queue binding.
+Local admin /health: 200. Register-seed without token: 403. Wrong token: 403. Correct token with missing candidate: 409.
+Register seed-20260927: 200, state published. D1 recorded 256 partitions and candidate SHA-256 ba70287c2c3ce66918e906d2630a07f877cfb0bc9d0211ebe84acab4128f825d.
+Activate seed-20260927: 200, duplicate false. D1 state active. Remote catalog/root.json was retrieved and compared byte-for-byte with the verified local candidate.
+Staging read Worker /ready: 200, generation seed-20260927, hostname_count 163003012.
+The temporary local admin process was stopped; port 8788 was no longer listening. The admin token remains in the Mac Keychain, service subfinder-stage-publish, account local-admin. No token value is recorded here.
+Production hostname and production storage were not changed.

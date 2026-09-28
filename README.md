@@ -32,6 +32,9 @@ literally. For local development, see the [getting-started guide](docs/getting-s
 
 The documentation site has its own Cloudflare Pages build. See
 [docs/README.md](docs/README.md) for local preview and Pages settings.
+The Cloudflare preview runs at [subfinder.pundit.workers.dev](https://subfinder.pundit.workers.dev),
+with documentation at [its `/docs/` path](https://subfinder.pundit.workers.dev/docs/).
+The production hostname remains on the existing service until cutover approval.
 
 ## Project layout
 

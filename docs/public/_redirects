@@ -1,0 +1,3 @@
+/docs / 200
+/docs/ / 200
+/docs/* /:splat 200

@@ -1,0 +1,21 @@
+Read Worker and docs verification, 2026-09-28 UTC
+
+Live URL: https://subfinder.pundit.workers.dev
+Worker version after the final UI and proxy patch: 64e20357-72fe-4a57-a48b-f8fe7e62df4f
+Worker version after the preview-only indexing and hashed asset cache patch: 3cbc152b-7559-4aeb-a30c-ecc9dcd36ed2
+R2 binding: private subfinder-catalog-stage. No production custom domain was changed.
+
+Staging /ready: 200, generation seed-20260927, 163003012 hostnames.
+Full /v1/records arrays matched the local seed export exactly for cloudflare.com (757), example.com (1), and syncpundit.io (8). The comparison included hostname, first_seen, and every provenance row.
+The live Worker returned 200 for /, /ready, /health, /v1/search?apex=example.com&format=json, /docs/, /docs/getting-started, and /docs/mark.svg. /docs returned 308 to /docs/.
+
+The separate Direct Upload Pages project is subfinder-docs at https://subfinder-docs.pages.dev. The Pages root, /docs/, /docs/getting-started, and /docs/assets/style.CLGKwGHM.css returned 200 after its _redirects rules were deployed. The Worker strips /docs when fetching Pages assets. Its proxy does not forward Authorization or Cookie headers, and strips Set-Cookie from the Pages response. The focused test passed.
+
+The live protected batch endpoint rejected an unauthenticated submission with 401. A valid preview token admitted three domains with 202. Job e216d32cbb304b08b8b017fc68a6836a finished: 3 completed, 0 failed, 0 outstanding quota units. One immutable chunk held three result sets with 1, 8, and 757 records. The token was stored in the Mac Keychain, not the repository; the Worker secret holds only its SHA-256 digest. The token remained valid after the final Worker deployment.
+The live MCP client listed only search and returned example.com for an example.com lookup.
+
+Browser checks: the VitePress home rendered in light and dark mode; the navigation logo and hero mark remained visible in both. The live app rendered the example.com record and a no-record result without probing. The temporary mobile viewport reported innerWidth 390, bodyWidth 375, and scrollWidth 375, but its screenshot capture was unusually narrow. Responsive visual QA is therefore not fully proven. The browser viewport override was reset.
+
+Visual QA verdict: web surface; visual correctness pass; state correctness pass; responsive sanity unproven; regression check pass; design quality pass; performance sanity unproven. The screenshots are in the browser-tool output for this task, not a saved repository file. No policy gate was narrowed.
+
+After the final Worker deployment, live HEAD-equivalent GET probes returned 200 with X-Robots-Tag: noindex on the Worker root and /docs/, and on the direct Pages /docs/. The real hashed CSS /docs/assets/style.CLGKwGHM.css returned 200, text/css, X-Robots-Tag: noindex, and Cache-Control: public, max-age=31536000, immutable. /v1/records?apex=example.com returned one record. The static noindex rule is scoped to the preview host; the docs proxy strips the Pages noindex rule on other hostnames. The latter path was unit-tested, not deployed to a production hostname.

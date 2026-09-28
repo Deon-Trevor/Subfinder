@@ -1,12 +1,13 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
+  base: '/docs/',
   title: 'Subfinder',
   description: 'Passive subdomain index documentation',
   cleanUrls: true,
   srcExclude: ['README.md'],
   head: [
-    ['link', { rel: 'icon', href: '/mark.svg', type: 'image/svg+xml' }],
+    ['link', { rel: 'icon', href: '/docs/mark.svg', type: 'image/svg+xml' }],
     ['meta', { name: 'theme-color', content: '#101a26' }]
   ],
   themeConfig: {

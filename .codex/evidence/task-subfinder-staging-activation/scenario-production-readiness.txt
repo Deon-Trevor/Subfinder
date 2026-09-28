@@ -1,0 +1,9 @@
+Production readiness audit, 2026-09-28 UTC
+
+Decision: no-go for production hostname cutover. The user reserved that decision, and the full staging compaction backlog is unverified.
+
+Staging CZDS job 8b302c90798d27cf43c03d52c341787fd48c03c4b90ecb44acb0dbbc1a42e107 is complete: 8,760 deltas with chunk indexes 0 through 8759 and 175,195,918 records. The staging generation ledger has one active seed, no catalog generation rows, and no registered delta rows. The staging compaction Queue has no consumer; the staging Cron is disabled. This is intentional and must not be changed just to make the queue drain.
+
+The user-facing Worker at subfinder.pundit.workers.dev now serves the stage seed and documentation. Its /ready reports seed-20260927. It is a preview, not the production subfinder.syncpundit.io hostname. The preview token was tested; the production client-token and domain cutover were not changed.
+
+Before production approval, reconcile the 8,760 staging deltas with the seed, run a remote bounded generation, verify its candidate against exact-apex results and cost, and decide how to process the remaining backlog without exceeding the reducer memory bound. Verify ongoing CT, URLScan, and CZDS ingestion in the intended production configuration. The initial seed has no earlier Cloudflare root to roll back to. Keep the current service available until an independent rollback path is ready.

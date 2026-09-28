@@ -1,0 +1,51 @@
+[pass] npm test (cloudflare/compaction-worker)
+  notes: current run 9 passed, 2 optional tests skipped (stress and real .com partition)
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-staging-activation.txt
+
+[pass] wrangler deploy --config wrangler.staging.jsonc --dry-run
+  notes: queue producer remains bound; no consumer trigger is declared
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-staging-activation.txt
+
+[pass] curl POST /admin/register-seed without token, wrong token, valid token
+  notes: 403, 403, then 200 for seed-20260927
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-staging-activation.txt
+
+[pass] curl POST /admin/activate with local admin token
+  notes: 200; root matches candidate, D1 seed active, read Worker ready
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-staging-activation.txt
+
+[pass] live /v1/records exact parity for cloudflare.com, example.com, syncpundit.io
+  notes: all hostname and provenance rows matched the local export
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-read-worker-docs.txt
+
+[pass] npm test (cloudflare/index-worker)
+  notes: 24 passed, 1 optional full 25K delivery test skipped
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-read-worker-docs.txt
+
+[pass] npm run check (docs)
+  notes: 8 source pages checked; VitePress built for /docs/
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-read-worker-docs.txt
+
+[pass] live preview HTTP, MCP and authenticated three-domain durable batch
+  notes: user-facing Worker and Pages path returned 200; batch completed 3/3
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-read-worker-docs.txt
+
+[pass] SUBFINDER_STRESS=1 npm test (cloudflare/compaction-worker)
+  notes: 10 passed, including 20K-record map and fail-closed reducer bound
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-com-pilot.txt
+
+[pass] optional real .com partition test (cloudflare/compaction-worker)
+  notes: SUBFINDER_REAL_DELTA and SUBFINDER_EXPORT set for node --test --test-name-pattern='one real CZDS partition' test/worker.test.js; 55 real records merged with seed b4, candidate activated and rolled back locally
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-com-pilot.txt
+
+[pass] npm run check (docs), npm test (cloudflare/index-worker)
+  notes: 8 docs pages built; 24 passed, 1 optional 25K delivery test skipped after preview header change
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-read-worker-docs.txt
+
+[pass] live preview header and cache probes
+  notes: Worker / and /docs/, direct Pages /docs/ return X-Robots-Tag noindex; Worker hashed docs CSS returns immutable one-year cache header; /v1/records?apex=example.com returns 1 record
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-read-worker-docs.txt
+
+[no-go] production cutover audit
+  notes: 8760 staging deltas are not registered or reduced; production hostname unchanged
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-production-readiness.txt

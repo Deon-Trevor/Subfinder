@@ -1,8 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "subfinder-index-spike",
+  "name": "subfinder",
   "main": "src/index.js",
   "compatibility_date": "2026-09-27",
+  "workers_dev": true,
   "assets": {
     "directory": "../../web",
     "binding": "ASSETS",
@@ -11,13 +12,15 @@
       "/health",
       "/ready",
       "/mcp",
-      "/internal/*"
+      "/internal/*",
+      "/docs",
+      "/docs/*"
     ]
   },
   "r2_buckets": [
     {
       "binding": "CATALOG",
-      "bucket_name": "subfinder-index-spike"
+      "bucket_name": "subfinder-catalog-stage"
     }
   ],
   "durable_objects": {
@@ -41,6 +44,8 @@
     "QUEUED_BATCH_MAX_PENDING": "128",
     "QUEUED_BATCH_MAX_PENDING_PER_TOKEN": "16",
     "CATALOG_ROOT_KEY": "catalog/root.json",
+    "DOCS_ORIGIN": "https://subfinder-docs.pages.dev",
+    "MCP_ALLOWED_HOSTS": "subfinder.pundit.workers.dev",
     "MCP_RESULT_LIMIT": "100000",
     "PUBLIC_REQUEST_LIMIT": "1000",
     "TOKEN_REQUEST_LIMIT": "250000"

@@ -59,6 +59,39 @@ function errorResponse(status, detail, headers = {}) {
   );
 }
 
+export async function docsPage(request, env, url, upstreamFetch = fetch) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return errorResponse(405, "method not allowed");
+  }
+  if (url.pathname === "/docs") {
+    return Response.redirect(`${url.origin}/docs/${url.search}`, 308);
+  }
+  const upstream = new URL(env.DOCS_ORIGIN);
+  upstream.pathname = url.pathname.slice("/docs".length);
+  upstream.search = url.search;
+  const headers = new Headers();
+  for (const name of ["accept", "if-none-match", "if-modified-since", "range"]) {
+    const value = request.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  const response = await upstreamFetch(upstream, { method: request.method, headers });
+  const returnedHeaders = new Headers(response.headers);
+  returnedHeaders.delete("set-cookie");
+  returnedHeaders.delete("x-robots-tag");
+  if (url.hostname === "subfinder.pundit.workers.dev") {
+    returnedHeaders.set("x-robots-tag", "noindex");
+  }
+  const versionedAsset = /^\/docs\/assets\/.*\.[A-Za-z0-9_-]{8,}\.(?:lean\.)?(?:js|css|woff2?)$/;
+  if (response.ok && versionedAsset.test(url.pathname)) {
+    returnedHeaders.set("cache-control", "public, max-age=31536000, immutable");
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: returnedHeaders,
+  });
+}
+
 function bytesToHex(bytes) {
   return [...new Uint8Array(bytes)]
     .map((value) => value.toString(16).padStart(2, "0"))
@@ -1052,6 +1085,9 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     try {
+      if (url.pathname === "/docs" || url.pathname.startsWith("/docs/")) {
+        return await docsPage(request, env, url);
+      }
       if (url.pathname === "/mcp") return await mcp(request, env);
       if (
         request.method === "POST" &&
