@@ -236,6 +236,18 @@ async function waitForRegistration(deltaId) {
   throw new Error("replacement was queued but registration is not yet verified");
 }
 
+async function purgeRegisteredDeadLetter(body) {
+  const page = await queueApi(DEAD_QUEUE, "messages/peek", { batch_size: 100 });
+  const matches = (page.messages ?? []).filter((message) => {
+    const current = JSON.parse(message.body);
+    return current.delta_id === body.delta_id && current.object_key === body.object_key;
+  });
+  if (matches.length !== 1 || !matches[0].ref) {
+    throw new Error("a fresh reference for the registered dead-letter is unavailable");
+  }
+  await queueApi(DEAD_QUEUE, "messages/purge", { refs: [{ ref: matches[0].ref }] });
+}
+
 async function repairDeadLetters(jobId, limit, execute) {
   const generations = sql("SELECT COUNT(*) AS count FROM catalog_generations",
     "subfinder-generation-stage-ledger");
@@ -262,11 +274,11 @@ async function repairDeadLetters(jobId, limit, execute) {
     });
     for (let offset = 0; offset < selected.length; offset += 3) {
       const group = work.slice(offset, offset + 3);
-      const settled = await Promise.allSettled(group.map(async ({ message, body, chunkIndex }) => {
+      const settled = await Promise.allSettled(group.map(async ({ body, chunkIndex }) => {
         const result = await repairChunk(jobId, chunkIndex, execute, body);
         if (execute) {
           await waitForRegistration(result.replacement_delta_id);
-          await queueApi(DEAD_QUEUE, "messages/purge", { refs: [{ ref: message.ref }] });
+          await purgeRegisteredDeadLetter(body);
         }
         return result;
       }));
