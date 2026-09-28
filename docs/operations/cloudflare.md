@@ -92,6 +92,45 @@ npx wrangler secret put URLSCAN_API_KEY --config wrangler.jsonc
 npx wrangler d1 migrations apply subfinder-urlscan-control --remote --config wrangler.jsonc
 ```
 
+### CT and URLScan staging
+
+The staging configurations are
+`cloudflare/ingest-worker/wrangler.staging.jsonc` and
+`cloudflare/urlscan-worker/wrangler.staging.jsonc`. Each Worker has its own
+control D1 database, job Queue, and dead-letter Queue. Both write deltas to
+`subfinder-catalog-stage` and notify `subfinder-compaction-stage`. They do not
+use the production hostname. Cloudflare selected the D1 placement; neither
+configuration requests a region.
+
+The staging D1 migrations are applied. Both source tables and job tables are
+empty. Neither Worker is deployed, both Cron lists are empty, and no URLScan
+API key is set for staging. These settings make provider traffic impossible
+until an operator deploys a Worker and adds a source. The staging CT settings
+allow one source and 16 entries per scheduled range. URLScan allows one source,
+100 results per page, and 25 provider requests per UTC day. These are staging
+test bounds, not product limits.
+
+Run the local tests and compile each staging configuration without deploying:
+
+```sh
+cd cloudflare/ingest-worker
+npm test
+npx wrangler deploy --dry-run --config wrangler.staging.jsonc
+
+cd ../urlscan-worker
+npm test
+npx wrangler deploy --dry-run --config wrangler.staging.jsonc
+```
+
+Before a live provider test, review the exact CT log URL and add it to
+`ct_sources`, or set the staging `URLSCAN_API_KEY` secret and add a normalized
+apex to `urlscan_sources`. Keep Cron disabled for a manual test. Reconcile the
+CZDS dead-letter backlog before mixing new deltas into the shared staging
+compaction Queue. The staging URLScan quota lives in its own D1 database; it
+does not reserve requests from a production deployment that uses the same
+URLScan account. Check the account's remaining provider quota before a live
+test.
+
 ## CZDS ingestion worker
 
 `czds-worker` uses a daily Cron to authenticate, validate the approved ICANN link feed, and start one durable Workflow per selected zone. The Workflow streams the gzip zone, extracts NS owners, and writes bounded immutable deltas. D1 exposes `queued`, `running`, `staged`, `complete`, and `failed` separately. Delta notifications are sent only after the entire zone reaches `staged`, so a partial zone cannot enter a catalog generation.
