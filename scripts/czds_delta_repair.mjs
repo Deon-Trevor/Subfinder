@@ -123,10 +123,19 @@ function existingRepair(jobId, chunkIndex) {
 }
 
 async function pushReady(deltaId, objectKey) {
-  await queueApi(QUEUE, "messages", { content_type: "json", body: {
+  const message = { content_type: "json", body: {
     schema_version: "subfinder.delta-ready.v1", delta_id: deltaId,
     source_kind: "czds", object_key: objectKey,
-  } });
+  } };
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await queueApi(QUEUE, "messages", message);
+      return;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+    }
+  }
 }
 
 let cachedToken;
@@ -148,7 +157,8 @@ async function queueApi(queue, method, body) {
   const result = await response.json();
   if (!response.ok || !result.success || result.result?.errors?.length ||
       Object.keys(result.result?.warnings ?? {}).length) {
-    throw new Error(`Queue ${method} failed`);
+    throw new Error(`Queue ${method} failed (HTTP ${response.status}, code ${
+      result.errors?.[0]?.code ?? "none"})`);
   }
   return result.result;
 }
