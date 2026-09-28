@@ -3,6 +3,7 @@
 import argparse
 from collections import Counter
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -90,6 +91,22 @@ def read_ledger(job_id, zone, page_size):
     ))
 
 
+def read_repairs(job_id, page_size):
+    return list(paged_query(
+        "czds-worker", "subfinder-czds-stage-control",
+        lambda cursor, limit: (
+            "SELECT chunk_index, original_delta_id, original_object_key, "
+            "original_record_count, original_document_sha256, replacement_delta_id, "
+            "replacement_object_key, replacement_record_count, "
+            "replacement_document_sha256, excluded_record_count "
+            "FROM czds_delta_repairs "
+            f"WHERE job_id = '{job_id}' AND chunk_index > {cursor if cursor is not None else -1} "
+            f"ORDER BY chunk_index LIMIT {limit}"
+        ),
+        lambda row: row["chunk_index"], page_size,
+    ))
+
+
 def read_generations():
     rows = wrangler_query(
         "compaction-worker", "subfinder-generation-stage-ledger",
@@ -98,7 +115,8 @@ def read_generations():
     return {row["state"]: row["count"] for row in rows}
 
 
-def reconcile(job, source, ledger, require_complete=False):
+def reconcile(job, source, ledger, require_complete=False, repairs=None):
+    repairs = repairs or []
     issues = []
     expected_count = job["delta_count"]
     expected_records = job["hostname_count"]
@@ -113,18 +131,52 @@ def reconcile(job, source, ledger, require_complete=False):
     by_id = {row["delta_id"]: row for row in ledger}
     if len(by_id) != len(ledger):
         issues.append("duplicate delta identities in ledger response")
-    source_ids = {row["delta_id"] for row in source}
-    if len(source_ids) != len(source):
+    original_ids = {row["delta_id"] for row in source}
+    if len(original_ids) != len(source):
         issues.append("duplicate delta identities in source")
+    source_by_chunk = {row["chunk_index"]: row for row in source}
+    repair_by_chunk = {row["chunk_index"]: row for row in repairs}
+    if len(repair_by_chunk) != len(repairs):
+        issues.append("duplicate repair chunk indexes")
+    for repair in repairs:
+        original = source_by_chunk.get(repair["chunk_index"])
+        replacement_sha = repair["replacement_document_sha256"]
+        expected_id = hashlib.sha256(
+            f"{repair['original_delta_id']}:{replacement_sha}".encode()).hexdigest()
+        expected_key = (
+            f"ingest/czds/{job.get('zone', 'com')}/{job.get('job_id', '')}"
+            f"-{repair['chunk_index']}-repair-{replacement_sha}.json.gz"
+        )
+        if (original is None or
+                repair["original_delta_id"] != original["delta_id"] or
+                repair["original_object_key"] != original["object_key"] or
+                repair["original_record_count"] != original["record_count"] or
+                repair["replacement_record_count"] <= 0 or
+                repair["excluded_record_count"] <= 0 or
+                repair["replacement_record_count"] + repair["excluded_record_count"] != original["record_count"] or
+                not re.fullmatch(r"[a-f0-9]{64}", repair["original_document_sha256"]) or
+                not re.fullmatch(r"[a-f0-9]{64}", repair["replacement_document_sha256"]) or
+                repair["replacement_delta_id"] != expected_id or
+                repair["replacement_object_key"] != expected_key):
+            issues.append(f"repair audit mismatch at chunk {repair['chunk_index']}")
+    source_ids = {repair_by_chunk[row["chunk_index"]]["replacement_delta_id"]
+                  if row["chunk_index"] in repair_by_chunk else row["delta_id"]
+                  for row in source}
+    if len(source_ids) != len(source):
+        issues.append("duplicate effective delta identities")
     missing = []
     for row in source:
-        registered = by_id.get(row["delta_id"])
+        repair = repair_by_chunk.get(row["chunk_index"])
+        effective_id = repair["replacement_delta_id"] if repair else row["delta_id"]
+        effective_key = repair["replacement_object_key"] if repair else row["object_key"]
+        effective_count = repair["replacement_record_count"] if repair else row["record_count"]
+        registered = by_id.get(effective_id)
         if registered is None:
             missing.append(row["chunk_index"])
             continue
         if (registered["source_kind"] != "czds" or
-                registered["object_key"] != row["object_key"] or
-                registered["record_count"] != row["record_count"] or
+                registered["object_key"] != effective_key or
+                registered["record_count"] != effective_count or
                 not re.fullmatch(r"[a-f0-9]{64}", registered["object_sha256"]) or
                 registered["object_bytes"] <= 0):
             issues.append(f"ledger identity or metadata mismatch at chunk {row['chunk_index']}")
@@ -136,11 +188,18 @@ def reconcile(job, source, ledger, require_complete=False):
         issues.append(f"{failed} ledger deltas have recorded errors")
     if require_complete and missing:
         issues.append(f"{len(missing)} source chunks are not registered")
+    expected_index_records = sum(row["record_count"] for row in source) - sum(
+        row["excluded_record_count"] for row in repairs)
+    if not missing and expected_index_records != sum(row["record_count"] for row in ledger):
+        issues.append("indexed record count differs from effective source total")
     return {
         "status": "failed" if issues else "pending" if missing else "complete",
         "source_state": job["state"],
         "source_chunks": len(source),
         "source_records": sum(row["record_count"] for row in source),
+        "repaired_chunks": len(repairs),
+        "excluded_records": sum(row["excluded_record_count"] for row in repairs),
+        "expected_index_records": expected_index_records,
         "ledger_chunks": len(ledger),
         "ledger_records": sum(row["record_count"] for row in ledger),
         "ledger_states": dict(Counter(row["state"] for row in ledger)),
@@ -253,9 +312,11 @@ def main():
         )
         if not args.metrics_only:
             job, source = read_job(args.job_id, args.page_size)
+            job["job_id"] = args.job_id
+            repairs = read_repairs(args.job_id, args.page_size)
             ledger = read_ledger(args.job_id, job["zone"], args.page_size)
             generations = read_generations()
-            result["reconciliation"] = reconcile(job, source, ledger, args.require_complete)
+            result["reconciliation"] = reconcile(job, source, ledger, args.require_complete, repairs)
             result["reconciliation"]["generation_states"] = generations
             if generations:
                 result["reconciliation"]["issues"].append("staging generation started unexpectedly")

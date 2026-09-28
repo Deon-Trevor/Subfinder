@@ -167,6 +167,36 @@ dead-letter backlogs, and Worker errors before enabling generation work.
 Registration throughput is not a measurement of reducer throughput or the
 cost of a full generation.
 
+### Staging invalid-record recovery
+
+The CZDS parser and direct CT parser now skip bare public-suffix names while
+keeping registrable children. The Container callback checks CZDS records again
+before writing. The compaction Worker still rejects an invalid delta as a
+whole; it must not silently omit records during registration.
+
+Apply `czds-worker/migrations/0002_delta_repairs.sql` to the **staging** CZDS
+D1 database before recovery. `scripts/czds_delta_repair.mjs` inspects a failed
+original and only accepts the known bare-public-suffix-owner error. It copies
+all other records into a new immutable R2 object, records the original and
+replacement identities in `czds_delta_repairs`, and queues the replacement.
+The completed CZDS job and its original R2 objects remain unchanged. A rerun
+checks the audit row and object contents before doing anything else.
+
+```sh
+cd cloudflare/czds-worker
+npx wrangler d1 migrations apply subfinder-czds-stage-control --remote --config wrangler.staging.jsonc
+cd ../..
+node scripts/czds_delta_repair.mjs --job-id JOB_SHA256 --dlq --limit 5
+node scripts/czds_delta_repair.mjs --job-id JOB_SHA256 --dlq --limit 5 --execute
+python3.11 scripts/staging_reconciliation.py --job-id JOB_SHA256 --require-complete
+```
+
+`--execute` purges only the precise dead-letter reference after the replacement
+is registered in the generation ledger. If the source contains another kind of
+invalid record, the tool stops and leaves that message untouched. Keep Cron
+and generation work disabled until the source, repair audit, ledger, and both
+Queue backlogs reconcile.
+
 A local pilot reduced one partition from a real `.com` delta against the seed,
 then activated and rolled back the candidate in disposable storage. It did not
 process the full delta or backlog. Reconcile registered deltas with the seed and

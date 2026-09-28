@@ -1,5 +1,6 @@
 import {
   apexForHostname,
+  normalizeApex,
   normalizeHostname,
 } from "../../index-worker/src/domain-policy.js";
 
@@ -279,7 +280,7 @@ export function zoneRecord(rawLine, zone, previousOwner) {
       return { record: null, previousOwner: ownerToken };
     }
     return {
-      record: { apex: apexForHostname(hostname), hostname, first_seen: null },
+      record: { apex: normalizeApex(apexForHostname(hostname)), hostname, first_seen: null },
       previousOwner: ownerToken,
     };
   } catch {
@@ -356,6 +357,7 @@ export async function appendCzdsChunk(env, jobId, chunkIndex, records) {
   for (const record of records) {
     if (typeof record?.hostname !== "string" ||
         normalizeHostname(record.hostname) !== record.hostname ||
+        normalizeApex(record.apex) !== record.apex ||
         apexForHostname(record.hostname) !== record.apex ||
         !record.hostname.endsWith(`.${job.zone}`) ||
         record.first_seen !== null) {

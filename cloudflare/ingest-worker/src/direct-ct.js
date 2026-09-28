@@ -7,6 +7,7 @@ import {
 
 import {
   apexForHostname,
+  normalizeApex,
   normalizeHostname,
 } from "../../index-worker/src/domain-policy.js";
 
@@ -131,13 +132,19 @@ export function recordsFromEntries(entries) {
   for (const entry of entries) {
     const firstSeen = entryFirstSeen(entry);
     for (const hostname of entryHostnames(entry)) {
+      let apex;
+      try {
+        apex = normalizeApex(apexForHostname(hostname));
+      } catch {
+        continue;
+      }
       const previous = records.get(hostname);
       if (
         previous === undefined ||
         (firstSeen !== null && (previous.first_seen === null || firstSeen < previous.first_seen))
       ) {
         records.set(hostname, {
-          apex: apexForHostname(hostname),
+          apex,
           first_seen: firstSeen,
           hostname,
         });

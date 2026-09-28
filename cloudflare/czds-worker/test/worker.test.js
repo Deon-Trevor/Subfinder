@@ -130,6 +130,49 @@ test("zone parser preserves owner continuation and ignores non-NS records", () =
 });
 
 
+test("zone parser skips public suffix owners but keeps registrable children", () => {
+  assert.equal(
+    zoneRecord("blogspot 3600 IN NS ns1.example.", "com", null).record,
+    null,
+  );
+  assert.deepEqual(
+    zoneRecord("tenant.blogspot 3600 IN NS ns1.example.", "com", null).record,
+    { apex: "tenant.blogspot.com", hostname: "tenant.blogspot.com", first_seen: null },
+  );
+});
+
+
+test("container callback refuses an unregistrable apex before writing a chunk", async () => {
+  const env = {
+    CONTROL: database,
+    CATALOG: bucket,
+    CZDS_USERNAME: "user",
+    CZDS_PASSWORD: "password",
+    CZDS_FETCHER: { fetch: fakeFetcher(gzipSync("example 3600 IN NS ns.example.\n")) },
+    CZDS_WORKFLOW: { create: async () => {} },
+  };
+  await scheduleCzds(env, new Date("2026-09-27T05:00:00.000Z"));
+  const jobId = (await database.prepare("SELECT job_id FROM czds_jobs").first()).job_id;
+  await claimCzdsJob(env, jobId);
+  await beginCzdsArtifact(env, jobId, '"artifact"||100');
+  await assert.rejects(
+    appendCzdsChunk(env, jobId, 0, [
+      { apex: "blogspot.com", hostname: "blogspot.com", first_seen: null },
+    ]),
+    /eTLD\+1/,
+  );
+  assert.equal((await database.prepare(
+    "SELECT count(*) AS count FROM czds_job_deltas WHERE job_id = ?",
+  ).bind(jobId).first()).count, 0);
+  await appendCzdsChunk(env, jobId, 0, [
+    { apex: "tenant.blogspot.com", hostname: "tenant.blogspot.com", first_seen: null },
+  ]);
+  assert.equal((await database.prepare(
+    "SELECT count(*) AS count FROM czds_job_deltas WHERE job_id = ?",
+  ).bind(jobId).first()).count, 1);
+});
+
+
 test("scheduled Workflow stages chunked deltas and publishes only after the full zone", async () => {
   const zone = [
     "$ORIGIN com.",

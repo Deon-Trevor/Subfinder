@@ -57,6 +57,17 @@ test("direct CT ignores malformed entries and keeps deterministic apex records",
 });
 
 
+test("direct CT excludes public suffix names but keeps registrable children", () => {
+  assert.deepEqual(recordsFromEntries([{
+    dns_names: ["blogspot.com", "tenant.blogspot.com"],
+  }]), [{
+    apex: "tenant.blogspot.com",
+    first_seen: null,
+    hostname: "tenant.blogspot.com",
+  }]);
+});
+
+
 test("CT egress is HTTPS and exact-host allowlisted", () => {
   assert.equal(
     validatedLogUrl(
