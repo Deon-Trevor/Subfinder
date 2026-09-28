@@ -7,10 +7,18 @@ const workerRoot = resolve(import.meta.dirname, "..");
 const staging = JSON.parse(readFileSync(resolve(workerRoot, "wrangler.staging.jsonc")));
 const admin = JSON.parse(readFileSync(resolve(workerRoot, "wrangler.staging-admin.jsonc")));
 
-test("staging deploy cannot consume the pending compaction queue", () => {
+test("staging consumer is serial and cannot start generation reduction", () => {
   assert.equal(staging.workers_dev, false);
   assert.deepEqual(staging.triggers.crons, []);
-  assert.deepEqual(staging.queues.consumers, []);
+  assert.equal(staging.vars.REGISTRATION_ONLY, "true");
+  assert.deepEqual(staging.queues.consumers, [{
+    queue: "subfinder-compaction-stage",
+    max_batch_size: 1,
+    max_batch_timeout: 5,
+    max_retries: 8,
+    dead_letter_queue: "subfinder-compaction-stage-dead",
+    max_concurrency: 1,
+  }]);
   assert.equal(staging.r2_buckets[0].bucket_name, "subfinder-catalog-stage");
 });
 

@@ -537,6 +537,7 @@ export default {
   },
 
   async scheduled(_controller, env) {
+    if (env.REGISTRATION_ONLY === "true") return;
     await startGeneration(env);
     await startReduce(env);
   },
@@ -544,6 +545,12 @@ export default {
   async queue(batch, env) {
     for (const message of batch.messages) {
       try {
+        if (
+          env.REGISTRATION_ONLY === "true" &&
+          message.body?.schema_version !== DELTA_READY_SCHEMA_VERSION
+        ) {
+          throw new Error("registration-only consumer refuses generation work");
+        }
         if (message.body?.schema_version === DELTA_READY_SCHEMA_VERSION) {
           await registerDelta(env, message.body);
         } else if (message.body?.schema_version === MAP_JOB_SCHEMA_VERSION) {
@@ -555,6 +562,7 @@ export default {
         }
         message.ack();
       } catch (error) {
+        console.error("compaction queue message failed", String(error).slice(0, 300));
         await recordMapError(env, message.body, error);
         message.retry({ delaySeconds: 60 });
       }

@@ -111,13 +111,25 @@ The Worker accepts download URLs only from the two documented ICANN CZDS hosts a
 The first staging `.com` run on 2026-09-27 exceeded Worker CPU time while parsing a 4,961,932,317-byte compressed artifact. The replacement parser runs in a Cloudflare Container for the zones listed in `CZDS_CONTAINER_ZONES`. The Workflow polls its state without holding a long CPU-bound step. The Container streams the zone, and its private outbound handler writes bounded deltas through the existing R2 and D1 bindings. Only a complete gzip stream with matching artifact length and contiguous delta counts can move the job to `staged`. The earlier seven partial staging deltas were not published. The staging Cron remains disabled.
 
 The staging `.com` Workflow completed on 2026-09-28 with 8,760 contiguous
-deltas and 175,195,918 records. The staging seed is active, but the compaction
-Queue consumer remains disconnected and the Cron remains disabled. A local
-pilot reduced one partition from a real `.com` delta against the seed, then
-activated and rolled back the candidate in disposable storage. It did not
-process the full delta or backlog. Reconcile the queued deltas with the seed
-and measure the full reduction cost before reconnecting the consumer. Do not
-switch the production hostname until the operator approves the cutover.
+deltas and 175,195,918 records. The staging seed is active. The staging
+compaction Queue consumer is connected with a batch size and concurrency of
+one, eight retries, and a dead-letter Queue. `REGISTRATION_ONLY=true` makes
+the staging Worker refuse map and reduce Queue messages and skip scheduled
+generation work; refused messages retry and eventually reach the dead-letter
+Queue. The staging Cron also remains disabled. Queue delivery can register
+deltas but cannot start mapping, reduction, or root activation. A 98-message
+remote sample registered 1,960,000 records in about
+158 seconds, with no failed invocations observed in the sampled tail. The
+remaining messages are being delivered under the same bound. Check D1
+`catalog_deltas`, `catalog_generations`, the Queue dead-letter count, and Worker
+errors before enabling generation work. Registration throughput is not a
+measurement of reducer throughput or the cost of a full generation.
+
+A local pilot reduced one partition from a real `.com` delta against the seed,
+then activated and rolled back the candidate in disposable storage. It did not
+process the full delta or backlog. Reconcile registered deltas with the seed and
+measure remote mapping and reduction before enabling the Cron. Do not switch
+the production hostname until the operator approves the cutover.
 
 ## Generation reduction and publication
 

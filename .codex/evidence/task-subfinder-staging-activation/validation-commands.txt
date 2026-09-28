@@ -2,8 +2,8 @@
   notes: current run 9 passed, 2 optional tests skipped (stress and real .com partition)
   artifact: .codex/evidence/task-subfinder-staging-activation/scenario-staging-activation.txt
 
-[pass] wrangler deploy --config wrangler.staging.jsonc --dry-run
-  notes: queue producer remains bound; no consumer trigger is declared
+[pass] wrangler deploy --config wrangler.staging.jsonc --dry-run (initial seed pass)
+  notes: at that point queue producer remained bound and no consumer trigger was declared; later changed for the bounded registration pass
   artifact: .codex/evidence/task-subfinder-staging-activation/scenario-staging-activation.txt
 
 [pass] curl POST /admin/register-seed without token, wrong token, valid token
@@ -47,5 +47,21 @@
   artifact: .codex/evidence/task-subfinder-staging-activation/scenario-read-worker-docs.txt
 
 [no-go] production cutover audit
-  notes: 8760 staging deltas are not registered or reduced; production hostname unchanged
+  notes: at the time of this audit 8760 staging deltas were not registered or reduced; production hostname remains unchanged
   artifact: .codex/evidence/task-subfinder-staging-activation/scenario-production-readiness.txt
+
+[pass] npm test (cloudflare/compaction-worker), wrangler deploy --config wrangler.staging.jsonc --dry-run
+  notes: 9 passed, 2 optional skipped; staging configuration declares one consumer with max concurrency and batch size 1
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-queue-registration-mobile.txt
+
+[pass] live staging Queue sample and remote D1 query
+  notes: 98 registered deltas, 1960000 records, 0 generations; delivery resumed after sample
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-queue-registration-mobile.txt
+
+[pass] registration-only staging guard test and redeploy
+  notes: 10 compaction tests passed, 2 optional skipped; scheduled work is skipped and map/reduce messages retry without ack; remote D1 still had 0 generations at 321 registered deltas
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-queue-registration-mobile.txt
+
+[pass] npm test (cloudflare/index-worker) and browser QA at 320px and 390px
+  notes: 24 passed, 1 optional skipped; no horizontal overflow, Docs navigation visible and working; sticky search input is 224px on the 320px layout
+  artifact: .codex/evidence/task-subfinder-staging-activation/scenario-queue-registration-mobile.txt

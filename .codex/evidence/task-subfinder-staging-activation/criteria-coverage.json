@@ -6,9 +6,29 @@
       "status": "proven",
       "surface": "Cloudflare staging config and HTTP",
       "invocation": "Staging compaction deploy and protected /admin/register-seed probe",
-      "observable": "Staging admin route is reachable only with its secret; compaction consumer remains paused",
+      "observable": "Staging admin route is reachable only with its secret; Queue delivery is independently controlled",
       "artifacts": [
         ".codex/evidence/task-subfinder-staging-activation/scenario-staging-activation.txt"
+      ]
+    },
+    {
+      "id": "queue-registration-throughput",
+      "status": "partial",
+      "surface": "Staging Queue, D1, R2, and Worker tail",
+      "invocation": "Connect a one-at-a-time consumer and observe 98 live .com notifications",
+      "observable": "D1 registers 1.96 million records without creating a generation; a staging-only guard rejects generation work; registration CPU and rate are sampled, not full reduction cost",
+      "artifacts": [
+        ".codex/evidence/task-subfinder-staging-activation/scenario-queue-registration-mobile.txt"
+      ]
+    },
+    {
+      "id": "mobile-docs-discovery",
+      "status": "proven",
+      "surface": "Workers preview and proxied Pages docs",
+      "invocation": "Open homepage, search, and docs at 320px and 390px widths",
+      "observable": "Docs is visible, navigation works, the sticky mobile search remains usable, and the document has no horizontal overflow",
+      "artifacts": [
+        ".codex/evidence/task-subfinder-staging-activation/scenario-queue-registration-mobile.txt"
       ]
     },
     {

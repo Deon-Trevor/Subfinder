@@ -6,13 +6,14 @@
   },
   "status": {
     "state": "in_progress",
-    "active_criterion": "bounded-com-compaction-pilot",
+    "active_criterion": "remote-map-reduce-cost",
     "decision": "no_go_for_production_cutover"
   },
   "scope": {
     "touched_files": [
       "cloudflare/compaction-worker/wrangler.staging.jsonc",
       "cloudflare/compaction-worker/wrangler.staging-admin.jsonc",
+      "cloudflare/compaction-worker/src/index.js",
       "cloudflare/compaction-worker/test/staging-config.test.js",
       "cloudflare/compaction-worker/test/worker.test.js",
       "cloudflare/index-worker/src/index.js",
@@ -23,6 +24,7 @@
       "docs/public/_redirects",
       "docs/README.md",
       "docs/operations/cloudflare.md",
+      "web/app.css",
       "web/index.html",
       "README.md"
     ],
@@ -30,6 +32,8 @@
       "safe-staging-admin",
       "staging-seed-activation",
       "read-path-parity",
+      "queue-registration-throughput",
+      "mobile-docs-discovery",
       "bounded-com-compaction-pilot",
       "production-readiness"
     ],
@@ -37,6 +41,8 @@
       "safe-staging-admin",
       "staging-seed-activation",
       "read-path-parity",
+      "bounded-queue-registration-sample",
+      "mobile-docs-discovery",
       "bounded-local-com-pilot",
       "production-readiness-audit"
     ]
@@ -48,6 +54,7 @@
       ".codex/evidence/task-subfinder-staging-activation/scenario-staging-activation.txt",
       ".codex/evidence/task-subfinder-staging-activation/scenario-read-worker-docs.txt",
       ".codex/evidence/task-subfinder-staging-activation/scenario-com-pilot.txt",
+      ".codex/evidence/task-subfinder-staging-activation/scenario-queue-registration-mobile.txt",
       ".codex/evidence/task-subfinder-staging-activation/scenario-production-readiness.txt"
     ],
     "cleanup_receipts": [
@@ -57,12 +64,13 @@
   },
   "risks": {
     "open_questions": [
-      "What bounded remote staging generation can measure reducer time and cost before the 8760-delta backlog is released?"
+      "What bounded remote staging generation can measure map and reducer time, memory, and cost without publishing a root?",
+      "What is the full Queue delivery error and retry rate after all 8760 notifications have drained?"
     ],
     "residual_risk": [
       "The initial seed has no prior Cloudflare root for rollback.",
-      "The .com backlog contains 8760 deltas and has not been reduced end to end.",
-      "The local pilot covered one partition of one real delta, not remote staging throughput or cost."
+      "The .com backlog contains 8760 deltas; Queue registration is draining but has not been reduced end to end.",
+      "The remote rate and cost sample covers registration only. Mapping and reduction have not been measured remotely."
     ]
   },
   "notes": {

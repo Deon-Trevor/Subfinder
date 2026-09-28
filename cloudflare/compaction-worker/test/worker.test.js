@@ -15,6 +15,7 @@ import {
   startGeneration,
   startReduce,
 } from "../src/index.js";
+import worker from "../src/index.js";
 import { activateGeneration, registerSeed, rollbackGeneration } from "../src/publication.js";
 import { storeBundle } from "../src/reducer.js";
 import { DOMAIN_POLICY_VERSION, PSL_SHA256 } from "../../index-worker/src/domain-policy.js";
@@ -151,6 +152,24 @@ test("registers immutable deltas idempotently and rejects identity conflicts", a
     ...message,
     object_key: conflicting,
   }), /identity conflicts/);
+});
+
+
+test("registration-only staging refuses generation messages and scheduled work", async () => {
+  const delivery = { acked: false, retried: false };
+  await worker.scheduled({}, { REGISTRATION_ONLY: "true" });
+  await worker.queue({ messages: [{
+    body: {
+      schema_version: "subfinder.map-job.v1",
+      generation_id: "a".repeat(64),
+      delta_id: "b".repeat(64),
+    },
+    ack: () => { delivery.acked = true; },
+    retry: () => { delivery.retried = true; },
+  }] }, { REGISTRATION_ONLY: "true", LEDGER: database });
+  assert.deepEqual(delivery, { acked: false, retried: true });
+  const generation = await database.prepare("SELECT count(*) AS n FROM catalog_generations").first();
+  assert.equal(generation.n, 0);
 });
 
 
