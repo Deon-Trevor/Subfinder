@@ -41,6 +41,7 @@ export default defineConfig({
         items: [
           { text: 'Compose service', link: '/operations/compose' },
           { text: 'Cloudflare migration', link: '/operations/cloudflare' },
+          { text: 'Staging reconciliation', link: '/operations/staging-reconciliation' },
           { text: 'Web interface', link: '/explanation/web-interface' }
         ]
       }

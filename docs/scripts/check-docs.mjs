@@ -12,6 +12,7 @@ const pages = [
   'how-to/ingestion.md',
   'operations/compose.md',
   'operations/cloudflare.md',
+  'operations/staging-reconciliation.md',
   'explanation/web-interface.md'
 ]
 const requiredFacts = new Map([

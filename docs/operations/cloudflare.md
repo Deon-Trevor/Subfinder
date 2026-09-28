@@ -120,10 +120,13 @@ Queue. The staging Cron also remains disabled. Queue delivery can register
 deltas but cannot start mapping, reduction, or root activation. A 98-message
 remote sample registered 1,960,000 records in about
 158 seconds, with no failed invocations observed in the sampled tail. The
-remaining messages are being delivered under the same bound. Check D1
-`catalog_deltas`, `catalog_generations`, the Queue dead-letter count, and Worker
-errors before enabling generation work. Registration throughput is not a
-measurement of reducer throughput or the cost of a full generation.
+remaining messages are being delivered under the same bound. A later
+[full reconciliation](/operations/staging-reconciliation) found dead-lettered
+CZDS chunks with invalid public-suffix apexes; the sampled invocation tail
+was not proof of full coverage. Check both D1 databases, the live Queue and
+dead-letter backlogs, and Worker errors before enabling generation work.
+Registration throughput is not a measurement of reducer throughput or the
+cost of a full generation.
 
 A local pilot reduced one partition from a real `.com` delta against the seed,
 then activated and rolled back the candidate in disposable storage. It did not
