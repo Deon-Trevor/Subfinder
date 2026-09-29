@@ -46,6 +46,7 @@ export default defineConfig({
           { text: 'Staging compaction', link: '/operations/staging-compaction' },
           { text: 'Staging throughput and cost', link: '/operations/staging-cost' },
           { text: 'Next CZDS batch', link: '/operations/next-czds-batch' },
+          { text: 'Stage remaining CZDS zones', link: '/operations/czds-stage-sweep' },
           { text: 'Cutover acceptance', link: '/operations/cutover-acceptance' },
           { text: 'Web interface', link: '/explanation/web-interface' }
         ]

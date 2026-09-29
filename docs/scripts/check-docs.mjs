@@ -17,6 +17,7 @@ const pages = [
   'operations/staging-compaction.md',
   'operations/staging-cost.md',
   'operations/next-czds-batch.md',
+  'operations/czds-stage-sweep.md',
   'operations/cutover-acceptance.md',
   'explanation/web-interface.md'
 ]

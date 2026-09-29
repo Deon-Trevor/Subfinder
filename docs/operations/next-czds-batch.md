@@ -81,9 +81,10 @@ The ranking is frozen in `scripts/czds_top15_batch.json`. Run
 `node scripts/plan_czds_stage_batch.mjs` to compare it with the live staging
 ledger. That command only reads D1. It fails if a CZDS job is active, a
 ranked zone has a failed job requiring review, or the local stage-only,
-single-zone, Cron-free, single-Container settings have drifted. The staging
-config prepares all 15 zones for the Container parser, but retains
-`CZDS_ONLY_ZONE=biz` and no Cron. **Preparation does not start ingestion.**
+single-zone, Cron-free settings have drifted. The Container application has
+a two-instance safety ceiling, but the operator still runs only one
+Container parser job at a time. Read `CZDS_ONLY_ZONE` from the current
+staging config rather than this page. **Preparation does not start ingestion.**
 
 Before starting any row, confirm its exact name is in this account's fresh
 approved CZDS link feed. The scheduler enforces this at job creation; public
@@ -103,3 +104,8 @@ the separate publication gate has been reviewed. At roughly 63 million
 domains across the 13 public zone-count estimates, this is a substantial
 Container and R2 batch, not a free background task; measure the first large
 zone before committing to the rest.
+
+The next small-zone sweep is described in
+[Stage the remaining CZDS zones](/operations/czds-stage-sweep). It uses the
+Worker parser and historical local gzip sizes to pick fast candidates. Do
+not deploy a new CZDS Worker version while a Container parser job is active.
