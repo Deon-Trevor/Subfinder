@@ -135,7 +135,7 @@ counts; `POST .../{job_id}/cancel` releases unstarted work.
 
 One normal-hunt job accepts at most 25,000 unique apexes by default. The token
 allowance defaults to 250,000 apex units per UTC day, enough for ten full-sized
-normal hunts, while workers continue to claim only 25 apexes per slice.
+normal hunts, while workers claim up to 100 apexes per slice.
 
 Two durable `batch-worker` replicas consume bounded slices by default. A worker
 isolates a large apex and reports it in the chunk's `errors` collection rather

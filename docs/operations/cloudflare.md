@@ -66,7 +66,7 @@ cursor returns the same completed data. `POST .../{job_id}/cancel` releases
 unstarted work. Only the token that submitted a job can read or cancel it.
 
 The default token allowance is 250,000 apex units per UTC day and submission
-reserves one unit per apex. The Durable Object processes up to 25 apexes per
+reserves one unit per apex. The Durable Object processes up to 100 apexes per
 alarm slice, with separate limits for record count, provenance rows, and
 serialized bytes. A single oversized apex is reported as an error in its chunk
 without losing unrelated apexes. The configured bounds live in
@@ -87,6 +87,26 @@ SUBFINDER_EXPORT_DIR=/path/to/export node cloudflare/index-worker/scripts/benchm
 
 The optional `SUBFINDER_BENCH_DELAY_MS` simulates object-read delay. It does
 not measure live Cloudflare latency.
+
+For a live authenticated check, run the staging-only harness once without
+`--execute` to inspect the input digest, then repeat with `--execute`:
+
+```sh
+node cloudflare/index-worker/scripts/benchmark-live-batch.js \
+  --origin https://subfinder-index-stage.pundit.workers.dev \
+  --export /path/to/r2-export \
+  --key your-stable-run-id --execute
+```
+
+The harness reads the staging token from the Mac keychain or
+`SUBFINDER_BENCH_TOKEN`. It uses 1,200 indexed apexes and 10,800 synthetic
+misses, verifies every returned position, and reports quota settlement. Reuse
+the same key to inspect the same job without a second quota charge. On
+2026-09-29, staging Worker version
+`2f386018-5ab7-47d2-8b8c-849a34fa1e3a` delivered all 12,000 apexes in
+120 chunks. Server processing took 544.8 seconds, or 22.0 apexes per second.
+The run returned 1,200 nonempty results, zero apex errors, and zero outstanding
+quota. This synthetic mix measures the Worker, not a real Threat Hunter cohort.
 
 Regenerate the checked-in Python IDNA 2003 and private-PSL policy after an intentional `tldextract` snapshot change:
 

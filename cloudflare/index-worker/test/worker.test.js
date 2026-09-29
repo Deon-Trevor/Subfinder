@@ -912,7 +912,7 @@ test("a full 25K batch delivers every apex once", {
     }
     assert.equal(finalState, "done");
     assert.equal(seen.size, 25000);
-    assert.equal(cursor, 999);
+    assert.equal(cursor, 249);
     console.log(JSON.stringify({ stress: "25k-durable-batch", ms: Math.round(
       performance.now() - started), chunks: cursor + 1 }));
   } finally {
