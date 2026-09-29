@@ -190,37 +190,40 @@ async function readOverlay(env, generationId, prefix) {
   const overlay = new Map();
   let lastObservedAt = null;
   let count = 0;
-  for (const row of rows.results) {
-    if (Number(row.object_bytes) > 32 * 1024 * 1024) {
-      throw new Error("map fragment exceeds reducer memory bound");
-    }
-    const bytes = await checkedObject(env.CATALOG, row.object_key, row.object_sha256);
-    if (bytes.length !== Number(row.object_bytes)) throw new Error("map fragment size mismatch");
-    const fragment = JSON.parse(await gunzip(bytes));
-    if (
-      fragment.schema_version !== FRAGMENT_FORMAT ||
-      fragment.generation_id !== generationId || fragment.prefix !== prefix ||
-      fragment.delta_id !== row.delta_id || !Array.isArray(fragment.records) ||
-      typeof fragment.source !== "string" || !fragment.source ||
-      typeof fragment.observed_at !== "string"
-    ) throw new Error("map fragment identity mismatch");
-    if (Number.isNaN(new Date(fragment.observed_at).valueOf())) {
-      throw new Error("map fragment observation time is invalid");
-    }
-    if (lastObservedAt === null || fragment.observed_at > lastObservedAt) {
-      lastObservedAt = fragment.observed_at;
-    }
-    for (const record of fragment.records) {
-      const observations = overlay.get(record.apex) ?? [];
-      observations.push({
-        hostname: record.hostname,
-        first_seen: record.first_seen,
-        source: fragment.source,
-        observed_at: fragment.observed_at,
-      });
-      overlay.set(record.apex, observations);
-      count += 1;
-      if (count > maxRecords) throw new Error("partition exceeds reducer memory bound");
+  for (let offset = 0; offset < rows.results.length; offset += 5) {
+    const fragments = await Promise.all(rows.results.slice(offset, offset + 5).map(async (row) => {
+      if (Number(row.object_bytes) > 32 * 1024 * 1024) {
+        throw new Error("map fragment exceeds reducer memory bound");
+      }
+      const bytes = await checkedObject(env.CATALOG, row.object_key, row.object_sha256);
+      if (bytes.length !== Number(row.object_bytes)) throw new Error("map fragment size mismatch");
+      const fragment = JSON.parse(await gunzip(bytes));
+      if (
+        fragment.schema_version !== FRAGMENT_FORMAT ||
+        fragment.generation_id !== generationId || fragment.prefix !== prefix ||
+        fragment.delta_id !== row.delta_id || !Array.isArray(fragment.records) ||
+        typeof fragment.source !== "string" || !fragment.source ||
+        typeof fragment.observed_at !== "string" ||
+        Number.isNaN(new Date(fragment.observed_at).valueOf())
+      ) throw new Error("map fragment identity mismatch");
+      return fragment;
+    }));
+    for (const fragment of fragments) {
+      if (lastObservedAt === null || fragment.observed_at > lastObservedAt) {
+        lastObservedAt = fragment.observed_at;
+      }
+      for (const record of fragment.records) {
+        const observations = overlay.get(record.apex) ?? [];
+        observations.push({
+          hostname: record.hostname,
+          first_seen: record.first_seen,
+          source: fragment.source,
+          observed_at: fragment.observed_at,
+        });
+        overlay.set(record.apex, observations);
+        count += 1;
+        if (count > maxRecords) throw new Error("partition exceeds reducer memory bound");
+      }
     }
   }
   return { overlay, lastObservedAt };
