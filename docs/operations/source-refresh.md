@@ -28,13 +28,14 @@ not erase an older domain observation.
 
 ## Enable the direct feeds on staging
 
-Wait until the current `.com` generation is active and staging Queue work is
-idle. Keep the production hostname unchanged.
+Wait until all `.com` deltas are in active staging generations, no generation
+is mapping, mapped, reducing, or published, and both staging compaction Queues
+are idle. The first active generation alone does not meet this gate. Keep the
+production hostname unchanged.
 
-1. Apply `cloudflare/ingest-worker/migrations/0002_public_sources.sql`,
-   `0003_ct_log_discovery.sql`, `0004_ct_log_memberships.sql`, and
-   `0005_static_ct.sql` to the staging
-   CT D1 database.
+1. Check the staging CT D1 migration list. Migrations
+   `0002_public_sources.sql` through `0005_static_ct.sql` were already applied
+   as of 2026-09-29. Apply any missing migration before enabling a feed.
 2. Apply `cloudflare/compaction-worker/migrations/0003_public_bulk_source.sql`
    to the staging generation ledger while no map or reduce task is running.
    This migration copies the ledger and its fragment references in one D1

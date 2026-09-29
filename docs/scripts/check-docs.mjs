@@ -14,6 +14,10 @@ const pages = [
   'operations/cloudflare.md',
   'operations/source-refresh.md',
   'operations/staging-reconciliation.md',
+  'operations/staging-compaction.md',
+  'operations/staging-cost.md',
+  'operations/next-czds-batch.md',
+  'operations/cutover-acceptance.md',
   'explanation/web-interface.md'
 ]
 const requiredFacts = new Map([

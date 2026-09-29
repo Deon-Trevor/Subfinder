@@ -1,9 +1,10 @@
 # Next CZDS staging batch
 
-Prepare three zones in sequence after the `.com` generation is reduced,
-verified, and serving from the staging Worker. Do not start these jobs while
-the first generation is still reducing. Keep the staging Cron empty and the
-production hostname unchanged.
+Prepare three zones in sequence after all `.com` deltas are in verified,
+active staging generations and the compaction Queues are idle. The first
+500-delta `.com` generation was active on 2026-09-29, but another generation
+was already mapped and the backlog remained. Keep the staging Cron empty and
+the production hostname unchanged.
 
 | Order | Zone | Old local gzip size | Parser path to exercise |
 | --- | --- | ---: | --- |
@@ -38,5 +39,5 @@ exact-apex results on the staging Worker after activation; do not change
 `subfinder.syncpundit.io`.
 
 This page is a prepared batch, not authorization to start it. The live
-configuration remains restricted to `.com` until the current compaction is
-finished and reviewed.
+configuration remains restricted to `.com` until the full `.com` compaction
+chain is finished and reviewed.

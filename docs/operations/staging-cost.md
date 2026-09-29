@@ -1,8 +1,9 @@
 # Measure staging throughput and cost
 
-Use the read-only scorecard while the `.com` staging generation maps and
-reduces. It reads the CZDS job, the generation ledger, Queue metrics, and
-Cloudflare analytics. It does not list R2 objects or change the active root.
+Use the read-only scorecard while the `.com` staging generations map and
+reduce, and after each activation. It reads the CZDS job, generation ledger,
+Queue metrics, and Cloudflare analytics. It does not list R2 objects or change
+the active root.
 
 From the repository root, run:
 

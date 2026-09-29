@@ -19,12 +19,15 @@ hostname indexable without changing the preview site.
 
 `index-worker` serves the static UI, HTTP API, and the single MCP `search` tool. Public browser requests do not need a token. A valid bearer token gets its configured allowance and is required only for `/internal/v1/records/batch`.
 
-`index-worker/wrangler.staging.jsonc` deploys the same API code at
+`cloudflare/index-worker/wrangler.staging.jsonc` deploys the same API code at
 `subfinder-index-stage.pundit.workers.dev` with the private
 `subfinder-catalog-stage` R2 bucket. It has no static asset binding or custom
-domain. Both Workers currently read the staging root `seed-20260927`; neither
-changes `subfinder.syncpundit.io`. The pre-seed verification command applies
-only before root activation.
+domain. Both staging read Workers use the same active R2 root. On
+2026-09-29 at 16:01 UTC, `/ready` on the public preview reported generation
+`766d9f3c333a28f7eaeabfc42b859eecb081c2c0d839053df50297e48e0df16b`.
+The next 500-delta generation was mapped, not active. Check `/ready` and the
+staging generation ledger before acting; this snapshot will age. Neither
+Worker changes `subfinder.syncpundit.io`.
 
 The preview `CLIENT_TOKENS` secret uses a separate token from production.
 On the Mac used for staging, its raw value is stored in the keychain item
@@ -67,7 +70,8 @@ reserves one unit per apex. The Durable Object processes up to 25 apexes per
 alarm slice, with separate limits for record count, provenance rows, and
 serialized bytes. A single oversized apex is reported as an error in its chunk
 without losing unrelated apexes. The configured bounds live in
-`index-worker/wrangler.jsonc` and `index-worker/src/index.js`.
+`cloudflare/index-worker/wrangler.jsonc` and
+`cloudflare/index-worker/src/index.js`.
 
 Each slice looks up at most four apex locations concurrently and returns them
 in request order. The Durable Object keeps up to 64 verified partition indexes
@@ -135,7 +139,8 @@ control D1 database, job Queue, and dead-letter Queue. Both write deltas to
 use the production hostname. Cloudflare selected the D1 placement; neither
 configuration requests a region.
 
-The staging D1 migrations are applied. Both Workers were deployed on
+The staging CT and URLScan D1 migrations are applied. The separate compaction
+ledger migration `0003_public_bulk_source.sql` is not yet applied. Both Workers were deployed on
 2026-09-29 with empty Cron lists. The staging URLScan Worker received its
 `URLSCAN_API_KEY` secret on 2026-09-29. Its CT and URLScan Queues each have
 one producer and one consumer. Cron does not schedule provider work.
@@ -213,9 +218,10 @@ deltas and 175,195,918 records. The later
 [full reconciliation](/operations/staging-reconciliation) found bare
 public-suffix names in 219 chunks. Recovery retained 175,195,530 valid
 records across all 8,760 effective chunks. Both staging Queues were empty
-before compaction began on 2026-09-29. At that point, the active preview still
-served the seed. A new generation needs reduction and activation before it can
-serve searches.
+before compaction began on 2026-09-29. The first 500-delta generation is now
+active on the preview. The remaining `.com` deltas are not yet all in the
+active catalog. A mapped generation does not serve searches until it is
+reduced, verified, and activated.
 
 The staging compaction Worker now accepts map and reduce Queue messages. Its
 Cron remains disabled, so it cannot start a generation on its own. The
@@ -225,7 +231,8 @@ Registration throughput is not a measurement of reducer throughput or the
 cost of a full generation.
 
 The [next staging CZDS batch](/operations/next-czds-batch) is prepared but
-must wait until the current `.com` generation is fully verified.
+must wait until the `.com` backlog is in the active catalog and no generation
+work is in flight.
 
 ### Staging invalid-record recovery
 
@@ -269,6 +276,15 @@ until the operator approves the cutover.
 
 `MAX_REDUCE_RECORDS` bounds the observations loaded for one changed partition and the records loaded for one modified overflow apex. A partition that exceeds either bound fails closed. Test those limits with production-sized deltas before enabling the compaction Cron.
 
-Apply both `compaction-worker` D1 migrations. When every changed partition is reduced, the Worker writes `catalog/candidates/<generation>.json`. That object does not change search results. The protected `/admin/activate` route checks the candidate and its partition objects, archives the prior root, and replaces `catalog/root.json` with an R2 compare-and-swap. `/admin/rollback` restores the archived root with the same guard and re-registers the rolled-back deltas. Set `PUBLISH_TOKEN` as a Worker secret before using these routes.
+Apply `compaction-worker` D1 migrations `0001_generation_ledger.sql` and
+`0002_seed_publication.sql` for the CZDS path. Apply
+`0003_public_bulk_source.sql` only at the separate
+[source-refresh migration gate](/operations/source-refresh). When every changed
+partition is reduced, the Worker writes `catalog/candidates/<generation>.json`.
+That object does not change search results. The protected `/admin/activate`
+route checks the candidate and its partition objects, archives the prior root,
+and replaces `catalog/root.json` with an R2 compare-and-swap. `/admin/rollback`
+restores the archived root with the same guard and re-registers the rolled-back
+deltas. Set `PUBLISH_TOKEN` as a Worker secret before using these routes.
 
 The full SQLite exporter writes its root last. `scripts/publish_r2_generation.py` validates the files and uploads immutable partition objects, then uploads a candidate root. It never uploads `catalog/root.json`. If an older export root lacks `source_names`, run `scripts/enrich_r2_export_root.py` after the export finishes and before staging it. For the first seed, call `/admin/register-seed` after staging, then call `/admin/activate`. The seed has no prior root, so `/admin/rollback` refuses to remove it. Later generations use the same activation route after the reducer publishes their candidates.
