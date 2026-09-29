@@ -13,6 +13,8 @@ import {
   completeCzdsArtifact,
   finishCzdsWorkflow,
   publishCzdsJob,
+  reapTerminalCzdsParsers,
+  releaseTerminalCzdsParser,
   scheduleCzds,
   stageCzdsJob,
   validatedDownloadLink,
@@ -114,6 +116,47 @@ test("download link validation is exact-host and path scoped", () => {
   ]) {
     assert.throws(() => validatedDownloadLink(link), /not allowed|invalid zone path/);
   }
+});
+
+
+test("only terminal CZDS jobs release their named parser", async () => {
+  const stopped = [];
+  const jobId = "a".repeat(64);
+  await database.prepare(
+    "INSERT INTO czds_zones(zone, updated_at) VALUES ('biz', '2026-09-29T21:00:00Z')",
+  ).run();
+  await database.prepare(
+    `INSERT INTO czds_jobs(job_id, zone, download_url, state, created_at, updated_at)
+     VALUES (?, 'biz', 'https://czds-download-api.icann.org/czds/downloads/biz.zone',
+             'running', '2026-09-29T21:00:00Z', '2026-09-29T21:00:00Z')`,
+  ).bind(jobId).run();
+  const env = {
+    CONTROL: database,
+    CZDS_CONTAINER_ZONES: "biz,net",
+    CZDS_PARSER: {
+      getByName: (name) => ({
+        getState: async () => ({ status: "healthy" }),
+        stop: async () => stopped.push(name),
+      }),
+    },
+  };
+  await assert.rejects(releaseTerminalCzdsParser(env, jobId), /cannot stop/);
+  assert.deepEqual(stopped, []);
+  await database.prepare("UPDATE czds_jobs SET state = 'staged' WHERE job_id = ?")
+    .bind(jobId).run();
+  assert.equal(await releaseTerminalCzdsParser(env, jobId), true);
+  assert.deepEqual(stopped, [jobId]);
+  stopped.length = 0;
+  await reapTerminalCzdsParsers(env);
+  assert.deepEqual(stopped, [jobId]);
+  const inactive = {
+    ...env,
+    CZDS_PARSER: { getByName: () => ({
+      getState: async () => ({ status: "stopped" }),
+      stop: async () => assert.fail("stopped parser must not be stopped twice"),
+    }) },
+  };
+  assert.equal(await releaseTerminalCzdsParser(inactive, jobId), false);
 });
 
 

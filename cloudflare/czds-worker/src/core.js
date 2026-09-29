@@ -527,6 +527,38 @@ export async function inspectCzdsContainerJob(env, jobId) {
 }
 
 
+export async function releaseTerminalCzdsParser(env, jobId) {
+  const job = await env.CONTROL.prepare(
+    "SELECT zone, state FROM czds_jobs WHERE job_id = ?",
+  ).bind(jobId).first();
+  if (job?.state !== "staged" && job?.state !== "complete") {
+    throw new Error("CZDS parser cannot stop before its job is terminal");
+  }
+  if (!(env.CZDS_CONTAINER_ZONES ?? "").split(",").includes(job.zone)) return false;
+  const parser = env.CZDS_PARSER.getByName(jobId);
+  const state = await parser.getState();
+  if (state.status === "stopped" || state.status === "stopped_with_code") return false;
+  await parser.stop();
+  return true;
+}
+
+
+export async function reapTerminalCzdsParsers(env) {
+  const jobs = await env.CONTROL.prepare(
+    `SELECT job_id FROM czds_jobs
+     WHERE state IN ('staged', 'complete')
+     ORDER BY updated_at DESC LIMIT 10`,
+  ).all();
+  for (const job of jobs.results) {
+    try {
+      await releaseTerminalCzdsParser(env, job.job_id);
+    } catch (error) {
+      console.error("CZDS terminal parser release failed", job.job_id, String(error));
+    }
+  }
+}
+
+
 export async function czdsJobUsesContainer(env, jobId) {
   const job = await env.CONTROL.prepare(
     "SELECT zone FROM czds_jobs WHERE job_id = ?",

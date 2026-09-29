@@ -10,6 +10,8 @@ import {
   failCzdsJob,
   finishCzdsWorkflow,
   inspectCzdsContainerJob,
+  reapTerminalCzdsParsers,
+  releaseTerminalCzdsParser,
   scheduleCzds,
   stageCzdsJob,
   startCzdsContainerJob,
@@ -84,9 +86,10 @@ export class CzdsIngestionWorkflow extends WorkflowEntrypoint {
         await claimCzdsJob(this.env, jobId)
       ));
       if (claim.state === "complete") return claim;
-      if (await step.do("select CZDS parser", async () => (
+      const usesContainer = await step.do("select CZDS parser", async () => (
         await czdsJobUsesContainer(this.env, jobId)
-      ))) {
+      ));
+      if (usesContainer) {
         await stageInContainer(this.env, step, jobId);
       } else {
         await step.do(
@@ -98,10 +101,20 @@ export class CzdsIngestionWorkflow extends WorkflowEntrypoint {
           async () => await stageCzdsJob(this.env, jobId),
         );
       }
-      return await step.do(
+      const result = await step.do(
         "finish CZDS deltas",
         async () => await finishCzdsWorkflow(this.env, jobId),
       );
+      if (usesContainer) {
+        await step.do("release terminal CZDS parser", async () => {
+          try {
+            await releaseTerminalCzdsParser(this.env, jobId);
+          } catch (error) {
+            console.error("CZDS terminal parser release failed", jobId, String(error));
+          }
+        });
+      }
+      return result;
     } catch (error) {
       await step.do("record CZDS failure", async () => {
         await failCzdsJob(this.env, jobId, error);
@@ -122,6 +135,7 @@ export default {
   },
 
   async scheduled(_controller, env) {
+    await reapTerminalCzdsParsers(env);
     await scheduleCzds(env);
   },
 };

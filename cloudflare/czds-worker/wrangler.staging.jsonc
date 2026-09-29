@@ -9,7 +9,7 @@
   "triggers": { "crons": [] },
   "containers": [
     { "class_name": "CzdsParser", "image": "../Dockerfile.czds",
-      "max_instances": 1, "instance_type": "standard-2" }
+      "max_instances": 2, "instance_type": "standard-2" }
   ],
   "durable_objects": {
     "bindings": [{ "name": "CZDS_PARSER", "class_name": "CzdsParser" }]
@@ -41,7 +41,7 @@
     }
   ],
   "vars": {
-    "CZDS_ONLY_ZONE": "biz",
+    "CZDS_ONLY_ZONE": "net",
     "CZDS_CONTAINER_ZONES": "com,biz,net,org,xyz,top,info,shop,online,store,vip,site,app,bond,pro",
     "CZDS_STAGE_ONLY": "true",
     "CZDS_DELTA_RECORDS": "20000",
