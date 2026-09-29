@@ -150,20 +150,18 @@ The Worker accepts download URLs only from the two documented ICANN CZDS hosts a
 The first staging `.com` run on 2026-09-27 exceeded Worker CPU time while parsing a 4,961,932,317-byte compressed artifact. The replacement parser runs in a Cloudflare Container for the zones listed in `CZDS_CONTAINER_ZONES`. The Workflow polls its state without holding a long CPU-bound step. The Container streams the zone, and its private outbound handler writes bounded deltas through the existing R2 and D1 bindings. Only a complete gzip stream with matching artifact length and contiguous delta counts can move the job to `staged`. The earlier seven partial staging deltas were not published. The staging Cron remains disabled.
 
 The staging `.com` Workflow completed on 2026-09-28 with 8,760 contiguous
-deltas and 175,195,918 records. The staging seed is active. The staging
-compaction Queue consumer is connected with a batch size and concurrency of
-one, eight retries, and a dead-letter Queue. `REGISTRATION_ONLY=true` makes
-the staging Worker refuse map and reduce Queue messages and skip scheduled
-generation work; refused messages retry and eventually reach the dead-letter
-Queue. The staging Cron also remains disabled. Queue delivery can register
-deltas but cannot start mapping, reduction, or root activation. A 98-message
-remote sample registered 1,960,000 records in about
-158 seconds, with no failed invocations observed in the sampled tail. The
-remaining messages are being delivered under the same bound. A later
-[full reconciliation](/operations/staging-reconciliation) found dead-lettered
-CZDS chunks with invalid public-suffix apexes; the sampled invocation tail
-was not proof of full coverage. Check both D1 databases, the live Queue and
-dead-letter backlogs, and Worker errors before enabling generation work.
+deltas and 175,195,918 records. The later
+[full reconciliation](/operations/staging-reconciliation) found bare
+public-suffix names in 219 chunks. Recovery retained 175,195,530 valid
+records across all 8,760 effective chunks. Both staging Queues were empty
+before compaction began on 2026-09-29. At that point, the active preview still
+served the seed. A new generation needs reduction and activation before it can
+serve searches.
+
+The staging compaction Worker now accepts map and reduce Queue messages. Its
+Cron remains disabled, so it cannot start a generation on its own. The
+[staging compaction procedure](/operations/staging-compaction) controls each
+generation, checks the Queue and ledger, and activates a verified candidate.
 Registration throughput is not a measurement of reducer throughput or the
 cost of a full generation.
 
@@ -199,9 +197,9 @@ Queue backlogs reconcile.
 
 A local pilot reduced one partition from a real `.com` delta against the seed,
 then activated and rolled back the candidate in disposable storage. It did not
-process the full delta or backlog. Reconcile registered deltas with the seed and
-measure remote mapping and reduction before enabling the Cron. Do not switch
-the production hostname until the operator approves the cutover.
+process the full delta or backlog. The staging run processes 500 deltas per
+generation and leaves Cron disabled. Do not switch the production hostname
+until the operator approves the cutover.
 
 ## Generation reduction and publication
 

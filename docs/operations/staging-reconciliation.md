@@ -1,7 +1,7 @@
 # Reconcile staging ingestion
 
-Run this check from the repository root after installing the CZDS and
-compaction Worker dependencies. It reads both remote D1 databases and the
+Run this check before starting a staging generation, after installing the CZDS
+and compaction Worker dependencies. It reads both remote D1 databases and the
 Cloudflare Queue metrics API. It does not consume, acknowledge, or replay
 messages; write to D1 or R2; start a generation; or change the active root.
 
@@ -19,7 +19,9 @@ The JSON report compares the completed CZDS job's declared chunk and record
 totals with every source chunk, checks contiguous indexes, then matches each
 source delta to the generation ledger by ID, object key, source kind, record
 count, object byte length, and recorded SHA-256 format. It also checks that the
-staging generation ledger is still empty. `pending` means some
+staging generation ledger is still empty. Once compaction starts, use this
+command only with `--metrics-only`; a generation is no longer an unexpected
+condition. `pending` means some
 source chunks have not yet registered. `failed` means an invariant failed or
 the dead-letter Queue is nonempty. Exit status is 0 for `pending` or `complete`,
 1 for `failed` or a nonempty dead-letter Queue (including with
@@ -36,10 +38,9 @@ timestamp; that is unknown, not zero age. D1 registration checks the object
 content at that time, but this command does not re-download and re-hash every
 R2 object. A final publication gate needs a separate R2 integrity check.
 
-In the first staging `.com` drain, the dead-letter Queue contained valid
-`delta-ready` notifications for chunks whose objects include public-suffix
-hostnames. The compaction validator rejects the entire chunk. Those chunks
-must remain missing in this report until they are corrected and registered;
-do not count their dead-letter presence as ingestion success. Do not purge or
-replay the dead-letter Queue before determining which source chunks are
-affected and how their immutable replacements will be identified.
+The first staging `.com` drain found 219 chunks with bare public-suffix names.
+The repair audit retained each original object and registered a corrected
+immutable replacement. On 2026-09-28, the final pre-compaction report found
+8,760 effective chunks, 175,195,530 valid records, no missing chunks, and
+empty main and dead-letter Queues. The [staging compaction procedure](/operations/staging-compaction)
+starts from that reconciled ledger.

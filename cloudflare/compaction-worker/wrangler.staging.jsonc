@@ -29,12 +29,12 @@
         "max_batch_timeout": 5,
         "max_retries": 8,
         "dead_letter_queue": "subfinder-compaction-stage-dead",
-        "max_concurrency": 1
+        "max_concurrency": 8
       }
     ]
   },
   "vars": {
-    "REGISTRATION_ONLY": "true",
+    "REGISTRATION_ONLY": "false",
     "GENERATION_DELTA_LIMIT": "500",
     "MAX_DELTA_BYTES": "33554432",
     "MAX_REDUCE_RECORDS": "200000",

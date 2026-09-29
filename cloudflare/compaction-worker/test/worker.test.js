@@ -223,6 +223,12 @@ test("starts one generation and maps each delta into deterministic partition fra
   assert.equal(generation.state, "mapped");
   assert.equal(generation.delta_count, 2);
   assert.equal(generation.partition_count, 1);
+  const partition = await database.prepare(
+    `SELECT fragment_count, record_count FROM generation_partitions
+     WHERE generation_id = ?`,
+  ).bind(started.generationId).first();
+  assert.equal(partition.fragment_count, 2);
+  assert.equal(partition.record_count, 2);
 
   const fragments = await database.prepare(
     "SELECT object_key, record_count FROM generation_fragments ORDER BY delta_id",
@@ -245,6 +251,41 @@ test("starts one generation and maps each delta into deterministic partition fra
     resumed: false,
     waitingForReduce: true,
   });
+});
+
+
+test("map refuses to overwrite an existing fragment with different bytes", async () => {
+  const deltaId = "3".repeat(64);
+  const key = await putDelta(deltaId, [{
+    apex: "example.com",
+    hostname: "www.example.com",
+    first_seen: null,
+  }]);
+  const env = {
+    LEDGER: database,
+    CATALOG: bucket,
+    COMPACTION_QUEUE: { send: async () => {} },
+  };
+  await registerDelta(env, {
+    schema_version: "subfinder.delta-ready.v1",
+    delta_id: deltaId,
+    source_kind: "urlscan",
+    object_key: key,
+  });
+  const { generationId } = await startGeneration(env);
+  const prefix = createHash("sha256").update("example.com").digest("hex").slice(0, 2);
+  const fragmentKey = `compact/staging/${generationId}/${prefix}/${deltaId}.json.gz`;
+  await bucket.put(fragmentKey, "occupied", { customMetadata: { sha256: "wrong" } });
+
+  await assert.rejects(mapDelta(env, {
+    schema_version: "subfinder.map-job.v1",
+    generation_id: generationId,
+    delta_id: deltaId,
+  }), /already contains different bytes/);
+  assert.equal(await (await bucket.get(fragmentKey)).text(), "occupied");
+  assert.equal((await database.prepare(
+    "SELECT state FROM catalog_deltas WHERE delta_id = ?",
+  ).bind(deltaId).first()).state, "assigned");
 });
 
 

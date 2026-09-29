@@ -287,20 +287,20 @@ async function partitionPrefix(apex, nibbles) {
 async function putFragment(env, key, document) {
   const bytes = await gzipJson(document);
   const digest = await sha256Bytes(bytes);
-  const existing = await env.CATALOG.head(key);
-  if (existing !== null) {
-    if (existing.customMetadata?.sha256 !== digest) {
-      throw new Error("map fragment key already contains different bytes");
-    }
-    return { bytes: existing.size, sha256: digest };
-  }
-  await env.CATALOG.put(key, bytes, {
+  const stored = await env.CATALOG.put(key, bytes, {
+    onlyIf: new Headers({ "If-None-Match": "*" }),
     httpMetadata: { contentType: "application/json", contentEncoding: "gzip" },
     customMetadata: {
       schema_version: FRAGMENT_SCHEMA_VERSION,
       sha256: digest,
     },
   });
+  if (stored === null) {
+    const existing = await env.CATALOG.head(key);
+    if (existing?.customMetadata?.sha256 !== digest || existing.size !== bytes.byteLength) {
+      throw new Error("map fragment key already contains different bytes");
+    }
+  }
   return { bytes: bytes.byteLength, sha256: digest };
 }
 
@@ -311,6 +311,19 @@ async function finishMappedGeneration(env, generationId, now) {
      WHERE generation_id = ? AND state != 'mapped'`,
   ).bind(generationId).first();
   if (Number(outstanding.count) !== 0) return false;
+  await env.LEDGER.prepare(
+    `INSERT INTO generation_partitions(
+       generation_id, prefix, state, fragment_count, record_count, updated_at
+     )
+     SELECT generation_id, prefix, 'mapped', count(*), sum(record_count), ?
+     FROM generation_fragments WHERE generation_id = ? GROUP BY prefix
+     ON CONFLICT(generation_id, prefix) DO UPDATE SET
+       fragment_count = excluded.fragment_count,
+       record_count = excluded.record_count,
+       error = NULL,
+       updated_at = excluded.updated_at
+     WHERE generation_partitions.state = 'mapped'`,
+  ).bind(now, generationId).run();
   const partitions = await env.LEDGER.prepare(
     "SELECT count(*) AS count FROM generation_partitions WHERE generation_id = ?",
   ).bind(generationId).first();
@@ -334,6 +347,7 @@ export async function mapDelta(env, rawBody) {
     throw new Error("map delta is assigned to a different generation");
   }
   if (row.state === "mapped") {
+    await finishMappedGeneration(env, body.generation_id, new Date().toISOString());
     return { state: "mapped", duplicate: true };
   }
   if (row.state !== "assigned") throw new Error("map delta is not assigned");
@@ -349,21 +363,25 @@ export async function mapDelta(env, rawBody) {
   }
   const now = new Date().toISOString();
   const fragmentRows = [];
-  for (const prefix of [...grouped.keys()].sort()) {
-    const records = grouped.get(prefix);
-    const objectKey = (
-      `compact/staging/${body.generation_id}/${prefix}/${body.delta_id}.json.gz`
-    );
-    const metadata = await putFragment(env, objectKey, {
-      schema_version: FRAGMENT_SCHEMA_VERSION,
-      generation_id: body.generation_id,
-      delta_id: body.delta_id,
-      prefix,
-      source: delta.source,
-      observed_at: delta.observedAt,
-      records,
-    });
-    fragmentRows.push({ prefix, objectKey, ...metadata, recordCount: records.length });
+  const prefixes = [...grouped.keys()].sort();
+  // minimal: five concurrent R2 writes leave room under the six-connection Worker limit.
+  for (let offset = 0; offset < prefixes.length; offset += 5) {
+    fragmentRows.push(...await Promise.all(prefixes.slice(offset, offset + 5).map(async (prefix) => {
+      const records = grouped.get(prefix);
+      const objectKey = (
+        `compact/staging/${body.generation_id}/${prefix}/${body.delta_id}.json.gz`
+      );
+      const metadata = await putFragment(env, objectKey, {
+        schema_version: FRAGMENT_SCHEMA_VERSION,
+        generation_id: body.generation_id,
+        delta_id: body.delta_id,
+        prefix,
+        source: delta.source,
+        observed_at: delta.observedAt,
+        records,
+      });
+      return { prefix, objectKey, ...metadata, recordCount: records.length };
+    })));
   }
   const statements = [];
   for (const fragment of fragmentRows) {
@@ -382,23 +400,6 @@ export async function mapDelta(env, rawBody) {
       fragment.recordCount,
       now,
     ));
-    statements.push(env.LEDGER.prepare(
-      `INSERT INTO generation_partitions(
-         generation_id, prefix, state, fragment_count, record_count, updated_at
-       ) VALUES (?, ?, 'mapped', 1, ?, ?)
-       ON CONFLICT(generation_id, prefix) DO UPDATE SET
-         state = 'mapped',
-         fragment_count = (
-           SELECT count(*) FROM generation_fragments
-           WHERE generation_id = excluded.generation_id AND prefix = excluded.prefix
-         ),
-         record_count = (
-           SELECT coalesce(sum(record_count), 0) FROM generation_fragments
-           WHERE generation_id = excluded.generation_id AND prefix = excluded.prefix
-         ),
-         error = NULL,
-         updated_at = excluded.updated_at`,
-    ).bind(body.generation_id, fragment.prefix, fragment.recordCount, now));
   }
   statements.push(env.LEDGER.prepare(
     `UPDATE catalog_deltas

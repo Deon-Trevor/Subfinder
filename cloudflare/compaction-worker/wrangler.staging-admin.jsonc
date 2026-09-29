@@ -15,5 +15,17 @@
       "database_id": "f195a017-ef05-405b-9c9d-09919d5a3bc8",
       "remote": true
     }
-  ]
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "COMPACTION_QUEUE", "queue": "subfinder-compaction-stage", "remote": false }
+    ]
+  },
+  "vars": {
+    "REGISTRATION_ONLY": "false",
+    "GENERATION_DELTA_LIMIT": "500",
+    "MAX_DELTA_BYTES": "33554432",
+    "MAX_REDUCE_RECORDS": "200000",
+    "PARTITION_NIBBLES": "2"
+  }
 }
