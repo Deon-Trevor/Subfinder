@@ -17,7 +17,7 @@ test("staging consumer is bounded and has no automatic generation trigger", () =
     max_batch_timeout: 5,
     max_retries: 8,
     dead_letter_queue: "subfinder-compaction-stage-dead",
-    max_concurrency: 8,
+    max_concurrency: 2,
   }]);
   assert.equal(staging.r2_buckets[0].bucket_name, "subfinder-catalog-stage");
 });

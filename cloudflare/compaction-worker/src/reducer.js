@@ -128,6 +128,34 @@ async function readMember(bucket, bundle, metadata) {
 }
 
 
+export async function* copyOverflowChunks(bucket, bundle, chunks) {
+  // Fetch contiguous members together; a hot apex can contain thousands of chunks.
+  for (let start = 0; start < chunks.length;) {
+    let end = start + 1;
+    let length = chunks[start].length;
+    while (end < chunks.length && length + chunks[end].length <= 1024 * 1024 &&
+           chunks[end].offset === chunks[start].offset + length) {
+      length += chunks[end].length;
+      end += 1;
+    }
+    const bytes = await checkedObject(bucket, bundle, null, {
+      offset: chunks[start].offset, length,
+    });
+    if (bytes.length !== length) throw new Error("base overflow range size mismatch");
+    let position = 0;
+    for (let index = start; index < end; index += 1) {
+      const chunk = chunks[index];
+      if (await digest(bytes.subarray(position, position + chunk.length)) !== chunk.sha256) {
+        throw new Error("base overflow chunk checksum mismatch");
+      }
+      position += chunk.length;
+    }
+    yield bytes;
+    start = end;
+  }
+}
+
+
 async function partitionIndex(bucket, root, prefix) {
   const metadata = root?.partitions?.[prefix];
   if (metadata === undefined) return null;
@@ -296,12 +324,17 @@ async function* bundleMembers(env, documents, basePartition, targetBytes, index)
       const compressed = await flush();
       if (compressed) yield compressed;
       const chunks = [];
-      for (const chunk of item.copy.chunks) {
-        const bytes = await checkedObject(env.CATALOG, basePartition.metadata.bundle, chunk.sha256, {
-          offset: chunk.offset, length: chunk.length,
-        });
-        chunks.push({ ...chunk, offset });
-        offset += bytes.length;
+      let chunkIndex = 0;
+      for await (const bytes of copyOverflowChunks(
+        env.CATALOG, basePartition.metadata.bundle, item.copy.chunks,
+      )) {
+        let copied = 0;
+        while (chunkIndex < item.copy.chunks.length && copied < bytes.length) {
+          const chunk = item.copy.chunks[chunkIndex++];
+          chunks.push({ ...chunk, offset });
+          offset += chunk.length;
+          copied += chunk.length;
+        }
         yield bytes;
       }
       index.overflow[item.apex] = { ...item.copy, chunks };

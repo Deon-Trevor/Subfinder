@@ -17,7 +17,7 @@ import {
 } from "../src/index.js";
 import worker from "../src/index.js";
 import { activateGeneration, registerSeed, rollbackGeneration } from "../src/publication.js";
-import { storeBundle } from "../src/reducer.js";
+import { copyOverflowChunks, storeBundle } from "../src/reducer.js";
 import { DOMAIN_POLICY_VERSION, PSL_SHA256 } from "../../index-worker/src/domain-policy.js";
 
 
@@ -362,6 +362,37 @@ test("bundle builder uses multipart storage above the bounded part size", async 
     range: { offset: 8 * 1024 * 1024, length: 16 },
   });
   assert.deepEqual(new Uint8Array(await tail.arrayBuffer()), new Uint8Array(16).fill(0x5a));
+});
+
+
+test("unchanged overflow members are copied in bounded ranges with per-member checksums", async () => {
+  const members = Array.from({ length: 12 }, (_, index) =>
+    Buffer.from(`compressed-member-${index}-`.repeat(100)));
+  const chunks = [];
+  let offset = 0;
+  for (const member of members) {
+    chunks.push({ offset, length: member.length,
+      sha256: createHash("sha256").update(member).digest("hex") });
+    offset += member.length;
+  }
+  const original = Buffer.concat(members);
+  await bucket.put("test/base-overflow.bundle", original);
+  let reads = 0;
+  const source = { get: (...args) => {
+    reads += 1;
+    return bucket.get(...args);
+  } };
+  const copied = [];
+  for await (const bytes of copyOverflowChunks(source, "test/base-overflow.bundle", chunks)) {
+    copied.push(Buffer.from(bytes));
+  }
+  assert.deepEqual(Buffer.concat(copied), original);
+  assert.equal(reads, 1);
+  await assert.rejects(async () => {
+    for await (const _ of copyOverflowChunks(source, "test/base-overflow.bundle", [
+      ...chunks.slice(0, 5), { ...chunks[5], sha256: "0".repeat(64) }, ...chunks.slice(6),
+    ])) { /* consume */ }
+  }, /checksum mismatch/);
 });
 
 
