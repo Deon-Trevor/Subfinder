@@ -21,6 +21,25 @@ Container-reserved zones. It stops on an unreviewed failed job. Raise
 does not include zones after `.com`; obtain a fresh approved-link inventory
 before claiming that every CZDS zone is covered.
 
+## Run a small batch
+
+Preview the remaining zones and the `.com` gate:
+
+```sh
+node scripts/run_czds_stage_sweep.mjs czds_small_batch_01.json --limit 20
+```
+
+To stage them, run the same command with `--execute`. The runner deploys a
+staging-only Worker configuration for one zone at a time. It arms a one-minute
+Cron only until one job appears, removes the Cron, waits for the job, and checks
+every staged R2 chunk before advancing. It stops when the batch is exhausted
+or the `.com` compaction gate is reached. If a run fails, check the remote Cron,
+job, and Workflow state before retrying. Staging does not register the zone's
+deltas for compaction or publish a catalog root. A new Cron can take up to
+[15 minutes to propagate](https://developers.cloudflare.com/workers/configuration/cron-triggers/),
+so the runner allows 18 minutes for the first job before it disarms the Cron
+and reports a timeout.
+
 ## Run one zone
 
 1. If a Container parser job is active, wait for its Workflow to finish.
