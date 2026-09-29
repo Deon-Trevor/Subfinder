@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { test } from "node:test";
+import { setTimeout } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 
 import { createParserServer, postInternal, processZone } from "../container/server.js";
@@ -105,4 +108,30 @@ test("chunk callbacks retry transient failures but report validation errors", as
     return Response.json({ detail: "CZDS chunk has an invalid record" }, { status: 409 });
   }), /invalid record/);
   assert.equal(calls, 1);
+});
+
+
+test("parser server exits cleanly on SIGTERM", async () => {
+  const child = spawn(process.execPath, [
+    "--input-type=module", "-e",
+    'import { runParserServer } from "./container/server.js"; ' +
+      'const server = runParserServer(0); server.on("listening", () => console.log("ready"));',
+  ], { cwd: new URL("..", import.meta.url), stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    const ready = Promise.race([
+      once(child.stdout, "data"),
+      once(child, "exit").then(() => { throw new Error("parser exited before listening"); }),
+    ]);
+    await ready;
+    const exited = once(child, "exit");
+    child.kill("SIGTERM");
+    const [code, signal] = await Promise.race([
+      exited,
+      setTimeout(2000).then(() => { throw new Error("parser ignored SIGTERM"); }),
+    ]);
+    assert.equal(code, 0);
+    assert.equal(signal, null);
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
 });

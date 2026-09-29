@@ -168,6 +168,13 @@ export function createParserServer({ process = processZone } = {}) {
 }
 
 
+export function runParserServer(port = 8080) {
+  const server = createParserServer().listen(port, "0.0.0.0");
+  process.once("SIGTERM", () => server.close());
+  return server;
+}
+
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  createParserServer().listen(8080, "0.0.0.0");
+  runParserServer();
 }
