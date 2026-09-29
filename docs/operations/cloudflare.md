@@ -108,12 +108,12 @@ configuration requests a region.
 
 The staging D1 migrations are applied. Both Workers were deployed on
 2026-09-29 with empty Cron lists. Both source tables and job tables remained
-empty after deployment, and the staging URLScan Worker has no API key secret.
-Its CT and URLScan Queues each have one producer and one consumer, but no
-source can schedule provider work. The staging CT settings allow one source
-and 16 entries per scheduled range. URLScan allows one source, 100 results
-per page, and 25 provider requests per UTC day. These are staging test
-bounds, not product limits.
+empty after deployment. The staging URLScan Worker received its
+`URLSCAN_API_KEY` secret on 2026-09-29. Its CT and URLScan Queues each have
+one producer and one consumer, but no source can schedule provider work.
+The staging CT settings allow one source and 16 entries per scheduled range.
+URLScan allows one source, 100 results per page, and 25 provider requests per
+UTC day. These are staging test bounds, not product limits.
 
 Run the local tests and compile each staging configuration:
 
@@ -128,13 +128,12 @@ npx wrangler deploy --dry-run --config wrangler.staging.jsonc
 ```
 
 Before a live provider test, review the exact CT log URL and add it to
-`ct_sources`, or set the staging `URLSCAN_API_KEY` secret and add a normalized
-apex to `urlscan_sources`. Keep Cron disabled for a manual test. Reconcile the
-CZDS dead-letter backlog before mixing new deltas into the shared staging
-compaction Queue. The staging URLScan quota lives in its own D1 database; it
-does not reserve requests from a production deployment that uses the same
-URLScan account. Check the account's remaining provider quota before a live
-test.
+`ct_sources`, or add a normalized apex to `urlscan_sources`. Keep Cron disabled
+for a manual test. Reconcile the CZDS dead-letter backlog before mixing new
+deltas into the shared staging compaction Queue. The staging URLScan quota lives
+in its own D1 database; it does not reserve requests from a production
+deployment that uses the same URLScan account. Check the account's remaining
+provider quota before a live test.
 
 ## CZDS ingestion worker
 
