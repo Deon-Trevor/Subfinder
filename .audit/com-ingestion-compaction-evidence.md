@@ -46,3 +46,21 @@ from the later tail sample. D1 overload was observed earlier at concurrency
 - `npm run build` in `docs`: passed.
 - `git diff --check` and `node --check` on the three staging control scripts:
   passed.
+
+## First reduction gate
+
+At 2026-09-29T08:50:44Z, D1 generation
+`766d9f3c333a28f7eaeabfc42b859eecb081c2c0d839053df50297e48e0df16b`
+reached `mapped`. D1 `generation_partitions` had 256 `mapped` rows totaling
+128,000 fragments and 10,000,000 records. At 08:52:07Z, both staging Queues
+had zero backlog. The local scheduled trigger moved the generation to
+`reducing`, and the Queue API accepted 256 reduce notifications in three
+batches (100, 100, 56). The first partition, prefix `00`, reached `reduced`
+at 08:58:12Z with an 8,797,616-byte bundle. The preview root still served
+`seed-20260927`.
+
+Worker version `b9b3c8b3-7051-4116-a93f-88281005e0e1` then deployed
+bounded five-way fragment reads. A later Queue tail event on that version
+reported `outcome: ok`, wall time 139,151 ms, and CPU time 5,401 ms. The
+reduction was still in progress at 2026-09-29T09:02:55Z. This is not a
+completion or cost claim for the full batch.
