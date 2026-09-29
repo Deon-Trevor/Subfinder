@@ -523,6 +523,138 @@ test("reduces immutable bundles, publishes a candidate, activates and rolls back
 });
 
 
+test("merges a modified overflow apex beyond the in-memory record bound", async () => {
+  const apex = "example.com";
+  const prefix = createHash("sha256").update(apex).digest("hex").slice(0, 2);
+  const generation = "seed-overflow";
+  const bundleKey = `catalog/generations/${generation}/partitions/${prefix}.bundle`;
+  const indexKey = `catalog/generations/${generation}/partitions/${prefix}.index.json.gz`;
+  const oldRecords = ["a", "b", "c", "d"].map((label, index) => ({
+    h: `${label}.${apex}`, f: `2026-09-2${index + 1}T00:00:00.000Z`,
+    s: [{ n: "czds:com", f: null, l: "2026-09-27T00:00:00.000Z" }],
+  }));
+  const chunks = [];
+  const members = [];
+  let offset = 0;
+  for (let index = 0; index < 2; index += 1) {
+    const records = oldRecords.slice(index * 2, index * 2 + 2);
+    const bytes = Buffer.from(await gzipJson({ a: apex, i: index, r: records, x: true }));
+    chunks.push({ offset, length: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      count: records.length, dated: records.length });
+    members.push(bytes);
+    offset += bytes.length;
+  }
+  await bucket.put(bundleKey, Buffer.concat(members));
+  const indexBytes = Buffer.from(await gzipJson({
+    format: "subfinder.r2-index.v2", generation, prefix, bundle: bundleKey,
+    blocks: [], overflow: { [apex]: { total: 4, dated: 4, chunks } },
+  }));
+  await bucket.put(indexKey, indexBytes);
+  await bucket.put("catalog/root.json", JSON.stringify({
+    format: "subfinder.r2-index.v2", generation,
+    domain_policy_version: DOMAIN_POLICY_VERSION, psl_sha256: PSL_SHA256,
+    partition_nibbles: 2, target_block_bytes: 200,
+    partitions: { [prefix]: { index: indexKey, index_sha256: createHash("sha256")
+      .update(indexBytes).digest("hex"), bundle: bundleKey } },
+    source_names: ["czds:com"], ct_source_names: [],
+    stats: { apex_count: 1, hostname_count: 4, dated_hostname_count: 4,
+      source_observation_count: 4, ct_hostname_count: 0 },
+  }) + "\n");
+  const deltaId = "e".repeat(64);
+  const key = await putDelta(deltaId, [
+    { apex, hostname: `d.${apex}`, first_seen: "2026-09-20T00:00:00.000Z" },
+    { apex, hostname: `new.${apex}`, first_seen: "2026-09-25T00:00:00.000Z" },
+  ]);
+  const messages = [];
+  const env = { LEDGER: database, CATALOG: bucket, PARTITION_NIBBLES: "2",
+    MAX_REDUCE_RECORDS: "2", COMPACTION_QUEUE: { send: async (message) => messages.push(message) } };
+  await registerDelta(env, { schema_version: "subfinder.delta-ready.v1",
+    delta_id: deltaId, source_kind: "urlscan", object_key: key });
+  const started = await startGeneration(env);
+  await mapDelta(env, messages.shift());
+  await startReduce(env);
+  assert.equal((await runReduce(env, messages.shift())).state, "reduced");
+  const candidate = await (await bucket.get(
+    `catalog/candidates/${started.generationId}.json`)).json();
+  assert.equal(candidate.stats.hostname_count, 5);
+  assert.equal(candidate.stats.source_observation_count, 6);
+  const output = candidate.partitions[prefix];
+  const index = JSON.parse(gunzipSync(Buffer.from(await (
+    await bucket.get(output.index)).arrayBuffer())));
+  const hostnames = [];
+  for (const chunk of index.overflow[apex].chunks) {
+    const member = await bucket.get(output.bundle, { range: {
+      offset: chunk.offset, length: chunk.length,
+    } });
+    hostnames.push(...JSON.parse(gunzipSync(Buffer.from(await member.arrayBuffer()))).r
+      .map((record) => record.h));
+  }
+  assert.deepEqual(hostnames, ["d.example.com", "a.example.com", "b.example.com",
+    "c.example.com", "new.example.com"]);
+});
+
+
+test("real 3b overflow partition merges without materializing its two million records", {
+  skip: !process.env.SUBFINDER_EXPORT,
+  timeout: 600000,
+}, async () => {
+  const exportDir = process.env.SUBFINDER_EXPORT;
+  const root = JSON.parse(readFileSync(resolve(exportDir, "catalog/root.json")));
+  const prefix = "3b";
+  const apex = "amazonaws.com";
+  const metadata = root.partitions[prefix];
+  const baseIndex = JSON.parse(gunzipSync(readFileSync(resolve(exportDir, metadata.index))));
+  const baseBundle = readFileSync(resolve(exportDir, metadata.bundle));
+  const firstBaseChunk = baseIndex.overflow[apex].chunks[0];
+  const firstBaseRecord = JSON.parse(gunzipSync(baseBundle.subarray(
+    firstBaseChunk.offset, firstBaseChunk.offset + firstBaseChunk.length))).r[0];
+  await bucket.put("catalog/root.json", JSON.stringify({
+    ...root, partitions: { [prefix]: metadata },
+  }) + "\n");
+  await bucket.put(metadata.index, readFileSync(resolve(exportDir, metadata.index)));
+  await bucket.put(metadata.bundle, baseBundle);
+  const newHostname = "codex-streaming-merge.amazonaws.com";
+  const deltaId = "d".repeat(64);
+  const key = await putDelta(deltaId, [
+    { apex, hostname: firstBaseRecord.h, first_seen: "2000-01-01T00:00:00.000Z" },
+    { apex, hostname: newHostname, first_seen: "2000-01-02T00:00:00.000Z" },
+  ]);
+  const messages = [];
+  const env = { LEDGER: database, CATALOG: bucket, PARTITION_NIBBLES: "2",
+    MAX_REDUCE_RECORDS: "2", COMPACTION_QUEUE: { send: async (message) => messages.push(message) } };
+  await registerDelta(env, { schema_version: "subfinder.delta-ready.v1",
+    delta_id: deltaId, source_kind: "urlscan", object_key: key });
+  const started = await startGeneration(env);
+  await mapDelta(env, messages.shift());
+  await startReduce(env);
+  assert.equal((await runReduce(env, messages.shift())).state, "reduced");
+  const candidate = await (await bucket.get(
+    `catalog/candidates/${started.generationId}.json`)).json();
+  assert.equal(candidate.stats.hostname_count, root.stats.hostname_count + 1);
+  assert.equal(candidate.stats.dated_hostname_count, root.stats.dated_hostname_count + 1);
+  assert.equal(candidate.stats.source_observation_count,
+    root.stats.source_observation_count + 2);
+  const output = candidate.partitions[prefix];
+  const index = JSON.parse(gunzipSync(Buffer.from(await (
+    await bucket.get(output.index)).arrayBuffer())));
+  assert.equal(index.overflow[apex].total, baseIndex.overflow[apex].total + 1);
+  const chunks = index.overflow[apex].chunks;
+  async function readChunk(chunk) {
+    const member = await bucket.get(output.bundle, { range: {
+      offset: chunk.offset, length: chunk.length,
+    } });
+    return JSON.parse(gunzipSync(Buffer.from(await member.arrayBuffer())));
+  }
+  const first = await readChunk(chunks[0]);
+  assert.equal(first.r[0].h, firstBaseRecord.h);
+  assert.equal(first.r[0].f, "2000-01-01T00:00:00.000Z");
+  assert.equal(first.r[1].h, newHostname);
+  console.log(JSON.stringify({ pilot: "real-overflow-3b", base_records: baseIndex.overflow[apex].total,
+    output_records: index.overflow[apex].total, chunks: chunks.length }));
+});
+
+
 test("production-sized CZDS delta maps across partitions and reducer fails closed", {
   skip: process.env.SUBFINDER_STRESS !== "1",
   timeout: 120000,

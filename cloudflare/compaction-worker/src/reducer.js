@@ -170,7 +170,7 @@ async function partitionIndex(bucket, root, prefix) {
 }
 
 
-async function* baseApexes(bucket, partition, overlay, maxRecords) {
+async function* baseApexes(bucket, partition, overlay) {
   if (partition === null) return;
   const { index, metadata } = partition;
   const overflowKeys = Object.keys(index.overflow).sort();
@@ -183,18 +183,7 @@ async function* baseApexes(bucket, partition, overlay, maxRecords) {
         yield { apex: key, copy: details };
         continue;
       }
-      const records = [];
-      for (const chunk of details.chunks) {
-        const member = await readMember(bucket, metadata.bundle, chunk);
-        if (member.documents.length !== 1 || member.documents[0].a !== key) {
-          throw new Error("base overflow chunk identity mismatch");
-        }
-        records.push(...member.documents[0].r);
-        if (records.length > maxRecords) {
-          throw new Error("modified overflow apex exceeds reducer memory bound");
-        }
-      }
-      yield { apex: key, records };
+      yield { apex: key, overflow: { bundle: metadata.bundle, chunks: details.chunks } };
     }
   }
   for (const block of index.blocks) {
@@ -205,6 +194,77 @@ async function* baseApexes(bucket, partition, overlay, maxRecords) {
     }
   }
   yield* overflowBefore("\uffff");
+}
+
+
+async function* overflowRecords(bucket, bundle, apex, chunks) {
+  let chunkIndex = 0;
+  for await (const bytes of copyOverflowChunks(bucket, bundle, chunks)) {
+    let position = 0;
+    while (position < bytes.length) {
+      const chunk = chunks[chunkIndex++];
+      const member = JSON.parse((await gunzip(bytes.subarray(position, position + chunk.length))).trim());
+      if (member.a !== apex || !Array.isArray(member.r) || member.r.length !== chunk.count) {
+        throw new Error("base overflow chunk identity mismatch");
+      }
+      yield* member.r;
+      position += chunk.length;
+    }
+  }
+}
+
+
+function addRecordStats(delta, record, sign) {
+  delta.hostname_count += sign;
+  if (record.f !== null) delta.dated_hostname_count += sign;
+  delta.source_observation_count += sign * record.s.length;
+  if (record.s.some((source) => source.n.startsWith("direct_ct:") ||
+      source.n.startsWith("static_ct:"))) delta.ct_hostname_count += sign;
+}
+
+
+async function* mergedOverflowRecords(env, base, observations, delta, sourceNames, ctSourceNames) {
+  const byHostname = new Map();
+  for (const observation of observations) {
+    const group = byHostname.get(observation.hostname) ?? [];
+    group.push(observation);
+    byHostname.set(observation.hostname, group);
+  }
+  const changed = new Set(byHostname.keys());
+  const updated = [];
+  for await (const record of overflowRecords(env.CATALOG, base.overflow.bundle,
+    base.apex, base.overflow.chunks)) {
+    addRecordStats(delta, record, -1);
+    const group = byHostname.get(record.h);
+    if (group === undefined) continue;
+    byHostname.delete(record.h);
+    const merged = mergeApex([record], group);
+    updated.push(merged.records[0]);
+    for (const source of merged.sourceNames) sourceNames.add(source);
+    for (const source of merged.ctSourceNames) ctSourceNames.add(source);
+  }
+  for (const group of byHostname.values()) {
+    const merged = mergeApex([], group);
+    updated.push(merged.records[0]);
+    for (const source of merged.sourceNames) sourceNames.add(source);
+    for (const source of merged.ctSourceNames) ctSourceNames.add(source);
+  }
+  updated.sort(compareRecords);
+  let position = 0;
+  for await (const record of overflowRecords(env.CATALOG, base.overflow.bundle,
+    base.apex, base.overflow.chunks)) {
+    if (changed.has(record.h)) continue;
+    while (position < updated.length && compareRecords(updated[position], record) < 0) {
+      addRecordStats(delta, updated[position], 1);
+      yield updated[position++];
+    }
+    addRecordStats(delta, record, 1);
+    yield record;
+  }
+  while (position < updated.length) {
+    addRecordStats(delta, updated[position], 1);
+    yield updated[position++];
+  }
 }
 
 
@@ -266,10 +326,10 @@ function applyStats(delta, oldRecords, newRecords, newApex) {
 }
 
 
-async function* mergedApexes(env, basePartition, overlay, maxRecords, delta, sourceNames, ctSourceNames) {
+async function* mergedApexes(env, basePartition, overlay, delta, sourceNames, ctSourceNames) {
   const pending = [...overlay.keys()].sort();
   let position = 0;
-  for await (const base of baseApexes(env.CATALOG, basePartition, overlay, maxRecords)) {
+  for await (const base of baseApexes(env.CATALOG, basePartition, overlay)) {
     while (position < pending.length && pending[position] < base.apex) {
       const apex = pending[position++];
       const merged = mergeApex([], overlay.get(apex));
@@ -283,6 +343,12 @@ async function* mergedApexes(env, basePartition, overlay, maxRecords, delta, sou
       continue;
     }
     position += 1;
+    if (base.overflow !== undefined) {
+      yield { apex: base.apex, records: mergedOverflowRecords(
+        env, base, overlay.get(base.apex), delta, sourceNames, ctSourceNames,
+      ) };
+      continue;
+    }
     const merged = mergeApex(base.records, overlay.get(base.apex));
     applyStats(delta, base.records, merged.records, false);
     for (const source of merged.sourceNames) sourceNames.add(source);
@@ -341,10 +407,11 @@ async function* bundleMembers(env, documents, basePartition, targetBytes, index)
       continue;
     }
     const records = item.records;
-    const dated = records.filter((record) => record.f !== null).length;
-    const line = JSON.stringify({ a: item.apex, d: dated, r: records, t: records.length }) + "\n";
-    const lineBytes = encoder.encode(line).length;
-    if (lineBytes <= targetBytes) {
+    const streamed = Symbol.asyncIterator in records;
+    const dated = streamed ? 0 : records.filter((record) => record.f !== null).length;
+    const line = streamed ? null : JSON.stringify({ a: item.apex, d: dated, r: records, t: records.length }) + "\n";
+    const lineBytes = streamed ? 0 : encoder.encode(line).length;
+    if (!streamed && lineBytes <= targetBytes) {
       if (regular.length && regularBytes + lineBytes > targetBytes) {
         yield await flush();
       }
@@ -357,6 +424,8 @@ async function* bundleMembers(env, documents, basePartition, targetBytes, index)
     const chunks = [];
     let group = [];
     let groupBytes = 0;
+    let total = 0;
+    let totalDated = 0;
     async function writeChunk() {
       const raw = encoder.encode(JSON.stringify({
         a: item.apex, i: chunks.length, r: group, x: true,
@@ -373,7 +442,9 @@ async function* bundleMembers(env, documents, basePartition, targetBytes, index)
       groupBytes = 0;
       return bytes;
     }
-    for (const record of records) {
+    for await (const record of records) {
+      total += 1;
+      if (record.f !== null) totalDated += 1;
       const recordBytes = encoder.encode(JSON.stringify(record)).length;
       if (group.length && groupBytes + recordBytes + 128 > targetBytes) {
         yield await writeChunk();
@@ -382,7 +453,7 @@ async function* bundleMembers(env, documents, basePartition, targetBytes, index)
       groupBytes += recordBytes;
     }
     if (group.length) yield await writeChunk();
-    index.overflow[item.apex] = { total: records.length, dated, chunks };
+    index.overflow[item.apex] = { total, dated: totalDated, chunks };
   }
   const final = await flush();
   if (final) yield final;
@@ -501,10 +572,7 @@ export async function reducePartition(env, generationId, prefix) {
   };
   const sourceNames = new Set();
   const ctSourceNames = new Set();
-  const maxRecords = Number(env.MAX_REDUCE_RECORDS ?? 200000);
-  const documents = mergedApexes(
-    env, basePartition, overlay, maxRecords, delta, sourceNames, ctSourceNames,
-  );
+  const documents = mergedApexes(env, basePartition, overlay, delta, sourceNames, ctSourceNames);
   const source = streamFromGenerator(bundleMembers(env, documents, basePartition, targetBytes, index));
   const [forStorage, forHash] = source.tee();
   const hashPromise = hashStream(forHash);

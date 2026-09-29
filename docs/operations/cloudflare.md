@@ -317,7 +317,7 @@ until the operator approves the cutover.
 
 `compaction-worker` consumes the shared compaction Queue. It validates and hashes each delta, creates one open D1 generation, and maps records by the same SHA-256 partition prefix that the read Worker uses. A leased reducer merges provenance and first-seen dates, writes range-readable partition bundles with R2 multipart uploads, and verifies each bundle after upload. Unchanged partitions remain in their original generation.
 
-`MAX_REDUCE_RECORDS` bounds the observations loaded for one changed partition and the records loaded for one modified overflow apex. A partition that exceeds either bound fails closed. Test those limits with production-sized deltas before enabling the compaction Cron.
+`MAX_REDUCE_RECORDS` bounds the observations loaded for one changed partition. A partition that exceeds the bound fails closed. The reducer reads a modified overflow apex twice: it collects only the hostnames touched by the delta, then streams the sorted result into bounded bundle chunks. The real `3b` partition test covers an `amazonaws.com` apex with more than two million base records. Keep the compaction Cron disabled until the staging generation is verified.
 
 Apply `compaction-worker` D1 migrations `0001_generation_ledger.sql` and
 `0002_seed_publication.sql` for the CZDS path. Apply
