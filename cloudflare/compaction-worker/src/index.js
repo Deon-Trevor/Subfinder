@@ -473,13 +473,20 @@ export async function runReduce(env, rawBody) {
   ).run();
   if (Number(claim.meta?.changes ?? 0) !== 1) {
     const row = await env.LEDGER.prepare(
-      "SELECT state FROM generation_partitions WHERE generation_id = ? AND prefix = ?",
+      "SELECT state, lease_until FROM generation_partitions WHERE generation_id = ? AND prefix = ?",
     ).bind(body.generation_id, body.prefix).first();
     if (row?.state === "reduced") {
       await finishCandidate(env, body.generation_id);
       return { state: "reduced", prefix: body.prefix, duplicate: true };
     }
-    throw new Error("partition reducer is already running or unavailable");
+    const error = new Error("partition reducer is already running or unavailable");
+    if (row?.state === "reducing" && row.lease_until) {
+      const remainingSeconds = Math.ceil((Date.parse(row.lease_until) - Date.now()) / 1000);
+      if (Number.isFinite(remainingSeconds)) {
+        error.retryDelaySeconds = Math.max(60, remainingSeconds + 5);
+      }
+    }
+    throw error;
   }
   try {
     await reducePartition(env, body.generation_id, body.prefix);
@@ -569,7 +576,7 @@ export default {
       } catch (error) {
         console.error("compaction queue message failed", String(error).slice(0, 300));
         await recordMapError(env, message.body, error);
-        message.retry({ delaySeconds: 60 });
+        message.retry({ delaySeconds: error.retryDelaySeconds ?? 60 });
       }
     }
   },

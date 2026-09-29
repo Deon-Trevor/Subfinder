@@ -225,6 +225,39 @@ test("registration-only staging refuses generation messages and scheduled work",
 });
 
 
+test("duplicate reduce delivery waits for its active lease instead of exhausting retries", async () => {
+  const generationId = "a".repeat(64);
+  const leaseUntil = new Date(Date.now() + 19 * 60 * 1000).toISOString();
+  const now = new Date().toISOString();
+  await database.prepare(
+    `INSERT INTO catalog_generations
+     (generation_id, state, delta_count, created_at, updated_at)
+     VALUES (?, 'reducing', 1, ?, ?)`,
+  ).bind(generationId, now, now).run();
+  await database.prepare(
+    `INSERT INTO generation_partitions
+     (generation_id, prefix, state, lease_token, lease_until, updated_at)
+     VALUES (?, '6c', 'reducing', 'active-lease', ?, ?)`,
+  ).bind(generationId, leaseUntil, now).run();
+  const delivery = { acked: false, delaySeconds: null };
+  await worker.queue({ messages: [{
+    body: {
+      schema_version: "subfinder.reduce-partition.v1",
+      generation_id: generationId,
+      prefix: "6c",
+    },
+    ack: () => { delivery.acked = true; },
+    retry: ({ delaySeconds }) => { delivery.delaySeconds = delaySeconds; },
+  }] }, { LEDGER: database, CATALOG: bucket });
+  assert.equal(delivery.acked, false);
+  assert.ok(delivery.delaySeconds >= 18 * 60 && delivery.delaySeconds <= 20 * 60);
+  const row = await database.prepare(
+    "SELECT state, lease_token FROM generation_partitions WHERE generation_id = ? AND prefix = '6c'",
+  ).bind(generationId).first();
+  assert.deepEqual(row, { state: "reducing", lease_token: "active-lease" });
+});
+
+
 test("starts one generation and maps each delta into deterministic partition fragments", async () => {
   const deltaIds = ["1".repeat(64), "2".repeat(64)];
   const env = {
