@@ -583,6 +583,20 @@ export async function publishCzdsJob(env, jobId) {
 }
 
 
+export async function finishCzdsWorkflow(env, jobId) {
+  if (env.CZDS_STAGE_ONLY !== "true") return publishCzdsJob(env, jobId);
+  const job = await env.CONTROL.prepare(
+    "SELECT state, delta_count, hostname_count FROM czds_jobs WHERE job_id = ?",
+  ).bind(jobId).first();
+  if (job?.state !== "staged" || !Number.isSafeInteger(job.delta_count) ||
+      job.delta_count < 1 || !Number.isSafeInteger(job.hostname_count) ||
+      job.hostname_count < 1) {
+    throw new Error("CZDS job is not fully staged");
+  }
+  return { state: "staged", deltaCount: job.delta_count, hostnameCount: job.hostname_count };
+}
+
+
 export async function failCzdsJob(env, jobId, error) {
   await env.CONTROL.prepare(
     `UPDATE czds_jobs SET state = 'failed', error = ?, updated_at = ?

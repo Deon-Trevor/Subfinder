@@ -11,6 +11,7 @@ import {
   beginCzdsArtifact,
   claimCzdsJob,
   completeCzdsArtifact,
+  finishCzdsWorkflow,
   publishCzdsJob,
   scheduleCzds,
   stageCzdsJob,
@@ -202,12 +203,21 @@ test("scheduled Workflow stages chunked deltas and publishes only after the full
   assert.equal(await scheduleCzds(env, now), 1);
   assert.equal(workflows.length, 1);
   const jobId = workflows[0].params.job_id;
+  await assert.rejects(
+    finishCzdsWorkflow({ ...env, CZDS_STAGE_ONLY: "true" }, jobId),
+    /not fully staged/,
+  );
   assert.equal((await claimCzdsJob(env, jobId)).state, "running");
   const staged = await stageCzdsJob(env, jobId);
   assert.deepEqual(staged, { state: "staged", deltaCount: 2, hostnameCount: 3 });
   assert.equal(deltas.length, 0);
+  assert.deepEqual(await finishCzdsWorkflow({ ...env, CZDS_STAGE_ONLY: "true" }, jobId), staged);
+  assert.equal((await database.prepare(
+    "SELECT state FROM czds_jobs WHERE job_id = ?",
+  ).bind(jobId).first()).state, "staged");
+  assert.equal(deltas.length, 0);
 
-  const published = await publishCzdsJob(env, jobId);
+  const published = await finishCzdsWorkflow(env, jobId);
   assert.deepEqual(published, { state: "complete", duplicate: false, deltas: 2 });
   assert.equal(deltas.length, 2);
   assert.ok(deltas.every((message) => message.source_kind === "czds"));

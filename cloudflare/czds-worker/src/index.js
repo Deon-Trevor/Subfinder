@@ -8,8 +8,8 @@ import {
   completeCzdsArtifact,
   czdsJobUsesContainer,
   failCzdsJob,
+  finishCzdsWorkflow,
   inspectCzdsContainerJob,
-  publishCzdsJob,
   scheduleCzds,
   stageCzdsJob,
   startCzdsContainerJob,
@@ -99,8 +99,8 @@ export class CzdsIngestionWorkflow extends WorkflowEntrypoint {
         );
       }
       return await step.do(
-        "publish CZDS deltas",
-        async () => await publishCzdsJob(this.env, jobId),
+        "finish CZDS deltas",
+        async () => await finishCzdsWorkflow(this.env, jobId),
       );
     } catch (error) {
       await step.do("record CZDS failure", async () => {
