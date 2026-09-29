@@ -69,6 +69,21 @@ serialized bytes. A single oversized apex is reported as an error in its chunk
 without losing unrelated apexes. The configured bounds live in
 `index-worker/wrangler.jsonc` and `index-worker/src/index.js`.
 
+Each slice looks up at most four apex locations concurrently and returns them
+in request order. The Durable Object keeps up to 64 verified partition indexes
+in memory, keyed by partition, expected generation, object key, and checksum.
+A restart clears the cache without changing the job cursor or result. The cache
+does not retain bundle blocks or bypass their checksum checks. To compare the
+four read paths against a local catalog export, run this command from the
+repository root:
+
+```sh
+SUBFINDER_EXPORT_DIR=/path/to/export node cloudflare/index-worker/scripts/benchmark-batch-lookup.js
+```
+
+The optional `SUBFINDER_BENCH_DELAY_MS` simulates object-read delay. It does
+not measure live Cloudflare latency.
+
 Regenerate the checked-in Python IDNA 2003 and private-PSL policy after an intentional `tldextract` snapshot change:
 
 ```sh

@@ -26,6 +26,7 @@ const QUEUED_SLICE_APEXES = 25;
 const QUEUED_SLICE_MAX_RECORDS = 5000;
 const QUEUED_SLICE_MAX_BYTES = 2 * 1024 * 1024;
 const QUEUED_DOCUMENT_PART_CHARS = 400000;
+const PARTITION_CACHE_LIMIT = 64;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -230,20 +231,44 @@ async function loadRoot(env) {
   return root;
 }
 
-async function loadPartition(env, root, prefix) {
+async function loadPartition(env, root, prefix, cache = null) {
   const metadata = root.partitions[prefix];
   if (metadata === undefined) return null;
-  const bytes = await objectBytes(env.CATALOG, metadata.index);
-  if ((await sha256Hex(bytes)) !== metadata.index_sha256) {
-    throw new Error("partition index checksum mismatch");
-  }
-  const index = JSON.parse(await gunzipText(bytes));
-  if (
-    index.format !== FORMAT ||
-    index.generation !== (metadata.origin_generation ?? root.generation) ||
-    index.prefix !== prefix
-  ) {
-    throw new Error("partition index identity mismatch");
+  const readIndex = async () => {
+    const bytes = await objectBytes(env.CATALOG, metadata.index);
+    if ((await sha256Hex(bytes)) !== metadata.index_sha256) {
+      throw new Error("partition index checksum mismatch");
+    }
+    const index = JSON.parse(await gunzipText(bytes));
+    if (
+      index.format !== FORMAT ||
+      index.generation !== (metadata.origin_generation ?? root.generation) ||
+      index.prefix !== prefix
+    ) {
+      throw new Error("partition index identity mismatch");
+    }
+    return index;
+  };
+  let index;
+  if (cache === null) {
+    index = await readIndex();
+  } else {
+    const expectedGeneration = metadata.origin_generation ?? root.generation;
+    const key = `${prefix}:${expectedGeneration}:${metadata.index}:${metadata.index_sha256}`;
+    let pending = cache.get(key);
+    if (pending === undefined) {
+      pending = readIndex();
+    } else {
+      cache.delete(key);
+    }
+    cache.set(key, pending);
+    if (cache.size > PARTITION_CACHE_LIMIT) cache.delete(cache.keys().next().value);
+    try {
+      index = await pending;
+    } catch (error) {
+      if (cache.get(key) === pending) cache.delete(key);
+      throw error;
+    }
   }
   return { index, metadata };
 }
@@ -270,10 +295,10 @@ async function readDocuments(bucket, bundle, metadata) {
     .map((line) => JSON.parse(line));
 }
 
-async function locateApex(env, apex, activeRoot = null) {
+export async function locateApex(env, apex, activeRoot = null, partitionCache = null) {
   const root = activeRoot ?? await loadRoot(env);
   const prefix = await partitionPrefix(apex, root.partition_nibbles);
-  const partition = await loadPartition(env, root, prefix);
+  const partition = await loadPartition(env, root, prefix, partitionCache);
   if (partition === null) return { root, apex, total: 0, dated: 0, chunks: [] };
   const overflow = partition.index.overflow[apex];
   if (overflow !== undefined) {
@@ -305,6 +330,18 @@ async function locateApex(env, apex, activeRoot = null) {
     records: document.r,
     chunks: [],
   };
+}
+
+async function* batchLocations(env, apexes, root, partitionCache) {
+  for (let start = 0; start < apexes.length; start += 4) {
+    const group = apexes.slice(start, start + 4);
+    const locations = await Promise.all(group.map((apex) => (
+      locateApex(env, apex, root, partitionCache)
+    )));
+    for (let index = 0; index < group.length; index += 1) {
+      yield [group[index], locations[index]];
+    }
+  }
 }
 
 async function* apexRecords(env, located) {
@@ -840,6 +877,7 @@ export class QuotaLedger extends BaseQuotaLedger {
   constructor(ctx, env) {
     super(ctx);
     this.env = env;
+    this.partitionCache = new Map();
     ctx.blockConcurrencyWhile(() => {
       this.sql.exec(`
         CREATE TABLE IF NOT EXISTS record_batch_jobs (
@@ -1049,7 +1087,10 @@ export class QuotaLedger extends BaseQuotaLedger {
       `SELECT * FROM record_batch_jobs WHERE state IN ('queued', 'running')
        ORDER BY updated_at, job_id LIMIT 1`,
     ).toArray()[0];
-    if (!job) return;
+    if (!job) {
+      this.partitionCache.clear();
+      return;
+    }
     let nextDelay = 1;
     try {
       const position = Number(job.next_position);
@@ -1066,8 +1107,9 @@ export class QuotaLedger extends BaseQuotaLedger {
       const root = JSON.parse(job.root_json);
       let recordCount = 0;
       let sourceRows = 0;
-      for (const apex of requested) {
-        const located = await locateApex(this.env, apex, root);
+      for await (const [apex, located] of batchLocations(
+        this.env, requested, root, this.partitionCache,
+      )) {
         if (Number(located.total) > QUEUED_SLICE_MAX_RECORDS) {
           errors.push({ apex, code: "result_too_large", message: "apex snapshot exceeds the result record limit" });
           break;
@@ -1160,6 +1202,8 @@ export class QuotaLedger extends BaseQuotaLedger {
       "SELECT 1 FROM record_batch_jobs WHERE state IN ('queued', 'running') LIMIT 1",
     ).toArray().length) {
       await this.ctx.storage.setAlarm(Date.now() + nextDelay);
+    } else {
+      this.partitionCache.clear();
     }
   }
 }

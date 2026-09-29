@@ -11,7 +11,7 @@ import {
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
 import { createMiniflare } from "./miniflare.js";
-import { docsPage } from "../src/index.js";
+import { docsPage, locateApex } from "../src/index.js";
 
 
 const workerRoot = resolve(import.meta.dirname, "..");
@@ -158,6 +158,48 @@ test("unchanged partitions remain readable through a later root generation", asy
   } finally {
     await worker.dispose();
   }
+});
+
+
+test("batch partition cache reuses verified indexes without hiding a changed root", async () => {
+  const root = JSON.parse(readFileSync(join(fixtureRoot, "catalog/root.json")));
+  const overrides = new Map();
+  let indexGets = 0;
+  const env = { CATALOG: { get: async (key, options) => {
+    if (!options?.range) indexGets += 1;
+    const stored = overrides.get(key) ?? readFileSync(join(fixtureRoot, key));
+    const { offset = 0, length = stored.length } = options?.range ?? {};
+    return { body: true, arrayBuffer: async () => (
+      Uint8Array.from(stored.subarray(offset, offset + length)).buffer
+    ) };
+  } } };
+  const cache = new Map();
+  const first = await locateApex(env, "example.com", root, cache);
+  const repeated = await locateApex(env, "example.com", root, cache);
+  assert.equal(first.total, 3);
+  assert.deepEqual(repeated.records, first.records);
+  assert.equal(indexGets, 1);
+
+  const prefix = createHash("sha256").update("example.com").digest("hex")
+    .slice(0, root.partition_nibbles);
+  const metadata = root.partitions[prefix];
+  const copiedKey = `catalog/test/${prefix}.index.json.gz`;
+  overrides.set(copiedKey, readFileSync(join(fixtureRoot, metadata.index)));
+  const changed = { ...root, partitions: { ...root.partitions,
+    [prefix]: { ...metadata, index: copiedKey } } };
+  assert.equal((await locateApex(env, "example.com", changed, cache)).total, 3);
+  assert.equal(indexGets, 2);
+
+  const wrongGeneration = { ...root, generation: "incorrect-generation" };
+  await assert.rejects(locateApex(env, "example.com", wrongGeneration, cache),
+    /partition index identity mismatch/);
+
+  const badKey = `catalog/test/${prefix}.bad.index.json.gz`;
+  overrides.set(badKey, Buffer.from("bad index"));
+  const corrupt = { ...root, partitions: { ...root.partitions,
+    [prefix]: { ...metadata, index: badKey } } };
+  await assert.rejects(locateApex(env, "example.com", corrupt, cache),
+    /partition index checksum mismatch/);
 });
 
 
@@ -685,6 +727,8 @@ test("durable batches replay admission and deliver cursor-stable chunks", async 
     assert.equal(delivered.job.completed_apexes, 3);
     assert.equal(delivered.job.quota.committed, 3);
     assert.equal(delivered.chunks.reduce((count, chunk) => count + chunk.results.length, 0), 3);
+    assert.deepEqual(delivered.chunks.flatMap((chunk) => chunk.results.map((item) => item.apex)),
+      ["example.com", "example.net", "large.dev"]);
     assert.equal(delivered.chunks[0].results[0].records.length, 3);
     const next = await worker.dispatchFetch(
       `${chunksUrl}?after=${delivered.next_cursor}&limit=10`, { headers },
