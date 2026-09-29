@@ -266,6 +266,14 @@ active on the preview. The remaining `.com` deltas are not yet all in the
 active catalog. A mapped generation does not serve searches until it is
 reduced, verified, and activated.
 
+For the next staging batch, `CZDS_STAGE_ONLY=true` stops each successful
+Workflow after the artifact reaches `staged`. It does not send delta-ready
+messages or mark the zone complete. Verify each job with
+`node scripts/verify_staged_czds.mjs JOB_ID` before changing zones. The
+temporary trigger used to create a job must be removed and checked through
+the deployed Worker schedules API. Keep this flag enabled until the `.com`
+chain is clear and a separate publication gate is ready.
+
 The staging compaction Worker now accepts map and reduce Queue messages. Its
 Cron remains disabled, so it cannot start a generation on its own. The
 [staging compaction procedure](/operations/staging-compaction) controls each

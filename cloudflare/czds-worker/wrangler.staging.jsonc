@@ -41,7 +41,7 @@
     }
   ],
   "vars": {
-    "CZDS_ONLY_ZONE": "aaa",
+    "CZDS_ONLY_ZONE": "biz",
     "CZDS_CONTAINER_ZONES": "com,biz",
     "CZDS_STAGE_ONLY": "true",
     "CZDS_DELTA_RECORDS": "20000",

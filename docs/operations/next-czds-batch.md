@@ -43,3 +43,19 @@ exact-apex results after activation.
 
 Staging is not publication. Do not turn off `CZDS_STAGE_ONLY` while a zone is
 being parsed. Keep the temporary Cron removed between runs and after the batch.
+
+## Staged on 2026-09-29
+
+All three Workflows finished successfully. Each job remains `staged`, every
+contiguous D1 chunk was retrieved from private R2 and checked against its
+record count, and none of these deltas appears in the generation ledger.
+The deployed CZDS Cron list is empty.
+
+| Zone | Job ID | Chunks | Records |
+| --- | --- | ---: | ---: |
+| `aaa` | `455cb80b5989d32aa723a774d7fc751e017d6f306fc64d0afafd45061e01bfae` | 1 | 5 |
+| `business` | `69f0f6c0c7e85dcaea9de98e19e87811a441f15afc6b3907d3e778bca0f8d6ed` | 3 | 42,508 |
+| `biz` | `8a0cedb04cf7e2481ec29730a6fd3dc2d7863afe6d7b13163c04aa631566c887` | 68 | 1,351,214 |
+
+Rerun `node scripts/verify_staged_czds.mjs JOB_ID` for any row before its
+later publication gate. Do not call a staged zone searchable yet.

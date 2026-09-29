@@ -83,8 +83,9 @@ for (const [index, row] of rows.entries()) {
 }
 if (records !== job.hostname_count) throw new Error("CZDS record total differs from the job");
 const registered = sql("subfinder-generation-stage-ledger",
-  `SELECT count(*) AS n FROM catalog_deltas WHERE object_key LIKE ` +
-  `'ingest/czds/${job.zone}/${jobId}-%'`, compactionRoot);
+  `SELECT count(*) AS n FROM catalog_deltas WHERE object_key >= ` +
+  `'ingest/czds/${job.zone}/${jobId}-' AND object_key < ` +
+  `'ingest/czds/${job.zone}/${jobId}.'`, compactionRoot);
 if (registered.length !== 1 || registered[0].n !== 0) {
   throw new Error("staged CZDS deltas entered the generation ledger");
 }
