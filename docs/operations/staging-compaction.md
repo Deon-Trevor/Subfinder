@@ -75,6 +75,16 @@ does not affect searches. Inspect its stats and partition metadata before
 activation. If a partition fails, leave the active root alone and inspect
 `generation_partitions.error` and the dead-letter Queue.
 
+Verify the candidate against the ledger and active base root, then stream and
+hash every index and bundle object without creating a local copy:
+
+```sh
+node scripts/verify_staging_generation.mjs GENERATION_ID
+```
+
+The command checks candidate identity, source metadata, totals, partition
+metadata, object sizes, and SHA-256 hashes. Do not activate on a mismatch.
+
 When the candidate checks pass, use the protected publication route through
 the local admin Worker. The script creates a temporary local token, verifies the
 staging ledger, and checks `/ready` after activation:
