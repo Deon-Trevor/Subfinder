@@ -32,6 +32,10 @@ On the Mac used for staging, its raw value is stored in the keychain item
 digest is stored in each preview Worker secret. Do not put the raw token in
 Wrangler configuration.
 
+Use the [cutover acceptance checks](/operations/cutover-acceptance) to verify
+the live staging read paths against the local catalog. They do not change the
+production hostname or submit a live batch.
+
 Set `CLIENT_TOKENS` as a Worker secret. It is a JSON array of client IDs, SHA-256 token digests, and optional limits. Raw tokens do not belong in Wrangler configuration or source control.
 
 ```json
@@ -102,15 +106,16 @@ control D1 database, job Queue, and dead-letter Queue. Both write deltas to
 use the production hostname. Cloudflare selected the D1 placement; neither
 configuration requests a region.
 
-The staging D1 migrations are applied. Both source tables and job tables are
-empty. Neither Worker is deployed, both Cron lists are empty, and no URLScan
-API key is set for staging. These settings make provider traffic impossible
-until an operator deploys a Worker and adds a source. The staging CT settings
-allow one source and 16 entries per scheduled range. URLScan allows one source,
-100 results per page, and 25 provider requests per UTC day. These are staging
-test bounds, not product limits.
+The staging D1 migrations are applied. Both Workers were deployed on
+2026-09-29 with empty Cron lists. Both source tables and job tables remained
+empty after deployment, and the staging URLScan Worker has no API key secret.
+Its CT and URLScan Queues each have one producer and one consumer, but no
+source can schedule provider work. The staging CT settings allow one source
+and 16 entries per scheduled range. URLScan allows one source, 100 results
+per page, and 25 provider requests per UTC day. These are staging test
+bounds, not product limits.
 
-Run the local tests and compile each staging configuration without deploying:
+Run the local tests and compile each staging configuration:
 
 ```sh
 cd cloudflare/ingest-worker
@@ -164,6 +169,9 @@ Cron remains disabled, so it cannot start a generation on its own. The
 generation, checks the Queue and ledger, and activates a verified candidate.
 Registration throughput is not a measurement of reducer throughput or the
 cost of a full generation.
+
+The [next staging CZDS batch](/operations/next-czds-batch) is prepared but
+must wait until the current `.com` generation is fully verified.
 
 ### Staging invalid-record recovery
 

@@ -43,6 +43,9 @@ export default defineConfig({
           { text: 'Cloudflare migration', link: '/operations/cloudflare' },
           { text: 'Staging reconciliation', link: '/operations/staging-reconciliation' },
           { text: 'Staging compaction', link: '/operations/staging-compaction' },
+          { text: 'Staging throughput and cost', link: '/operations/staging-cost' },
+          { text: 'Next CZDS batch', link: '/operations/next-czds-batch' },
+          { text: 'Cutover acceptance', link: '/operations/cutover-acceptance' },
           { text: 'Web interface', link: '/explanation/web-interface' }
         ]
       }
