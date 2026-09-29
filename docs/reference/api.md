@@ -63,6 +63,16 @@ probes the apex. Jobs are bounded globally and per requester, consume one
 normal search allowance unit only when first admitted, and hide their status
 from other requester identities.
 
+On `subfinder.pundit.workers.dev`, the Cloudflare Worker offers only the
+`urlscan` action. It reports `local_zone` as unavailable because the Worker
+has no local zone file. An admitted request uses one normal search allowance
+unit and reads at most one URLScan page. The provider read writes an immutable
+delta; it does not change the active index immediately. A completed job reports
+`pending_publication` in its URLScan lane and has no `result_url`. Search again
+after the next catalog generation is active. If the job reports
+`more_available`, another request can read the next page. The on-demand source
+does not join the recurring URLScan schedule.
+
 ## Pagination
 
 The unpaginated response remains backward compatible and streams valid text or

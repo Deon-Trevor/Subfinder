@@ -2,12 +2,15 @@ import {
   apexForHostname,
   normalizeApex,
   normalizeHostname,
+  zoneForApex,
 } from "../../index-worker/src/domain-policy.js";
 
 
 const JOB_SCHEMA_VERSION = "subfinder.urlscan-job.v1";
 const DELTA_SCHEMA_VERSION = "subfinder.ingest-delta.v1";
 const DELTA_READY_SCHEMA_VERSION = "subfinder.delta-ready.v1";
+const ENRICHMENT_SCHEMA_VERSION = "subfinder.enrichment-job.v1";
+const ENRICHMENT_OPTIONS_SCHEMA_VERSION = "subfinder.enrichment-options.v1";
 const encoder = new TextEncoder();
 
 
@@ -109,7 +112,8 @@ function validateMessage(body) {
 
 async function loadJob(env, jobId) {
   return await env.CONTROL.prepare(
-    `SELECT job_id, apex, cursor, state, quota_charged, object_key, created_at
+    `SELECT job_id, apex, cursor, state, quota_charged, object_key, created_at,
+            updated_at, hostname_count, next_cursor, error, subject, origin
      FROM urlscan_jobs WHERE job_id = ?`,
   ).bind(jobId).first();
 }
@@ -136,12 +140,19 @@ async function chargeQuota(env, job) {
     `INSERT OR IGNORE INTO provider_quota(provider, quota_day, used)
      VALUES ('urlscan:breadth', ?, 0)`,
   ).bind(day).run();
-  const claimed = await env.CONTROL.prepare(
-    `UPDATE provider_quota SET used = used + 1
-     WHERE provider = 'urlscan:breadth' AND quota_day = ? AND used < ?`,
-  ).bind(day, limit).run();
+  const priority = job.origin === "enrichment";
+  const claimed = priority
+    ? await env.CONTROL.prepare(
+      `UPDATE provider_quota SET used = used + 1, priority_used = priority_used + 1
+       WHERE provider = 'urlscan:breadth' AND quota_day = ? AND used < ?
+         AND priority_used < ?`,
+    ).bind(day, limit, positiveInteger(env.URLSCAN_PRIORITY_DAILY_LIMIT, 20000)).run()
+    : await env.CONTROL.prepare(
+      `UPDATE provider_quota SET used = used + 1
+       WHERE provider = 'urlscan:breadth' AND quota_day = ? AND used < ?`,
+    ).bind(day, limit).run();
   if (Number(claimed.meta?.changes ?? 0) !== 1) {
-    throw new Error("URLScan breadth UTC-day quota is exhausted");
+    throw new Error("URLScan UTC-day quota is exhausted");
   }
   await env.CONTROL.prepare(
     `UPDATE urlscan_jobs SET quota_charged = 1, quota_day = ?, updated_at = ?
@@ -210,6 +221,155 @@ async function fetchPage(env, apex, cursor, pageSize) {
   });
   if (!response.ok) throw new Error(`URLScan returned HTTP ${response.status}`);
   return await response.json();
+}
+
+
+function enrichmentDocument(job) {
+  const terminal = ["complete", "failed"].includes(job.state);
+  return {
+    schema_version: ENRICHMENT_SCHEMA_VERSION,
+    job_id: job.job_id,
+    state: job.state === "complete" ? "done" : job.state,
+    apex: job.apex,
+    zone: zoneForApex(job.apex),
+    created_at: job.created_at,
+    updated_at: job.updated_at,
+    terminal,
+    lanes: {
+      local_zone: { state: "not_requested", records_ingested: 0, artifact: null },
+      urlscan: {
+        state: job.state === "complete" ? "pending_publication" : job.state,
+        records_ingested: Number(job.hostname_count ?? 0),
+        more_available: job.state === "complete" && job.next_cursor !== null,
+      },
+    },
+    error: job.error || null,
+    result_url: null,
+  };
+}
+
+
+export async function enrichmentOptions(env, apex) {
+  const canonical = normalizeApex(apex);
+  const zone = zoneForApex(canonical);
+  const available = typeof env.URLSCAN_API_KEY === "string" && env.URLSCAN_API_KEY.length > 0;
+  const day = new Date().toISOString().slice(0, 10);
+  const [active, quota] = await Promise.all([
+    env.CONTROL.prepare(
+      "SELECT 1 FROM urlscan_jobs WHERE apex = ? AND state IN ('queued', 'running') LIMIT 1",
+    ).bind(canonical).first(),
+    env.CONTROL.prepare(
+      "SELECT used, priority_used FROM provider_quota WHERE provider = 'urlscan:breadth' AND quota_day = ?",
+    ).bind(day).first(),
+  ]);
+  const capacity = Number(quota?.used ?? 0) < positiveInteger(env.URLSCAN_BREADTH_DAILY_LIMIT, 70000)
+    && Number(quota?.priority_used ?? 0) < positiveInteger(env.URLSCAN_PRIORITY_DAILY_LIMIT, 20000);
+  const actionable = available && capacity && active === null;
+  return {
+    schema_version: ENRICHMENT_OPTIONS_SCHEMA_VERSION,
+    apex: canonical,
+    zone,
+    actions: {
+      local_zone: {
+        available: false, current: false, actionable: false,
+        artifact: null, artifact_bytes: null,
+        reason: "local zone import is not available on this Worker",
+      },
+      urlscan: {
+        available, actionable,
+        reason: !available ? "URLScan reading is not configured here"
+          : active !== null ? "URLScan reading is already queued for this domain"
+            : !capacity ? "URLScan's daily reading allowance is spent"
+              : "passive URLScan history is ready",
+      },
+    },
+  };
+}
+
+
+export async function admitEnrichment(env, input) {
+  const apex = normalizeApex(input?.apex);
+  const { job_id: jobId, subject } = input ?? {};
+  if (!/^[a-f0-9]{64}$/.test(jobId) || typeof subject !== "string" ||
+      subject.length < 1 || subject.length > 160) {
+    return Response.json({ detail: "invalid enrichment request" }, { status: 400 });
+  }
+  let job = await loadJob(env, jobId);
+  if (job && (job.subject !== subject || job.apex !== apex || job.origin !== "enrichment")) {
+    return Response.json({ detail: "idempotency key was already used for another request" }, { status: 409 });
+  }
+  let created = false;
+  if (!job) {
+    if (!env.URLSCAN_API_KEY) {
+      return Response.json({ detail: "passive URLScan enrichment is not configured" }, { status: 409 });
+    }
+    const options = await enrichmentOptions(env, apex);
+    if (!options.actions.urlscan.actionable) {
+      const current = await loadJob(env, jobId);
+      if (current?.subject === subject && current.apex === apex &&
+          current.origin === "enrichment") {
+        job = current;
+      } else {
+        return Response.json({ detail: options.actions.urlscan.reason }, { status: 409 });
+      }
+    }
+  }
+  if (!job) {
+    const now = new Date().toISOString();
+    await env.CONTROL.prepare(
+      `INSERT OR IGNORE INTO urlscan_sources(apex, cursor, enabled, next_run_at, updated_at)
+       VALUES (?, NULL, 0, ?, ?)`,
+    ).bind(apex, new Date(Date.now() + 86400000).toISOString(), now).run();
+    const source = await env.CONTROL.prepare(
+      "SELECT cursor FROM urlscan_sources WHERE apex = ?",
+    ).bind(apex).first();
+    try {
+      await env.CONTROL.prepare(
+        `INSERT INTO urlscan_jobs(job_id, apex, cursor, state, subject, origin, created_at, updated_at)
+         VALUES (?, ?, ?, 'queued', ?, 'enrichment', ?, ?)`,
+      ).bind(jobId, apex, source.cursor, subject, now, now).run();
+    } catch (error) {
+      if (String(error).includes("UNIQUE constraint")) {
+        job = await loadJob(env, jobId);
+        if (job === null || job.subject !== subject || job.apex !== apex) {
+          return Response.json({ detail: "URLScan reading is already queued for this domain" }, { status: 409 });
+        }
+      } else {
+        throw error;
+      }
+    }
+    if (job === null) {
+      job = await loadJob(env, jobId);
+      created = true;
+    }
+  }
+  if (job.state === "queued") {
+    try {
+      await env.URLSCAN_QUEUE.send({ schema_version: JOB_SCHEMA_VERSION, job_id: jobId });
+    } catch {
+      return Response.json({ detail: "URLScan queue is not taking work right now" },
+        { status: 503, headers: { "Retry-After": "5" } });
+    }
+  }
+  return Response.json(enrichmentDocument(job), {
+    status: 202,
+    headers: { "Location": `/v1/enrichment-jobs/${jobId}`,
+      "X-Idempotent-Replay": created ? "0" : "1" },
+  });
+}
+
+
+export async function enrichmentStatus(env, jobId, subject) {
+  if (!/^[a-f0-9]{64}$/.test(jobId) || typeof subject !== "string") {
+    return Response.json({ detail: "enrichment job not found" }, { status: 404 });
+  }
+  const job = await loadJob(env, jobId);
+  if (job === null || job.subject !== subject || job.origin !== "enrichment") {
+    return Response.json({ detail: "enrichment job not found" }, { status: 404 });
+  }
+  return Response.json(enrichmentDocument(job), {
+    headers: { "Cache-Control": "no-store", "Retry-After": job.state === "running" ? "2" : "5" },
+  });
 }
 
 
@@ -292,21 +452,40 @@ export async function processUrlscanJob(env, body) {
 }
 
 
-async function failJob(env, body, error) {
+async function failJob(env, body, error, terminal) {
   if (typeof body?.job_id !== "string") return;
   await env.CONTROL.prepare(
     `UPDATE urlscan_jobs
-     SET state = 'failed', error = ?, lease_expires_at = NULL, updated_at = ?
+     SET state = ?, error = ?, lease_expires_at = NULL, updated_at = ?
      WHERE job_id = ? AND state != 'complete'`,
-  ).bind(String(error).slice(0, 1000), new Date().toISOString(), body.job_id).run();
+  ).bind(terminal ? "failed" : "queued", String(error).slice(0, 1000),
+    new Date().toISOString(), body.job_id).run();
 }
 
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
       return new Response("ok");
+    }
+    try {
+      if (request.method === "GET" && url.pathname === "/internal/enrichment-options") {
+        return Response.json(await enrichmentOptions(env, url.searchParams.get("apex")),
+          { headers: { "Cache-Control": "no-store" } });
+      }
+      if (request.method === "POST" && url.pathname === "/internal/enrichment-jobs") {
+        return await admitEnrichment(env, await request.json());
+      }
+      const match = url.pathname.match(/^\/internal\/enrichment-jobs\/([a-f0-9]{64})$/);
+      if (request.method === "GET" && match) {
+        return await enrichmentStatus(env, match[1], request.headers.get("X-Subfinder-Subject"));
+      }
+    } catch (error) {
+      if (error instanceof TypeError || error instanceof SyntaxError) {
+        return Response.json({ detail: "invalid enrichment request" }, { status: 400 });
+      }
+      throw error;
     }
     return Response.json({ detail: "not found" }, { status: 404 });
   },
@@ -321,7 +500,7 @@ export default {
         await processUrlscanJob(env, message.body);
         message.ack();
       } catch (error) {
-        await failJob(env, message.body, error);
+        await failJob(env, message.body, error, Number(message.attempts) >= 5);
         message.retry({ delaySeconds: 60 });
       }
     }

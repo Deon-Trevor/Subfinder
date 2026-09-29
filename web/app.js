@@ -1393,7 +1393,7 @@ function actionRow(name, action, zone) {
       `The approved artifact is already on this disk${size ? ` (${size})` : ""}.`
       + " Subfinder reads it there and downloads nothing.";
   } else {
-    title.textContent = "Read the URLScan history on file";
+    title.textContent = "Check URLScan history";
     note.textContent =
       "A search of scans other people already ran. Subfinder submits no scan"
       + " of its own and never touches the domain.";
@@ -1432,15 +1432,18 @@ function renderOffer() {
 
   const ran = Boolean(enrich.job && enrich.job.terminal);
   if (!ran && open.length) {
-    el.enrichLede.textContent =
-      "These records exist somewhere else and have never been read into the"
-      + ` index. Reading them in sends nothing to ${apex}.`;
+    el.enrichLede.textContent = open.includes("local_zone")
+      ? `The approved zone file is ready to import. Reading it sends nothing to ${apex}.`
+      : `URLScan may have past scans for ${apex}. Checking them sends nothing to the domain.`;
   } else if (!ran) {
     el.enrichLede.textContent = `Nothing on hand to read in for ${apex} right now.`;
   } else if (open.some((name) => enrich.retry.has(name))) {
     el.enrichLede.textContent =
       "That one read in nothing, so it is worth another go. Asking again"
       + " starts a new run, not a replay of the last.";
+  } else if (open.includes("urlscan") && enrich.job?.lanes?.urlscan?.more_available) {
+    el.enrichLede.textContent =
+      "Another pass may find older URLScan scans. The last pass is still awaiting an index update.";
   } else if (open.length) {
     el.enrichLede.textContent =
       `One more record is on hand for ${apex}. Reading it sends nothing to the domain either.`;
@@ -1499,6 +1502,14 @@ function laneReport(name, lane, zone) {
         text: (read ? `Read in ${plural(read, "name")} so far.` : "Nothing new in this pass.")
           + " The rest of the history is queued and lands on its own.",
       };
+    case "pending_publication":
+      return {
+        tone: "good",
+        text: (read
+          ? `Found ${plural(read, "name")}. They will appear after the next index update.`
+          : "No matching names found in this pass.")
+          + (lane.more_available ? " More history may be available." : ""),
+      };
     case "unavailable":
       return { tone: "quiet", text: ENRICH_ABSENT[name] };
     case "failed":
@@ -1534,6 +1545,11 @@ function laneRow(name, report) {
    of which is not. Reporting them the same way would misinform. */
 function laneSummary(job, reports) {
   if (job.state === "failed") return "Nothing read in.";
+  if (job.lanes?.urlscan?.state === "pending_publication") {
+    return Number(job.lanes.urlscan.records_ingested) > 0
+      ? "URLScan reading is complete. The index update is still pending."
+      : "URLScan reading is complete. No names were found.";
+  }
   const more = reports.some(([, report]) => report.more);
   const broke = reports.some(([, report]) => report.tone === "bad");
   const absent = reports.some(([, report]) => report.tone === "quiet");
@@ -1703,8 +1719,9 @@ async function submitEnrichment() {
   el.enrichActions.replaceChildren();
   el.enrichBlocked.hidden = true;
   el.enrichRun.hidden = true;
-  el.enrichLede.textContent =
-    `Reading records that already exist into the index. None of it touches ${apex}.`;
+  el.enrichLede.textContent = actions.includes("local_zone")
+    ? `Reading the approved zone file. None of it touches ${apex}.`
+    : `Checking existing URLScan scans. Findings will appear after the next index update. Nothing touches ${apex}.`;
   renderLanes(job);
 
   if (job.terminal) {
@@ -1824,10 +1841,12 @@ async function finishEnrichment(job) {
     enrich.retry.add(name);
   }
 
-  if (!job.result_url) return;
+  if (lanes.urlscan?.more_available) enrich.ran.delete("urlscan");
 
-  CACHE.delete(job.apex);
-  await search(job.apex, { push: false });
+  if (job.result_url) {
+    CACHE.delete(job.apex);
+    await search(job.apex, { push: false });
+  }
 
   if (!enrich || enrich.apex !== job.apex) return;
   // Anything still on hand is worth offering now that the record has moved.

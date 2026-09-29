@@ -10,6 +10,9 @@
       "bucket_name": "subfinder-catalog-stage"
     }
   ],
+  "services": [
+    { "binding": "URLSCAN_INGEST", "service": "subfinder-urlscan-stage" }
+  ],
   "durable_objects": {
     "bindings": [
       {

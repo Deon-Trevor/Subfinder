@@ -31,11 +31,22 @@ export class QuotaLedger {
           PRIMARY KEY (day, subject)
         ) WITHOUT ROWID
       `);
+      this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS admission_keys (
+          day TEXT NOT NULL,
+          subject TEXT NOT NULL,
+          key TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          units INTEGER NOT NULL,
+          PRIMARY KEY (day, subject, key)
+        ) WITHOUT ROWID
+      `);
     });
   }
 
   async fetch(request) {
-    if (request.method !== "POST" || new URL(request.url).pathname !== "/admit") {
+    const path = new URL(request.url).pathname;
+    if (request.method !== "POST" || !["/admit", "/release"].includes(path)) {
       return json({ detail: "not found" }, 404);
     }
     let input;
@@ -44,7 +55,7 @@ export class QuotaLedger {
     } catch {
       return json({ detail: "invalid admission request" }, 400);
     }
-    const { subject } = input;
+    const { subject, key, fingerprint } = input;
     const units = Number(input.units ?? 1);
     const limit = Number(input.limit);
     if (
@@ -54,13 +65,19 @@ export class QuotaLedger {
       !Number.isSafeInteger(units) ||
       units < 1 ||
       !Number.isSafeInteger(limit) ||
-      limit < 1
+      limit < 1 ||
+      (key !== undefined && (
+        typeof key !== "string" || key.length < 1 || key.length > 256 ||
+        typeof fingerprint !== "string" || fingerprint.length < 1 || fingerprint.length > 256
+      )) ||
+      (path === "/release" && key === undefined)
     ) {
       return json({ detail: "invalid admission request" }, 400);
     }
     const { day, resetAt } = utcWindow();
     const result = this.ctx.storage.transactionSync(() => {
       this.sql.exec("DELETE FROM request_counts WHERE day < ?", day);
+      this.sql.exec("DELETE FROM admission_keys WHERE day < ?", day);
       const row = this.sql
         .exec(
           "SELECT used FROM request_counts WHERE day = ? AND subject = ?",
@@ -69,6 +86,23 @@ export class QuotaLedger {
         )
         .toArray()[0];
       const used = Number(row?.used ?? 0);
+      if (key !== undefined) {
+        const previous = this.sql.exec(
+          "SELECT fingerprint, units FROM admission_keys WHERE day = ? AND subject = ? AND key = ?",
+          day, subject, key,
+        ).toArray()[0];
+        if (previous) {
+          if (previous.fingerprint !== fingerprint) return { conflict: true, used };
+          if (path === "/release") {
+            this.sql.exec("DELETE FROM admission_keys WHERE day = ? AND subject = ? AND key = ?", day, subject, key);
+            const next = Math.max(0, used - Number(previous.units));
+            this.sql.exec("UPDATE request_counts SET used = ? WHERE day = ? AND subject = ?", next, day, subject);
+            return { admitted: true, used: next, released: true };
+          }
+          return { admitted: true, used, replay: true };
+        }
+      }
+      if (path === "/release") return { admitted: true, used, released: false };
       if (used + units > limit) {
         return { admitted: false, used };
       }
@@ -80,14 +114,22 @@ export class QuotaLedger {
         subject,
         next,
       );
+      if (key !== undefined) {
+        this.sql.exec(
+          "INSERT INTO admission_keys(day, subject, key, fingerprint, units) VALUES (?, ?, ?, ?, ?)",
+          day, subject, key, fingerprint, units,
+        );
+      }
       return { admitted: true, used: next };
     });
     return json({
       admitted: result.admitted,
+      replay: result.replay === true,
+      released: result.released === true,
       limit,
       remaining: Math.max(0, limit - result.used),
       reset_at: resetAt,
-    }, result.admitted ? 200 : 429);
+    }, result.conflict ? 409 : result.admitted ? 200 : 429);
   }
 }
 
@@ -101,7 +143,7 @@ export async function subjectShard(subject) {
 }
 
 
-export async function admitQuota(env, identity, units = 1) {
+export async function admitQuota(env, identity, units = 1, key, fingerprint) {
   const id = env.QUOTA_LEDGER.idFromName(await subjectShard(identity.subject));
   const response = await env.QUOTA_LEDGER.get(id).fetch("https://quota/admit", {
     method: "POST",
@@ -110,16 +152,32 @@ export async function admitQuota(env, identity, units = 1) {
       subject: identity.subject,
       limit: identity.limit,
       units,
+      ...(key === undefined ? {} : { key, fingerprint }),
     }),
   });
   const quota = await response.json();
   if (!response.ok) {
-    const error = new Error("daily request limit exceeded");
+    const error = new Error(response.status === 409
+      ? "idempotency key was already used for another request"
+      : "daily request limit exceeded");
     error.status = response.status;
     error.quota = quota;
     throw error;
   }
   return quota;
+}
+
+
+export async function releaseQuota(env, identity, key, fingerprint) {
+  const id = env.QUOTA_LEDGER.idFromName(await subjectShard(identity.subject));
+  const response = await env.QUOTA_LEDGER.get(id).fetch("https://quota/release", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ subject: identity.subject, limit: identity.limit,
+      units: 1, key, fingerprint }),
+  });
+  if (!response.ok) throw new Error("quota release failed");
+  return await response.json();
 }
 
 

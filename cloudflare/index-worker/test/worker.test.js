@@ -177,6 +177,116 @@ test("health is data-independent and readiness identifies the active generation"
 });
 
 
+test("enrichment routes preserve quota, idempotency, and private status", async () => {
+  let submissions = 0;
+  const jobs = new Map();
+  const worker = createMiniflare(workerRoot, {
+    serviceHandler: async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/internal/enrichment-options") {
+        return Response.json({ schema_version: "subfinder.enrichment-options.v1",
+          actions: { local_zone: { actionable: false }, urlscan: { actionable: true } } });
+      }
+      if (path === "/internal/enrichment-jobs" && request.method === "POST") {
+        submissions += 1;
+        const body = await request.json();
+        if (body.apex === "blocked.com") {
+          return Response.json({ detail: "already queued" }, { status: 409 });
+        }
+        jobs.set(body.job_id, body.apex);
+        return Response.json({ job_id: body.job_id, apex: body.apex, state: "queued" },
+          { status: 202, headers: { Location: `/v1/enrichment-jobs/${body.job_id}` } });
+      }
+      if (path.startsWith("/internal/enrichment-jobs/")) {
+        assert.equal(request.headers.get("X-Subfinder-Subject"), "ip:127.0.0.1");
+        const jobId = path.split("/").at(-1);
+        return jobs.has(jobId)
+          ? Response.json({ job_id: jobId, apex: jobs.get(jobId), state: "running" })
+          : Response.json({ detail: "not found" }, { status: 404 });
+      }
+      return Response.json({ detail: "not found" }, { status: 404 });
+    },
+  });
+  try {
+    const options = await worker.dispatchFetch(
+      "http://worker.test/v1/enrichment-options?apex=example.com",
+    );
+    assert.equal(options.status, 200);
+    assert.equal((await options.json()).actions.urlscan.actionable, true);
+
+    const submit = (apex, actions = ["urlscan"], key = "same-key") => worker.dispatchFetch(
+      "http://worker.test/v1/enrichment-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+        body: JSON.stringify({ apex, actions }),
+      },
+    );
+    const first = await submit("example.com");
+    assert.equal(first.status, 202);
+    const firstRemaining = first.headers.get("X-RateLimit-Remaining");
+    const job = await first.json();
+    assert.match(job.job_id, /^[a-f0-9]{64}$/);
+    const replay = await submit("example.com");
+    assert.equal(replay.status, 202);
+    assert.equal(replay.headers.get("X-Idempotent-Replay"), "1");
+    assert.equal(submissions, 1);
+    assert.equal((await submit("example.net")).status, 409);
+    assert.equal(submissions, 1);
+    assert.equal((await submit("example.com", ["local_zone"])).status, 409);
+    const blocked = await submit("blocked.com", ["urlscan"], "blocked-key");
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.headers.get("X-RateLimit-Remaining"), firstRemaining);
+    const next = await submit("example.net", ["urlscan"], "next-key");
+    assert.equal(next.status, 202);
+    assert.equal(Number(next.headers.get("X-RateLimit-Remaining")), Number(firstRemaining) - 1);
+
+    const status = await worker.dispatchFetch(
+      `http://worker.test/v1/enrichment-jobs/${job.job_id}`,
+    );
+    assert.equal(status.status, 200);
+    assert.equal((await status.json()).state, "running");
+  } finally {
+    await worker.dispose();
+  }
+});
+
+
+test("queued enrichment retries its private Queue publish without a second charge", async () => {
+  let job;
+  let publishes = 0;
+  const worker = createMiniflare(workerRoot, {
+    serviceHandler: async (request) => {
+      const path = new URL(request.url).pathname;
+      if (request.method === "GET") {
+        return job ? Response.json({ ...job, state: "queued" })
+          : Response.json({ detail: "not found" }, { status: 404 });
+      }
+      job = await request.json();
+      publishes += 1;
+      return publishes === 1
+        ? Response.json({ detail: "queue unavailable" }, { status: 503 })
+        : Response.json({ ...job, state: "queued" }, { status: 202 });
+    },
+  });
+  try {
+    const submit = () => worker.dispatchFetch("http://worker.test/v1/enrichment-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "retry-key" },
+      body: JSON.stringify({ apex: "example.com", actions: ["urlscan"] }),
+    });
+    const first = await submit();
+    assert.equal(first.status, 503);
+    const remaining = first.headers.get("X-RateLimit-Remaining");
+    const second = await submit();
+    assert.equal(second.status, 202);
+    assert.equal(second.headers.get("X-RateLimit-Remaining"), remaining);
+    assert.equal(publishes, 2);
+  } finally {
+    await worker.dispose();
+  }
+});
+
+
 test("non-API GET and HEAD requests fall through to the static asset binding", async () => {
   const page = await miniflare.dispatchFetch("http://worker.test/");
   assert.equal(page.status, 200);

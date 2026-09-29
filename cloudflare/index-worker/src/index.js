@@ -11,7 +11,7 @@ import {
 } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { clientIdentity, requireClient } from "./client-auth.js";
-import { QuotaLedger as BaseQuotaLedger, admitQuota, quotaHeaders, subjectShard, utcWindow } from "./quota-ledger.js";
+import { QuotaLedger as BaseQuotaLedger, admitQuota, quotaHeaders, releaseQuota, subjectShard, utcWindow } from "./quota-ledger.js";
 
 
 const FORMAT = "subfinder.r2-index.v2";
@@ -57,6 +57,89 @@ function errorResponse(status, detail, headers = {}) {
     status,
     { "cache-control": "no-store", ...headers },
   );
+}
+
+async function urlscanService(env, path, init) {
+  if (env.URLSCAN_INGEST === undefined) {
+    return errorResponse(503, "URLScan enrichment is temporarily unavailable",
+      { "Retry-After": "5" });
+  }
+  const response = await env.URLSCAN_INGEST.fetch(`https://urlscan.internal${path}`, init);
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", "no-store");
+  return new Response(response.body, { status: response.status, headers });
+}
+
+export async function enrichmentOptionsRoute(env, url) {
+  const value = url.searchParams.get("apex");
+  if (value === null) return errorResponse(422, "apex is required");
+  let apex;
+  try { apex = normalizeApex(value); }
+  catch (error) { return errorResponse(400, error.message); }
+  return await urlscanService(env,
+    `/internal/enrichment-options?apex=${encodeURIComponent(apex)}`);
+}
+
+export async function enrichmentJobsRoute(request, env, url) {
+  const match = url.pathname.match(/^\/v1\/enrichment-jobs\/([a-f0-9]{64})$/);
+  if (request.method === "GET" && match) {
+    const identity = await clientIdentity(request, env);
+    return await urlscanService(env, `/internal/enrichment-jobs/${match[1]}`, {
+      headers: { "X-Subfinder-Subject": identity.subject },
+    });
+  }
+  if (request.method !== "POST" || url.pathname !== "/v1/enrichment-jobs") {
+    return errorResponse(405, "method not allowed");
+  }
+  let body;
+  try { body = await request.json(); }
+  catch { return errorResponse(400, "invalid enrichment request"); }
+  let apex;
+  try { apex = normalizeApex(body?.apex); }
+  catch (error) { return errorResponse(400, error.message); }
+  if (!Array.isArray(body.actions) || body.actions.length !== 1 ||
+      body.actions[0] !== "urlscan") {
+    return errorResponse(409, "only passive URLScan enrichment is available on this Worker");
+  }
+  const key = request.headers.get("Idempotency-Key")?.trim();
+  if (!key) return errorResponse(400, "Idempotency-Key is required");
+  if (env.URLSCAN_INGEST === undefined) {
+    return errorResponse(503, "URLScan enrichment is temporarily unavailable",
+      { "Retry-After": "5" });
+  }
+  const identity = await clientIdentity(request, env);
+  const jobId = await sha256Hex(encoder.encode(`${identity.subject}\n${key}`));
+  const existing = await urlscanService(env, `/internal/enrichment-jobs/${jobId}`, {
+    headers: { "X-Subfinder-Subject": identity.subject },
+  });
+  if (existing.ok) {
+    const job = await existing.json();
+    if (job.apex !== apex) {
+      return errorResponse(409, "idempotency key was already used for another request");
+    }
+    if (job.state !== "queued") {
+      return jsonResponse(job, 202, {
+        "Cache-Control": "no-store",
+        "Location": `/v1/enrichment-jobs/${jobId}`,
+        "X-Idempotent-Replay": "1",
+      });
+    }
+  } else if (existing.status !== 404) {
+    return existing;
+  }
+  const fingerprint = `urlscan:${apex}`;
+  let quota = await admitQuota(env, identity, 1, `enrichment:${jobId}`, fingerprint);
+  const response = await urlscanService(env, "/internal/enrichment-jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_id: jobId, subject: identity.subject, apex }),
+  });
+  if (response.status === 409 && !quota.replay) {
+    quota = await releaseQuota(env, identity, `enrichment:${jobId}`, fingerprint);
+  }
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(quotaHeaders(quota))) headers.set(name, value);
+  return new Response(response.body, { status: response.status, headers });
 }
 
 export async function docsPage(request, env, url, upstreamFetch = fetch) {
@@ -1089,6 +1172,13 @@ export default {
         return await docsPage(request, env, url);
       }
       if (url.pathname === "/mcp") return await mcp(request, env);
+      if (request.method === "GET" && url.pathname === "/v1/enrichment-options") {
+        return await enrichmentOptionsRoute(env, url);
+      }
+      if (url.pathname === "/v1/enrichment-jobs" ||
+          url.pathname.startsWith("/v1/enrichment-jobs/")) {
+        return await enrichmentJobsRoute(request, env, url);
+      }
       if (
         request.method === "POST" &&
         url.pathname === "/internal/v1/records/batch"

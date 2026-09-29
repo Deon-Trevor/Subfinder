@@ -4,7 +4,7 @@ import { buildSync } from "esbuild";
 import { Miniflare } from "miniflare";
 
 
-export function createMiniflare(workerRoot, { assetHandler, envOverrides = {} } = {}) {
+export function createMiniflare(workerRoot, { assetHandler, serviceHandler, envOverrides = {} } = {}) {
   const moduleName = "index.js";
   const bundle = buildSync({
     bundle: true,
@@ -54,6 +54,9 @@ export function createMiniflare(workerRoot, { assetHandler, envOverrides = {} } 
               });
             }),
           },
+          ...(serviceHandler ? { URLSCAN_INGEST: {
+            type: "fetcher", handler: serviceHandler,
+          } } : {}),
           ...Object.fromEntries(
             Object.entries(envOverrides).map(([name, value]) => [
               name,

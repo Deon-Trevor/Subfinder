@@ -85,7 +85,13 @@ Provisioning is deliberately not hidden in code. Create the D1 database, source 
 
 ## URLScan ingestion worker
 
-`urlscan-worker` keeps per-apex pagination in D1, charges the breadth UTC-day provider ledger before each request, and writes bounded URLScan pages as immutable deltas. Its default 70,000-request ceiling preserves the existing 10,000 search and 20,000 priority reserves within the 100,000 daily account budget. Seed `urlscan_sources` with normalized eTLD+1 values. A completed history page runs again immediately; a completed newest page waits for `URLSCAN_REFRESH_SECONDS`.
+`urlscan-worker` keeps per-apex pagination in D1, charges a shared UTC-day
+provider ledger before each request, and writes bounded URLScan pages as
+immutable deltas. The default shared ceiling is 70,000 requests. On-demand
+reads also have a separate priority ceiling of 20,000 per UTC day unless
+`URLSCAN_PRIORITY_DAILY_LIMIT` is set. Seed `urlscan_sources` with normalized
+eTLD+1 values for recurring reads. A completed history page runs again
+immediately; a completed newest page waits for `URLSCAN_REFRESH_SECONDS`.
 
 The API key is a Worker secret. It is intentionally absent from Wrangler vars, D1, Queue messages, logs, and R2 metadata:
 
@@ -107,13 +113,20 @@ use the production hostname. Cloudflare selected the D1 placement; neither
 configuration requests a region.
 
 The staging D1 migrations are applied. Both Workers were deployed on
-2026-09-29 with empty Cron lists. Both source tables and job tables remained
-empty after deployment. The staging URLScan Worker received its
+2026-09-29 with empty Cron lists. The staging URLScan Worker received its
 `URLSCAN_API_KEY` secret on 2026-09-29. Its CT and URLScan Queues each have
-one producer and one consumer, but no source can schedule provider work.
+one producer and one consumer. Cron does not schedule provider work.
 The staging CT settings allow one source and 16 entries per scheduled range.
 URLScan allows one source, 100 results per page, and 25 provider requests per
-UTC day. These are staging test bounds, not product limits.
+UTC day. On-demand URLScan reads are capped at five requests within that
+shared limit. These are staging test bounds, not product limits.
+
+The read Worker uses a private service binding to submit on-demand URLScan
+jobs. Its public API accepts only the `urlscan` action. The 2026-09-29 live
+`example.com` test completed one provider page, stored a two-record immutable
+delta, and registered it in the staging generation ledger. The delta awaits a
+later catalog generation. The test created a disabled URLScan source so it
+cannot start recurring reads when Cron is enabled.
 
 Run the local tests and compile each staging configuration:
 
@@ -127,10 +140,9 @@ npm test
 npx wrangler deploy --dry-run --config wrangler.staging.jsonc
 ```
 
-Before a live provider test, review the exact CT log URL and add it to
-`ct_sources`, or add a normalized apex to `urlscan_sources`. Keep Cron disabled
-for a manual test. Reconcile the CZDS dead-letter backlog before mixing new
-deltas into the shared staging compaction Queue. The staging URLScan quota lives
+Before another scheduled provider test, review the exact CT log URL and add
+it to `ct_sources`, or add a normalized apex to `urlscan_sources`. Keep Cron
+disabled for a manual test. The staging URLScan quota lives
 in its own D1 database; it does not reserve requests from a production
 deployment that uses the same URLScan account. Check the account's remaining
 provider quota before a live test.

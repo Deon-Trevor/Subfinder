@@ -8,10 +8,14 @@ import { buildSync } from "esbuild";
 import { Miniflare } from "miniflare";
 
 import {
+  admitEnrichment,
+  enrichmentOptions,
+  enrichmentStatus,
   processUrlscanJob,
   recordsFromUrlscan,
   scheduleUrlscan,
 } from "../src/index.js";
+import urlscanWorker from "../src/index.js";
 
 
 const workerRoot = resolve(import.meta.dirname, "..");
@@ -47,12 +51,12 @@ before(async () => {
   });
   database = await miniflare.getD1Database("CONTROL");
   bucket = await miniflare.getR2Bucket("CATALOG");
-  const migration = readFileSync(
-    resolve(workerRoot, "migrations/0001_urlscan_ingestion.sql"),
-    "utf8",
-  );
-  for (const statement of migration.split(";").map((value) => value.trim()).filter(Boolean)) {
-    await database.prepare(statement).run();
+  for (const name of ["0001_urlscan_ingestion.sql", "0002_on_demand_enrichment.sql",
+    "0003_priority_quota.sql", "0004_priority_quota_backfill.sql"]) {
+    const migration = readFileSync(resolve(workerRoot, "migrations", name), "utf8");
+    for (const statement of migration.split(";").map((value) => value.trim()).filter(Boolean)) {
+      await database.prepare(statement).run();
+    }
   }
 });
 
@@ -219,4 +223,144 @@ test("quota stops provider calls after the configured UTC-day limit", async () =
   await processUrlscanJob(env, jobs[0]);
   await assert.rejects(processUrlscanJob(env, jobs[1]), /quota is exhausted/);
   assert.equal(calls, 1);
+});
+
+
+test("on-demand enrichment is private, idempotent, and leaves publication pending", async () => {
+  const messages = [];
+  const deltas = [];
+  const env = {
+    CONTROL: database, CATALOG: bucket,
+    URLSCAN_API_KEY: "secret",
+    URLSCAN_BREADTH_DAILY_LIMIT: "2",
+    URLSCAN_PRIORITY_DAILY_LIMIT: "1",
+    URLSCAN_QUEUE: { send: async (message) => messages.push(message) },
+    COMPACTION_QUEUE: { send: async (message) => deltas.push(message) },
+    URLSCAN_FETCHER: { fetch: async () => Response.json(responsePayload(1)) },
+  };
+  const options = await enrichmentOptions(env, "example.com");
+  assert.equal(options.actions.local_zone.actionable, false);
+  assert.equal(options.actions.urlscan.actionable, true);
+  const input = { job_id: "a".repeat(64), subject: "ip:test", apex: "example.com" };
+  const admitted = await admitEnrichment(env, input);
+  assert.equal(admitted.status, 202);
+  assert.equal(admitted.headers.get("X-Idempotent-Replay"), "0");
+  assert.equal((await admitted.json()).lanes.urlscan.state, "queued");
+  assert.equal((await database.prepare(
+    "SELECT enabled FROM urlscan_sources WHERE apex = 'example.com'",
+  ).first()).enabled, 0);
+  assert.equal(await scheduleUrlscan(env), 0);
+  assert.equal((await admitEnrichment(env, input)).headers.get("X-Idempotent-Replay"), "1");
+  assert.equal(messages.length, 2);
+  assert.equal((await admitEnrichment(env, { ...input, apex: "example.net" })).status, 409);
+  assert.equal((await enrichmentStatus(env, input.job_id, "ip:someone-else")).status, 404);
+
+  await processUrlscanJob(env, messages[0]);
+  assert.equal(deltas.length, 1);
+  const status = await enrichmentStatus(env, input.job_id, input.subject);
+  assert.equal(status.status, 200);
+  const document = await status.json();
+  assert.equal(document.state, "done");
+  assert.equal(document.lanes.urlscan.state, "pending_publication");
+  assert.equal(document.lanes.urlscan.records_ingested, 1);
+  assert.equal(document.lanes.urlscan.more_available, false);
+  assert.equal(document.result_url, null);
+  assert.equal((await enrichmentOptions(env, "example.net")).actions.urlscan.actionable, false);
+
+  const scheduled = {
+    CONTROL: database, CATALOG: bucket, URLSCAN_API_KEY: "secret",
+    URLSCAN_BREADTH_DAILY_LIMIT: "2", URLSCAN_PRIORITY_DAILY_LIMIT: "1",
+    URLSCAN_QUEUE: { send: async (message) => messages.push(message) },
+    COMPACTION_QUEUE: { send: async () => {} },
+    URLSCAN_FETCHER: { fetch: async () => Response.json(responsePayload(1)) },
+  };
+  await database.prepare(
+    `INSERT INTO urlscan_sources(apex, cursor, next_run_at, updated_at)
+     VALUES ('example.net', NULL, '2026-09-27T00:00:00Z', '2026-09-27T00:00:00Z')`,
+  ).run();
+  assert.equal(await scheduleUrlscan(scheduled), 1);
+  await processUrlscanJob(scheduled, messages.at(-1));
+  assert.equal((await database.prepare(
+    "SELECT used FROM provider_quota WHERE provider = 'urlscan:breadth'",
+  ).first()).used, 2);
+  assert.equal((await database.prepare(
+    "SELECT priority_used FROM provider_quota WHERE provider = 'urlscan:breadth'",
+  ).first()).priority_used, 1);
+});
+
+
+test("options do not offer URLScan without its secret", async () => {
+  const options = await enrichmentOptions({ CONTROL: database }, "example.com");
+  assert.equal(options.actions.urlscan.actionable, false);
+  assert.match(options.actions.urlscan.reason, /not configured/);
+});
+
+
+test("a transient on-demand failure stays queued until the final retry", async () => {
+  const sent = [];
+  const env = {
+    CONTROL: database, CATALOG: bucket, URLSCAN_API_KEY: "secret",
+    URLSCAN_QUEUE: { send: async (message) => sent.push(message) },
+    COMPACTION_QUEUE: { send: async () => {} },
+    URLSCAN_FETCHER: { fetch: async () => { throw new Error("temporary failure"); } },
+  };
+  const input = { job_id: "b".repeat(64), subject: "ip:test", apex: "example.com" };
+  assert.equal((await admitEnrichment(env, input)).status, 202);
+  let retried = false;
+  await urlscanWorker.queue({ messages: [{ body: sent[0], attempts: 1,
+    retry: () => { retried = true; }, ack: () => assert.fail("must retry") }] }, env);
+  assert.equal(retried, true);
+  assert.equal((await enrichmentStatus(env, input.job_id, input.subject)).status, 200);
+  assert.equal((await database.prepare(
+    "SELECT state FROM urlscan_jobs WHERE job_id = ?",
+  ).bind(input.job_id).first()).state, "queued");
+  await urlscanWorker.queue({ messages: [{ body: sent[0], attempts: 5,
+    retry: () => {}, ack: () => assert.fail("must retry") }] }, env);
+  assert.equal((await database.prepare(
+    "SELECT state FROM urlscan_jobs WHERE job_id = ?",
+  ).bind(input.job_id).first()).state, "failed");
+});
+
+
+test("a failed Queue publish retries the same admitted job", async () => {
+  let attempts = 0;
+  const env = {
+    CONTROL: database, URLSCAN_API_KEY: "secret",
+    URLSCAN_QUEUE: { send: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("queue unavailable");
+    } },
+  };
+  const input = { job_id: "c".repeat(64), subject: "ip:test", apex: "example.com" };
+  assert.equal((await admitEnrichment(env, input)).status, 503);
+  const retried = await admitEnrichment(env, input);
+  assert.equal(retried.status, 202);
+  assert.equal(retried.headers.get("X-Idempotent-Replay"), "1");
+  assert.equal(attempts, 2);
+  assert.equal((await database.prepare(
+    "SELECT count(*) AS n FROM urlscan_jobs WHERE job_id = ?",
+  ).bind(input.job_id).first()).n, 1);
+});
+
+
+test("a second on-demand pass resumes the stored URLScan cursor", async () => {
+  const messages = [];
+  const env = {
+    CONTROL: database, CATALOG: bucket, URLSCAN_API_KEY: "secret",
+    URLSCAN_PAGE_SIZE: "1", URLSCAN_BREADTH_DAILY_LIMIT: "3",
+    URLSCAN_PRIORITY_DAILY_LIMIT: "2",
+    URLSCAN_QUEUE: { send: async (message) => messages.push(message) },
+    COMPACTION_QUEUE: { send: async () => {} },
+    URLSCAN_FETCHER: { fetch: async () => Response.json(responsePayload(1)) },
+  };
+  const first = { job_id: "d".repeat(64), subject: "ip:test", apex: "example.com" };
+  assert.equal((await admitEnrichment(env, first)).status, 202);
+  await processUrlscanJob(env, messages[0]);
+  const report = await (await enrichmentStatus(env, first.job_id, first.subject)).json();
+  assert.equal(report.lanes.urlscan.more_available, true);
+  const second = { ...first, job_id: "e".repeat(64) };
+  assert.equal((await admitEnrichment(env, second)).status, 202);
+  assert.equal((await database.prepare(
+    "SELECT cursor FROM urlscan_jobs WHERE job_id = ?",
+  ).bind(second.job_id).first()).cursor, "100,one");
 });
