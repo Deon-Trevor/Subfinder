@@ -103,11 +103,15 @@ function validateDelta(document) {
 function validateDeltaReady(body) {
   if (
     body?.schema_version !== DELTA_READY_SCHEMA_VERSION ||
-    !["direct-ct", "urlscan", "czds"].includes(body.source_kind) ||
+    !["direct-ct", "static-ct", "urlscan", "czds", "public-bulk"].includes(body.source_kind) ||
     typeof body.delta_id !== "string" ||
     !/^[a-f0-9]{64}$/.test(body.delta_id) ||
     typeof body.object_key !== "string" ||
     !body.object_key.startsWith("ingest/") ||
+    (body.source_kind === "public-bulk" &&
+      !body.object_key.startsWith("ingest/public-bulk/")) ||
+    (body.source_kind === "static-ct" &&
+      !body.object_key.startsWith("ingest/static-ct/")) ||
     body.object_key.includes("..")
   ) {
     throw new Error("delta-ready queue message is invalid");

@@ -36,6 +36,12 @@
   "vars": {
     "CT_ALLOWED_HOSTS": "ct.googleapis.com,ct.cloudflare.com",
     "CT_RANGE_SIZE": "256",
-    "CT_SOURCE_LIMIT": "20"
+    "CT_SOURCE_LIMIT": "20",
+    "CT_LOG_DISCOVERY_ENABLED": "1",
+    "CT_DISCOVERED_SOURCE_LIMIT": "2",
+    "CT_INITIAL_BACKFILL": "1024",
+    "STATIC_CT_ALLOWED_HOSTS": "mon.willow.ct.letsencrypt.org",
+    "STATIC_CT_SOURCE_LIMIT": "1",
+    "PUBLIC_SOURCES_ENABLED": "1"
   }
 }

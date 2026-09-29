@@ -78,7 +78,11 @@ before(async () => {
   });
   database = await miniflare.getD1Database("LEDGER");
   bucket = await miniflare.getR2Bucket("CATALOG");
-  for (const name of ["0001_generation_ledger.sql", "0002_seed_publication.sql"]) {
+  for (const name of [
+    "0001_generation_ledger.sql",
+    "0002_seed_publication.sql",
+    "0003_public_bulk_source.sql",
+  ]) {
     const migration = readFileSync(resolve(workerRoot, "migrations", name), "utf8");
     for (const statement of migration.split(";").map((value) => value.trim()).filter(Boolean)) {
       await database.prepare(statement).run();
@@ -152,6 +156,54 @@ test("registers immutable deltas idempotently and rejects identity conflicts", a
     ...message,
     object_key: conflicting,
   }), /identity conflicts/);
+});
+
+
+test("registers a bounded public-bulk delta without changing CZDS identity", async () => {
+  const deltaId = "c".repeat(64);
+  const key = `ingest/public-bulk/cisa-gov/${deltaId}.json.gz`;
+  await bucket.put(key, await gzipJson({
+    schema_version: "subfinder.ingest-delta.v1",
+    source: "gov:cisagov",
+    created_at: "2026-09-29T00:00:00.000Z",
+    records: [{ apex: "example.gov", hostname: "example.gov", first_seen: null }],
+  }));
+  const env = { LEDGER: database, CATALOG: bucket };
+  assert.deepEqual(await registerDelta(env, {
+    schema_version: "subfinder.delta-ready.v1",
+    delta_id: deltaId,
+    source_kind: "public-bulk",
+    object_key: key,
+  }), { deltaId, state: "registered" });
+  const row = await database.prepare(
+    "SELECT source_kind, record_count FROM catalog_deltas WHERE delta_id = ?",
+  ).bind(deltaId).first();
+  assert.deepEqual(row, { source_kind: "public-bulk", record_count: 1 });
+});
+
+
+test("registers Static CT only from its immutable prefix", async () => {
+  const deltaId = "6".repeat(64);
+  const key = `ingest/static-ct/willow/${deltaId}.json.gz`;
+  await bucket.put(key, await gzipJson({
+    schema_version: "subfinder.ingest-delta.v1",
+    source: "static_ct:https://mon.willow.ct.letsencrypt.org/2026h2",
+    created_at: "2026-09-29T00:00:00.000Z",
+    records: [{ apex: "example.com", hostname: "www.example.com", first_seen: null }],
+  }));
+  const env = { LEDGER: database, CATALOG: bucket };
+  await assert.rejects(registerDelta(env, {
+    schema_version: "subfinder.delta-ready.v1",
+    delta_id: deltaId,
+    source_kind: "static-ct",
+    object_key: `ingest/direct-ct/willow/${deltaId}.json.gz`,
+  }), /invalid/);
+  assert.deepEqual(await registerDelta(env, {
+    schema_version: "subfinder.delta-ready.v1",
+    delta_id: deltaId,
+    source_kind: "static-ct",
+    object_key: key,
+  }), { deltaId, state: "registered" });
 });
 
 

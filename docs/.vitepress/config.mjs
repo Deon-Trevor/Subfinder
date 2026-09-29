@@ -41,6 +41,7 @@ export default defineConfig({
         items: [
           { text: 'Compose service', link: '/operations/compose' },
           { text: 'Cloudflare migration', link: '/operations/cloudflare' },
+          { text: 'Cloudflare source refresh', link: '/operations/source-refresh' },
           { text: 'Staging reconciliation', link: '/operations/staging-reconciliation' },
           { text: 'Staging compaction', link: '/operations/staging-compaction' },
           { text: 'Staging throughput and cost', link: '/operations/staging-cost' },

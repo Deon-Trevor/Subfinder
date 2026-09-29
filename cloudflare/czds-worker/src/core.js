@@ -143,14 +143,16 @@ export async function scheduleCzds(env, now = new Date()) {
   const due = await env.CONTROL.prepare(
     `SELECT zone, last_completed_at FROM czds_zones
      WHERE enabled = 1 AND (last_completed_at IS NULL OR last_completed_at <= ?)
+       AND (last_attempt_at IS NULL OR last_attempt_at <= ?)
        AND (? IS NULL OR zone = ?)
        AND NOT EXISTS (
          SELECT 1 FROM czds_jobs AS jobs
          WHERE jobs.zone = czds_zones.zone
            AND jobs.state IN ('queued', 'running', 'staged')
        )
-     ORDER BY last_completed_at IS NOT NULL, last_completed_at, zone LIMIT ?`,
-  ).bind(cutoff, onlyZone ?? null, onlyZone ?? null, maxZones).all();
+     ORDER BY last_completed_at IS NOT NULL,
+              COALESCE(last_completed_at, last_attempt_at), zone LIMIT ?`,
+  ).bind(cutoff, cutoff, onlyZone ?? null, onlyZone ?? null, maxZones).all();
   const byZone = new Map(links.map((link) => [link.zone, link.url]));
   let queued = 0;
   for (const source of due.results) {
@@ -175,6 +177,9 @@ export async function scheduleCzds(env, now = new Date()) {
       ).bind(jobId).run();
       throw error;
     }
+    await env.CONTROL.prepare(
+      "UPDATE czds_zones SET last_attempt_at = ? WHERE zone = ?",
+    ).bind(nowIso, source.zone).run();
     queued += 1;
   }
   return queued;

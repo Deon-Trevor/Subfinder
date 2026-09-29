@@ -12,6 +12,7 @@ const pages = [
   'how-to/ingestion.md',
   'operations/compose.md',
   'operations/cloudflare.md',
+  'operations/source-refresh.md',
   'operations/staging-reconciliation.md',
   'explanation/web-interface.md'
 ]

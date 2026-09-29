@@ -4,6 +4,10 @@ This catalog separates the public query service from indexing jobs. A query
 reads the local index and atomically queues optional passive enrichment. It does
 not wait for urlscan, submit a live scan, or probe a hostname.
 
+The source list describes the Compose index. The [Cloudflare source refresh
+guide](/operations/source-refresh) records which feeds have a Worker refresh
+path and which still depend on Compose or an operator-supplied artifact.
+
 ## Default sources without credentials
 
 ### Certificate Transparency

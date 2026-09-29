@@ -81,6 +81,14 @@ npm test
 
 `ingest-worker` polls only exact allowlisted HTTPS CT hosts. A scheduled invocation records a bounded job in D1 and sends its ID to a Queue. The consumer parses leaf or precertificate DNS names, writes one immutable gzip delta to R2, then advances the D1 cursor. Completed-job retries re-send the idempotent delta notification so an earlier Queue outage cannot orphan an R2 object.
 
+The Worker can also check Chrome and Apple log lists daily. It adds only active
+RFC 6962 logs on exact allowlisted hosts. A separate
+`CT_DISCOVERED_SOURCE_LIMIT` keeps discovered logs from using the reviewed
+source budget. `PUBLIC_SOURCES_ENABLED` adds daily IANA root-zone and CISA
+`.gov` checks. The IANA snapshot is private TLD metadata; a changed CISA CSV
+creates a `public-bulk` catalog delta. See [Cloudflare source refresh](/operations/source-refresh)
+for rollout gates and the sources that still run under Compose.
+
 Provisioning is deliberately not hidden in code. Create the D1 database, source Queue, dead-letter Queue, shared compaction Queue, and compaction dead-letter Queue. Copy `wrangler.example.jsonc` to `wrangler.jsonc`, replace the D1 ID, then apply `migrations/0001_ingestion.sql`. Add reviewed CT log URLs to `ct_sources`; the host must also appear in `CT_ALLOWED_HOSTS`.
 
 ## URLScan ingestion worker

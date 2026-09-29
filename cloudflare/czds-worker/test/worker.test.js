@@ -50,12 +50,11 @@ before(async () => {
   });
   database = await miniflare.getD1Database("CONTROL");
   bucket = await miniflare.getR2Bucket("CATALOG");
-  const migration = readFileSync(
-    resolve(workerRoot, "migrations/0001_czds_ingestion.sql"),
-    "utf8",
-  );
-  for (const statement of migration.split(";").map((value) => value.trim()).filter(Boolean)) {
-    await database.prepare(statement).run();
+  for (const file of ["0001_czds_ingestion.sql", "0003_zone_attempts.sql"]) {
+    const migration = readFileSync(resolve(workerRoot, "migrations", file), "utf8");
+    for (const statement of migration.split(";").map((value) => value.trim()).filter(Boolean)) {
+      await database.prepare(statement).run();
+    }
   }
 });
 
@@ -252,6 +251,37 @@ test("staging scheduler selects only the explicitly approved zone", async () => 
     scheduleCzds({ ...env, CZDS_ONLY_ZONE: "net" }),
     /not approved/,
   );
+});
+
+
+test("a failed new zone yields the next daily slot to an unattempted zone", async () => {
+  const workflows = [];
+  const env = {
+    CONTROL: database,
+    CZDS_USERNAME: "user",
+    CZDS_PASSWORD: "password",
+    CZDS_MAX_ZONES: "1",
+    CZDS_REFRESH_SECONDS: "86400",
+    CZDS_FETCHER: { fetch: async (request) => {
+      const url = new URL(request);
+      if (url.hostname === "account-api.icann.org") {
+        return Response.json({ accessToken: "access-token" });
+      }
+      return Response.json([
+        "https://czds-download-api.icann.org/czds/downloads/aaa.zone",
+        "https://czds-download-api.icann.org/czds/downloads/biz.zone",
+      ]);
+    } },
+    CZDS_WORKFLOW: { create: async (input) => workflows.push(input) },
+  };
+  const firstDay = new Date("2026-09-27T05:00:00.000Z");
+  assert.equal(await scheduleCzds(env, firstDay), 1);
+  assert.equal((await database.prepare("SELECT zone FROM czds_jobs").first()).zone, "aaa");
+  await database.prepare("UPDATE czds_jobs SET state = 'failed' WHERE zone = 'aaa'").run();
+  assert.equal(await scheduleCzds(env, new Date(firstDay.valueOf() + 86400000)), 1);
+  const rows = await database.prepare("SELECT zone FROM czds_jobs ORDER BY created_at").all();
+  assert.deepEqual(rows.results.map((row) => row.zone), ["aaa", "biz"]);
+  assert.equal(workflows.length, 2);
 });
 
 

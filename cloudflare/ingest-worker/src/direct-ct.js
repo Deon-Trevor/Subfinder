@@ -97,6 +97,30 @@ function certificateNames(der) {
 }
 
 
+export function certificateHostnames(der) {
+  let values;
+  try {
+    values = certificateNames(der);
+  } catch {
+    return [];
+  }
+  const result = [];
+  const seen = new Set();
+  for (const value of values) {
+    try {
+      const hostname = normalizeHostname(value);
+      if (!seen.has(hostname)) {
+        seen.add(hostname);
+        result.push(hostname);
+      }
+    } catch {
+      // A certificate can contain non-DNS SAN values.
+    }
+  }
+  return result;
+}
+
+
 export function entryHostnames(entry) {
   let values;
   if (Array.isArray(entry?.dns_names)) {
@@ -104,11 +128,7 @@ export function entryHostnames(entry) {
   } else {
     const der = leafCertificate(entry);
     if (der === null) return [];
-    try {
-      values = certificateNames(der);
-    } catch {
-      return [];
-    }
+    return certificateHostnames(der);
   }
   const result = [];
   const seen = new Set();
