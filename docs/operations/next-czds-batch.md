@@ -59,3 +59,47 @@ The deployed CZDS Cron list is empty.
 
 Rerun `node scripts/verify_staged_czds.mjs JOB_ID` for any row before its
 later publication gate. Do not call a staged zone searchable yet.
+
+## Next batch: largest unstaged gTLD zones
+
+The [2026-09-28 gTLD zone-count ranking](https://ntlddata.com/?scope=all)
+puts `.com`, `.net`, `.org`, `.xyz`, `.top`, `.info`, `.shop`, `.online`,
+`.store`, `.vip`, `.site`, `.app`, `.biz`, `.bond`, and `.pro` in the first
+15. This is a count of domains in zone files, not DNS traffic or a promise
+about which links this account may download. The [Q2 2026 Domain Name Industry
+Brief](https://www.dnib.com/articles/the-domain-name-industry-brief-q2-2026)
+independently identifies the first ten gTLDs. The final three were checked
+against the individual [`.biz`](https://www.ntlddata.com/tld/biz?scope=all),
+[`.bond`](https://www.ntlddata.com/tld/bond?scope=all), and
+[`.pro`](https://www.ntlddata.com/tld/pro?scope=all) counts. `.com` ingestion is complete
+and `.biz` is staged, so the next batch has 13 jobs, in this order:
+
+`net`, `org`, `xyz`, `top`, `info`, `shop`, `online`, `store`, `vip`, `site`,
+`app`, `bond`, `pro`.
+
+The ranking is frozen in `scripts/czds_top15_batch.json`. Run
+`node scripts/plan_czds_stage_batch.mjs` to compare it with the live staging
+ledger. That command only reads D1. It fails if a CZDS job is active, a
+ranked zone has a failed job requiring review, or the local stage-only,
+single-zone, Cron-free, single-Container settings have drifted. The staging
+config prepares all 15 zones for the Container parser, but retains
+`CZDS_ONLY_ZONE=biz` and no Cron. **Preparation does not start ingestion.**
+
+Before starting any row, confirm its exact name is in this account's fresh
+approved CZDS link feed. The scheduler enforces this at job creation; public
+zone counts do not confer CZDS access. Keep `CZDS_STAGE_ONLY=true`,
+`CZDS_MAX_ZONES=1`, and one active parser job at a time. Set
+`CZDS_ONLY_ZONE` to the next exact zone, deploy the staging CZDS Worker,
+temporarily enable the staging Cron to create one Workflow, then remove the
+Cron as soon as the D1 job and Workflow exist. Check the deployed Cron list
+is empty. Do not change the production hostname or enable compaction Cron.
+
+For every job, wait for Workflow success and run
+`node scripts/verify_staged_czds.mjs JOB_ID`. That verifier checks contiguous
+chunks, all private R2 objects, record totals, and zero generation-ledger
+registrations. Do not start the next zone until this check passes. Do not
+publish these staged jobs until the `.com` generation chain has finished and
+the separate publication gate has been reviewed. At roughly 63 million
+domains across the 13 public zone-count estimates, this is a substantial
+Container and R2 batch, not a free background task; measure the first large
+zone before committing to the rest.
