@@ -27,12 +27,28 @@ before claiming that every CZDS zone is covered.
    Deploying the CZDS Worker during that job can reset its Durable Object.
 2. Run `node scripts/plan_czds_stage_batch.mjs czds_small_batch_01.json`.
    Resolve any active or failed job before continuing.
-3. Set `CZDS_ONLY_ZONE` to the next pending zone. Keep
-   `CZDS_STAGE_ONLY=true`, `CZDS_MAX_ZONES=1`, and the Cron list empty.
-4. Deploy only the staging CZDS Worker with `--containers-rollout none`.
-   Add the one-minute staging Cron with `wrangler triggers deploy`.
-5. As soon as D1 has one job and the Workflow exists, remove the Cron and
-   verify that the deployed trigger list has no schedule.
+3. In `cloudflare/czds-worker/wrangler.staging.jsonc`, set
+   `CZDS_ONLY_ZONE` to the next pending zone. Keep `CZDS_STAGE_ONLY=true`,
+   `CZDS_MAX_ZONES=1`, and `triggers.crons=[]`. From `cloudflare/czds-worker`,
+   deploy with:
+
+   ```sh
+   ./node_modules/.bin/wrangler deploy \
+     --config wrangler.staging.jsonc --containers-rollout none
+   ```
+
+4. Temporarily set `triggers.crons=["* * * * *"]` in the same config. Deploy
+   only its triggers:
+
+   ```sh
+   ./node_modules/.bin/wrangler triggers deploy \
+     --config wrangler.staging.jsonc
+   ```
+
+5. When D1 shows exactly one new job and its Workflow exists, set
+   `triggers.crons=[]` and run the same `wrangler triggers deploy` command.
+   Confirm that its output has no `schedule:` line. Leave the local config
+   Cron-free before checking the job or changing zones.
 6. Wait for Workflow success. Run `node scripts/verify_staged_czds.mjs JOB_ID`.
    The verifier checks every R2 object, chunk order, record count, and the
    absence of generation-ledger registration. Do not advance on failure.
