@@ -8,7 +8,7 @@ import { gunzipSync } from "node:zlib";
 import { buildSync } from "esbuild";
 import { Miniflare } from "miniflare";
 
-import {
+import ingestWorker, {
   processDirectCtJob,
   scheduleDirectCt,
 } from "../src/index.js";
@@ -96,6 +96,31 @@ async function resetSource() {
      VALUES (?, ?, 0, 1, ?)`,
   ).bind("test-log", "https://ct.example/log", new Date(0).toISOString()).run();
 }
+
+
+test("scheduled invocation reports an empty eligible CT source set", async () => {
+  await resetSource();
+  await database.prepare("UPDATE ct_sources SET enabled = 0").run();
+  const output = [];
+  const originalLog = console.log;
+  console.log = (value) => output.push(JSON.parse(value));
+  try {
+    await ingestWorker.scheduled({}, {
+      CONTROL: database,
+      CT_ALLOWED_HOSTS: "ct.example",
+      INGEST_QUEUE: { send: async () => { throw new Error("unexpected job"); } },
+    });
+  } finally {
+    console.log = originalLog;
+  }
+  assert.deepEqual(output, [{
+    event: "ingest-scheduled",
+    ct_jobs: 0,
+    discovered_logs: 0,
+    public_sources: [],
+    errors: [],
+  }]);
+});
 
 
 function staticLeaf() {

@@ -326,6 +326,17 @@ export default {
       discoverCtLogs(env),
       refreshPublicSources(env),
     ]);
+    console.log(JSON.stringify({
+      event: "ingest-scheduled",
+      ct_jobs: results[0].status === "fulfilled" ? results[0].value : null,
+      discovered_logs: results[1].status === "fulfilled" ? results[1].value : null,
+      public_sources: results[2].status === "fulfilled" ? results[2].value : null,
+      errors: results.flatMap((result, index) => (
+        result.status === "rejected"
+          ? [{ source: ["ct", "discovery", "public-sources"][index], error: String(result.reason) }]
+          : []
+      )),
+    }));
     const errors = results.filter((result) => result.status === "rejected");
     if (errors.length > 0) {
       throw new AggregateError(errors.map((result) => result.reason), "ingestion schedule failed");

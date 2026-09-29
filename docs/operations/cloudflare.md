@@ -169,6 +169,17 @@ URLScan allows one source, 100 results per page, and 25 provider requests per
 UTC day. On-demand URLScan reads are capped at five requests within that
 shared limit. These are staging test bounds, not product limits.
 
+The live CT Cron test on 2026-09-29 completed job
+`a1fd715c23a69774ebe97cffcb896fd32564818471a66810deb169b9130e686a`.
+The scheduled invocation queued one 16-entry range. Its Queue consumer wrote
+22 hostname records to an immutable R2 delta, and the generation ledger
+registered that delta. The first trigger registration had no observed event
+after 24 minutes. A trigger reapply at 17:40 UTC preceded the successful
+17:47 UTC invocation; this sequence does not establish why the first
+registration stayed silent. The reviewed test source is disabled again, and
+the deployed CT Cron list is empty. The delta is registered, not yet active in
+a catalog generation.
+
 The read Worker uses a private service binding to submit on-demand URLScan
 jobs. Its public API accepts only the `urlscan` action. The 2026-09-29 live
 `example.com` test completed one provider page, stored a two-record immutable
@@ -212,8 +223,20 @@ queued scheduled job, checks the staging Queue and dead-letter Queue, and
 requires `--execute` to send the message. Verify that the job becomes
 `complete` and that its immutable delta appears in R2 and the staging
 generation ledger. This tests the deployed consumer, not the deployed
-scheduled producer. Test that producer with a real staging Cron invocation
-before calling the scheduled path end-to-end verified.
+scheduled producer. For a real Cron test, confirm that a reviewed `ct_sources`
+row is enabled, its `retry_at` is null or past, and its `next_index` is behind
+the log tree size. Deploy a temporary Cron on the staging Worker and confirm
+it appears in the Worker's Cron Triggers settings. Cloudflare documents up to
+15 minutes of propagation, but this test took longer. Watch past that period
+and the next scheduled tick. If no invocation appears, confirm that the source
+is still eligible and reapply the staging trigger with
+`npx wrangler triggers deploy --config wrangler.staging.jsonc`. Each invocation
+logs an `ingest-scheduled` summary, including
+`ct_jobs: 0` when no source is eligible. Confirm the job, immutable R2 delta,
+and generation-ledger registration before calling the scheduled path
+end-to-end verified. Disable the test source before removing the temporary
+Cron, then verify the deployed Cron list is empty. Do not infer that a trigger
+ran from its configuration or from a short watch with no log event.
 
 ## CZDS ingestion worker
 
