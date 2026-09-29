@@ -142,10 +142,30 @@ npx wrangler deploy --dry-run --config wrangler.staging.jsonc
 
 Before another scheduled provider test, review the exact CT log URL and add
 it to `ct_sources`, or add a normalized apex to `urlscan_sources`. Keep Cron
-disabled for a manual test. The staging URLScan quota lives
-in its own D1 database; it does not reserve requests from a production
-deployment that uses the same URLScan account. Check the account's remaining
-provider quota before a live test.
+disabled for a manual test. The staging URLScan quota lives in its own D1
+database; it does not reserve requests from a production deployment that uses
+the same URLScan account. Check the account's remaining provider quota before
+a live test.
+
+`wrangler dev --test-scheduled` can create a job in remote D1, but its Queue
+producer still sends to Miniflare's local broker even with `remote: true`.
+Cloudflare tracks this in [workers-sdk issue #13727](https://github.com/cloudflare/workers-sdk/issues/13727).
+The D1 row alone does not prove delivery. After local scheduling, copy the
+exact queued job ID from staging D1. Check and submit that one job to the
+deployed consumer:
+
+```sh
+node scripts/dispatch_staging_ingestion.mjs ct JOB_ID
+node scripts/dispatch_staging_ingestion.mjs ct JOB_ID --execute
+```
+
+Use `urlscan` in place of `ct` for a URLScan job. The script accepts only a
+queued scheduled job, checks the staging Queue and dead-letter Queue, and
+requires `--execute` to send the message. Verify that the job becomes
+`complete` and that its immutable delta appears in R2 and the staging
+generation ledger. This tests the deployed consumer, not the deployed
+scheduled producer. Test that producer with a real staging Cron invocation
+before calling the scheduled path end-to-end verified.
 
 ## CZDS ingestion worker
 
