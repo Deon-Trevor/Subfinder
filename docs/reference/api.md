@@ -158,6 +158,12 @@ Subfinder SQLite volume into another application. Subfinder owns neutral index
 facts and provenance; classifications, scores, and application-specific
 enrichments belong in the consuming application's state store.
 
+The host-published `http://127.0.0.1:8200` is the public edge. It returns 404
+for every `/internal/` route, even with a valid token. Host CLI monitoring uses
+the public per-apex read path without the service token, or runs inside a
+trusted data-plane worker for durable batches. The Cloudflare read Worker
+protects its internal batch routes with token authentication at its HTTPS origin.
+
 ## Refresh status and quotas
 
 `GET /v1/search` reports queue admission in `X-Refresh-Status` and the legacy
