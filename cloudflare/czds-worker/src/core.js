@@ -519,11 +519,17 @@ export async function startCzdsContainerJob(env, jobId) {
 
 
 export async function inspectCzdsContainerJob(env, jobId) {
-  const response = await env.CZDS_PARSER.getByName(jobId).fetch(
+  const parser = env.CZDS_PARSER.getByName(jobId);
+  const container = await parser.getState();
+  if (container.status === "stopped" || container.status === "stopped_with_code") {
+    return { state: "idle", container };
+  }
+  const response = await parser.fetch(
     new Request("http://localhost/status"),
   );
   if (!response.ok) throw new Error(`CZDS parser status returned HTTP ${response.status}`);
-  return await response.json();
+  const status = await response.json();
+  return status.state === "idle" ? { ...status, container: await parser.getState() } : status;
 }
 
 

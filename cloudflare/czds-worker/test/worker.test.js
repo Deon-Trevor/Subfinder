@@ -12,6 +12,7 @@ import {
   claimCzdsJob,
   completeCzdsArtifact,
   finishCzdsWorkflow,
+  inspectCzdsContainerJob,
   publishCzdsJob,
   reapTerminalCzdsParsers,
   releaseTerminalCzdsParser,
@@ -59,6 +60,46 @@ before(async () => {
       await database.prepare(statement).run();
     }
   }
+});
+
+
+test("parser inspection preserves stopped container diagnostics without restarting it", async () => {
+  let fetched = false;
+  const container = { status: "stopped_with_code", exitCode: 137, lastChange: 42 };
+  const result = await inspectCzdsContainerJob({ CZDS_PARSER: {
+    getByName: () => ({
+      getState: async () => container,
+      fetch: async () => { fetched = true; throw new Error("must not wake parser"); },
+    }),
+  } }, "a".repeat(64));
+  assert.deepEqual(result, { state: "idle", container });
+  assert.equal(fetched, false);
+});
+
+
+test("parser inspection reports a reset observed during status fetch", async () => {
+  const states = [
+    { status: "healthy", lastChange: 41 },
+    { status: "healthy", lastChange: 43 },
+  ];
+  const result = await inspectCzdsContainerJob({ CZDS_PARSER: {
+    getByName: () => ({
+      getState: async () => states.shift(),
+      fetch: async () => Response.json({ state: "idle" }),
+    }),
+  } }, "a".repeat(64));
+  assert.deepEqual(result, { state: "idle", container: { status: "healthy", lastChange: 43 } });
+});
+
+
+test("parser inspection leaves a running parser status unchanged", async () => {
+  const result = await inspectCzdsContainerJob({ CZDS_PARSER: {
+    getByName: () => ({
+      getState: async () => ({ status: "healthy", lastChange: 41 }),
+      fetch: async () => Response.json({ state: "running" }),
+    }),
+  } }, "a".repeat(64));
+  assert.deepEqual(result, { state: "running" });
 });
 
 

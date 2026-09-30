@@ -59,6 +59,7 @@ CzdsParser.outboundByHost = {
 
 
 async function stageInContainer(env, step, jobId) {
+  const stops = [];
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const launched = await step.do(`start CZDS parser ${attempt}`, async () => (
       await startCzdsContainerJob(env, jobId)
@@ -70,11 +71,14 @@ async function stageInContainer(env, step, jobId) {
         await inspectCzdsContainerJob(env, jobId)
       ));
       if (status.state === "staged") return status;
-      if (status.state === "failed" || status.state === "idle") break;
+      if (status.state === "failed" || status.state === "idle") {
+        stops.push({ attempt, state: status.state, container: status.container ?? null });
+        break;
+      }
       if (status.state !== "running") throw new Error("CZDS parser returned an invalid state");
     }
   }
-  throw new Error("CZDS parser did not complete after three attempts");
+  throw new Error(`CZDS parser did not complete after three attempts: ${JSON.stringify(stops)}`);
 }
 
 
