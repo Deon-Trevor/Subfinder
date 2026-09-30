@@ -90,10 +90,12 @@ Before starting any row, confirm its exact name is in this account's fresh
 approved CZDS link feed. The scheduler enforces this at job creation; public
 zone counts do not confer CZDS access. Keep `CZDS_STAGE_ONLY=true`,
 `CZDS_MAX_ZONES=1`, and one active parser job at a time. Set
-`CZDS_ONLY_ZONE` to the next exact zone, deploy the staging CZDS Worker,
-temporarily enable the staging Cron to create one Workflow, then remove the
-Cron as soon as the D1 job and Workflow exist. Check the deployed Cron list
-is empty. Do not change the production hostname or enable compaction Cron.
+`CZDS_ONLY_ZONE` to the next exact zone and deploy the staging CZDS Worker.
+Check D1 before arming Cron: if one job already exists, use it; if more than
+one exists, stop and investigate. Only if none exists, temporarily enable
+the staging Cron to create one Workflow. Remove Cron as soon as the D1 job
+and Workflow exist. Check that the deployed Cron list is empty. Do not
+change the production hostname or enable compaction Cron.
 
 For every job, wait for Workflow success and run
 `node scripts/verify_staged_czds.mjs JOB_ID`. That verifier checks contiguous

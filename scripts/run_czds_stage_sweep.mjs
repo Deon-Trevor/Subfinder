@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { needsStageCron } from "./czds_stage_cron_decision.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
 const worker = resolve(repo, "cloudflare/czds-worker");
@@ -143,29 +144,33 @@ try {
     if (!deployed.includes(`env.CZDS_ONLY_ZONE ("${zone}")`)) {
       throw new Error(`staging Worker deploy did not confirm ${zone}`);
     }
+    let jobs = zoneJobs(zone);
     try {
-      config.triggers.crons = ["* * * * *"];
-      writeFileSync(temporary, JSON.stringify(config, null, 2));
-      cronArmed = true;
-      const trigger = command(wrangler, ["triggers", "deploy", "--config", temporary], worker);
-      if (!trigger.includes("schedule: * * * * *")) {
-        throw new Error("staging Cron deployment was not confirmed");
-      }
-      let jobs = [];
-      // A newly deployed Cloudflare Cron may take up to 15 minutes to propagate.
-      for (let poll = 0; poll < 108; poll += 1) {
-        checkInterrupted();
-        jobs = zoneJobs(zone);
-        if (jobs.length !== 0) break;
-        await sleep(10000);
+      if (needsStageCron(jobs)) {
+        config.triggers.crons = ["* * * * *"];
+        writeFileSync(temporary, JSON.stringify(config, null, 2));
+        cronArmed = true;
+        const trigger = command(wrangler, ["triggers", "deploy", "--config", temporary], worker);
+        if (!trigger.includes("schedule: * * * * *")) {
+          throw new Error("staging Cron deployment was not confirmed");
+        }
+        // A newly deployed Cloudflare Cron may take up to 15 minutes to propagate.
+        for (let poll = 0; poll < 108; poll += 1) {
+          checkInterrupted();
+          jobs = zoneJobs(zone);
+          if (jobs.length !== 0) break;
+          await sleep(10000);
+        }
       }
       if (jobs.length !== 1 || !/^[a-f0-9]{64}$/.test(jobs[0].job_id)) {
         throw new Error(`exactly one ${zone} job did not appear within 18 minutes`);
       }
-      config.triggers.crons = [];
-      writeFileSync(temporary, JSON.stringify(config, null, 2));
-      const removed = command(wrangler, ["triggers", "deploy", "--config", temporary], worker);
-      if (removed.includes("schedule:")) throw new Error("staging Cron removal was not confirmed");
+      if (cronArmed) {
+        config.triggers.crons = [];
+        writeFileSync(temporary, JSON.stringify(config, null, 2));
+        const removed = command(wrangler, ["triggers", "deploy", "--config", temporary], worker);
+        if (removed.includes("schedule:")) throw new Error("staging Cron removal was not confirmed");
+      }
       if ((await schedules()).length !== 0) throw new Error("staging Cron remains active");
       cronArmed = false;
       for (let poll = 0; poll < 90; poll += 1) {

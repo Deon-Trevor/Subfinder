@@ -56,16 +56,19 @@ and reports a timeout.
      --config wrangler.staging.jsonc --containers-rollout none
    ```
 
-4. Temporarily set `triggers.crons=["* * * * *"]` in the same config. Deploy
-   only its triggers:
+4. Check D1 for a job in the selected zone after the Worker deployment. If
+   exactly one job exists, do not arm Cron. If more than one exists, stop and
+   investigate. If no job exists, temporarily set
+   `triggers.crons=["* * * * *"]` in the same config and deploy only its triggers:
 
    ```sh
    ./node_modules/.bin/wrangler triggers deploy \
      --config wrangler.staging.jsonc
    ```
 
-5. When D1 shows exactly one new job and its Workflow exists, set
-   `triggers.crons=[]` and run the same `wrangler triggers deploy` command.
+5. If you armed Cron, wait until D1 shows exactly one new job and its Workflow
+   exists. Set `triggers.crons=[]` and run the same `wrangler triggers deploy`
+   command.
    Confirm that its output has no `schedule:` line. Leave the local config
    Cron-free before checking the job or changing zones.
 6. Wait for Workflow success. Run `node scripts/verify_staged_czds.mjs JOB_ID`.
