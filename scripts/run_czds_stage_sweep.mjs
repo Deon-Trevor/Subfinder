@@ -74,17 +74,27 @@ function zoneJobs(zone) {
     `SELECT job_id,state FROM czds_jobs WHERE zone = '${zone}' ORDER BY created_at`);
 }
 
-async function schedules(token) {
-  const response = await fetch(
-    "https://api.cloudflare.com/client/v4/accounts/13420e9593fa2a2b308bbdb9256daccf/" +
-    "workers/scripts/subfinder-czds-stage/schedules",
-    { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) },
-  );
-  const body = await response.json();
-  if (!response.ok || body.success !== true || !Array.isArray(body.result?.schedules)) {
-    throw new Error("cannot read deployed staging CZDS schedules");
+async function schedules() {
+  let reason = "unknown error";
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const token = JSON.parse(command(wrangler, ["auth", "token", "--json"], worker, true)).token;
+      const response = await fetch(
+        "https://api.cloudflare.com/client/v4/accounts/13420e9593fa2a2b308bbdb9256daccf/" +
+        "workers/scripts/subfinder-czds-stage/schedules",
+        { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) },
+      );
+      const body = await response.json();
+      if (response.ok && body.success === true && Array.isArray(body.result?.schedules)) {
+        return body.result.schedules;
+      }
+      reason = `HTTP ${response.status}`;
+    } catch (error) {
+      reason = error.name === "TimeoutError" ? "timeout" : "request error";
+    }
+    if (attempt < 4) await sleep(1000 * 2 ** attempt);
   }
-  return body.result.schedules;
+  throw new Error(`cannot read deployed staging CZDS schedules (${reason})`);
 }
 
 const configPath = resolve(worker, "wrangler.staging.jsonc");
@@ -106,8 +116,7 @@ if (comGate()) {
   console.log(JSON.stringify({ stopped: "com-compaction-gate", staged: 0 }));
   process.exit(0);
 }
-const token = JSON.parse(command(wrangler, ["auth", "token", "--json"], worker)).token;
-if ((await schedules(token)).length !== 0) throw new Error("staging CZDS Cron is already active");
+if ((await schedules()).length !== 0) throw new Error("staging CZDS Cron is already active");
 
 let cronArmed = false;
 let staged = 0;
@@ -157,7 +166,7 @@ try {
       writeFileSync(temporary, JSON.stringify(config, null, 2));
       const removed = command(wrangler, ["triggers", "deploy", "--config", temporary], worker);
       if (removed.includes("schedule:")) throw new Error("staging Cron removal was not confirmed");
-      if ((await schedules(token)).length !== 0) throw new Error("staging Cron remains active");
+      if ((await schedules()).length !== 0) throw new Error("staging Cron remains active");
       cronArmed = false;
       for (let poll = 0; poll < 90; poll += 1) {
         checkInterrupted();
@@ -182,7 +191,7 @@ try {
         config.triggers.crons = [];
         writeFileSync(temporary, JSON.stringify(config, null, 2));
         const removed = command(wrangler, ["triggers", "deploy", "--config", temporary], worker, true);
-        if (removed.includes("schedule:") || (await schedules(token)).length !== 0) {
+        if (removed.includes("schedule:") || (await schedules()).length !== 0) {
           throw new Error("staging CZDS Cron cleanup failed; do not start another zone");
         }
         cronArmed = false;
