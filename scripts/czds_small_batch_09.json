@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "parser": "worker",
+  "ranking_basis": "Historical local gzip bytes; not a current CZDS size or approval claim",
+  "manifest_sha256": "b9c32f6b9bbc6303104b990813c76815efe7e48217aebc12dfcd2924e407b633",
+  "max_historical_bytes": 100000000,
+  "zones": [
+    "cat"
+  ],
+  "historical_bytes": {
+    "cat": 30963910
+  }
+}
