@@ -5,8 +5,8 @@
 
 Subfinder is a passive subdomain enumeration service. It indexes certificate
 transparency logs, registry zones, public datasets, and optional account-backed
-sources. Searches read the local index. They do not probe a domain or submit a
-urlscan scan.
+sources. Searches read the retained index through the Python API or Cloudflare
+read Worker. They do not probe a domain or submit a urlscan scan.
 
 ## Quick start
 
@@ -24,7 +24,7 @@ literally. For local development, see the [getting-started guide](docs/getting-s
 ## Documentation
 
 - [Documentation home](docs/index.md)
-- [API reference](docs/reference/api.md), including MCP and Threat Hunter batches
+- [API reference](docs/reference/api.md), including MCP and uMzingeli batches
 - [Compose operations](docs/operations/compose.md), including quotas and proxy trust
 - [Ingestion guide](docs/how-to/ingestion.md) and [source catalog](docs/reference/sources.md)
 - [Cloudflare migration](docs/operations/cloudflare.md)
@@ -35,6 +35,12 @@ The documentation site has its own Cloudflare Pages build. See
 The Cloudflare preview runs at [subfinder.pundit.workers.dev](https://subfinder.pundit.workers.dev),
 with documentation at [its `/docs/` path](https://subfinder.pundit.workers.dev/docs/).
 The production hostname remains on the existing service until cutover approval.
+
+uMzingeli consumes the same versioned records and durable-batch API from either
+runtime. Local Compose uses `http://subfinder-index:8200` on the private data
+network; Cloudflare uses a reviewed HTTPS origin and its own service token.
+Both default to 25,000 apexes per job and 250,000 token units per UTC day.
+Existing `.env` values override those defaults, even after an image rebuild.
 
 ## Project layout
 

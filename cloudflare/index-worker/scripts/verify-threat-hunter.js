@@ -11,8 +11,8 @@ import { createMiniflare } from "../test/miniflare.js";
 
 const workerRoot = resolve(import.meta.dirname, "..");
 const repositoryRoot = resolve(workerRoot, "../..");
-const threatHunterRoot = resolve(process.env.THREAT_HUNTER_ROOT ||
-  resolve(repositoryRoot, "../threat-hunter"));
+const threatHunterRoot = resolve(process.env.UMZINGELI_ROOT || process.env.THREAT_HUNTER_ROOT ||
+  resolve(repositoryRoot, "../umzingeli"));
 const fixtureRoot = mkdtempSync(join(tmpdir(), "subfinder-hunter-"));
 
 
@@ -29,8 +29,10 @@ const python = resolve(threatHunterRoot, ".venv/bin/python");
 const probe = `
 import asyncio
 from hunter.intel.subfinder import read_indexes
+from hunter.sources.subfinder_ct import _batch_max_apexes
 
 async def main():
+    assert _batch_max_apexes() == 25000, "normal hunt admission must remain 25000"
     pending = ("example.com", "large.dev") + tuple(
         f"batch-{index}.com" for index in range(24998)
     )
@@ -41,6 +43,11 @@ async def main():
     while pending:
         result = await read_indexes(pending, resume_job_id=job_id, after_cursor=cursor)
         assert not result.failed(), result.error
+        assert len(result.evidence) <= 1000, "delivery must stay bounded independently of admission"
+        if job_id:
+            assert result.metadata["batch_job_id"] == job_id
+        next_cursor = result.metadata["chunk_cursor"]
+        assert next_cursor > cursor, "completed delivery must advance the replay cursor"
         for item in result.evidence:
             assert item.apex not in seen
             seen.add(item.apex)
@@ -48,11 +55,10 @@ async def main():
                 nonempty[item.apex] = len(item.records)
         pending = tuple(result.metadata["pending_apexes"])
         job_id = result.metadata["batch_job_id"]
-        cursor = result.metadata["chunk_cursor"]
+        cursor = next_cursor
     assert len(seen) == 25000, len(seen)
     assert nonempty == {"example.com": 3, "large.dev": 80}, nonempty
-    assert cursor == 999, cursor
-    print(f"Threat Hunter delivered {len(seen)} apexes in job {job_id}, cursor {cursor}")
+    print(f"uMzingeli delivered {len(seen)} apexes in job {job_id}, cursor {cursor}")
 
 asyncio.run(main())
 `;

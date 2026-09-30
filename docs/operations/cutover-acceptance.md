@@ -35,6 +35,17 @@ Run the full 25,000-apex path against the local Worker fixture separately:
 SUBFINDER_STRESS=1 npm test
 ```
 
+Also drive uMzingeli's installed Python client against that fixture, from the
+Subfinder repository root:
+
+```sh
+UMZINGELI_ROOT=/absolute/path/to/umzingeli node cloudflare/index-worker/scripts/verify-threat-hunter.js
+```
+
+`THREAT_HUNTER_ROOT` remains accepted for existing automation. The default
+sibling checkout is now `../umzingeli`. This verifies the client's 25,000-apex
+admission default and replay path without submitting a live staging job.
+
 That local result is not evidence of live Queue throughput or a completed
 production-scale batch. Keep those gates separate in the cutover review.
 Also require the [staging compaction checks](/operations/staging-compaction),

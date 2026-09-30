@@ -112,9 +112,11 @@ contains at most 100 unique apexes and 5,000 hostnames by default. Set
 `CTLOGS_BATCH_MAX_APEXES` and `CTLOGS_BATCH_MAX_RECORDS` to lower deployment
 limits. Oversized requests return `413` and must be split.
 
-## Durable Threat Hunter batches
+## Durable uMzingeli batches {#durable-threat-hunter-batches}
 
-Threat Hunter should use the durable queue rather than hold a request open:
+uMzingeli uses the durable queue rather than hold a request open. The Python
+service and Cloudflare read Worker implement the same admission and replay
+contract:
 
 ```http
 POST /internal/v1/record-batches
@@ -136,6 +138,11 @@ counts; `POST .../{job_id}/cancel` releases unstarted work.
 One normal-hunt job accepts at most 25,000 unique apexes by default. The token
 allowance defaults to 250,000 apex units per UTC day, enough for ten full-sized
 normal hunts, while workers claim up to 100 apexes per slice.
+
+These bounds are independent of uMzingeli's 1,000 completed-apex delivery bound
+and 1,000-candidate source result budget. Its `SUBFINDER_BATCH_MAX_APEXES` must
+not exceed the serving instance's admission bound. Stale local `.env` values
+can lower admission or token quota despite newer Compose defaults.
 
 Two durable `batch-worker` replicas consume bounded slices by default. A worker
 isolates a large apex and reports it in the chunk's `errors` collection rather

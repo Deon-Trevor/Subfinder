@@ -17,7 +17,7 @@ hostname indexable without changing the preview site.
 
 ## Read worker
 
-`index-worker` serves the static UI, HTTP API, and the single MCP `search` tool. Public browser requests do not need a token. A valid bearer token gets its configured allowance and is required only for `/internal/v1/records/batch`.
+`index-worker` serves the static UI, HTTP API, and the single MCP `search` tool. Public browser requests do not need a token. A valid bearer token gets its configured allowance and is required for both internal batch APIs.
 
 `cloudflare/index-worker/wrangler.staging.jsonc` deploys the same API code at
 `subfinder-index-stage.pundit.workers.dev` with the private
@@ -42,14 +42,14 @@ production hostname or submit a live batch.
 Set `CLIENT_TOKENS` as a Worker secret. It is a JSON array of client IDs, SHA-256 token digests, and optional limits. Raw tokens do not belong in Wrangler configuration or source control.
 
 ```json
-[{"id":"threat-hunter","sha256":"64 lowercase hex characters","limit":10000}]
+[{"id":"threat-hunter","sha256":"64 lowercase hex characters","limit":250000}]
 ```
 
 Set `MCP_ALLOWED_HOSTS` to the exact production hostnames before enabling `/mcp`. `MCP_ALLOWED_ORIGINS` may remain empty for non-browser MCP clients. The Worker refuses MCP traffic when the host allowlist is absent.
 
 The exact UTC-day allowance is stored by a sharded Durable Object and is shared by HTTP and MCP searches. Static assets, health, readiness, and stats do not consume it. Invalid bearer tokens on public routes remain public callers; they never receive the token allowance. The internal batch route rejects them.
 
-### Durable Threat Hunter batches
+### Durable uMzingeli batches {#durable-threat-hunter-batches}
 
 The read Worker supports a queued batch for a normal hunt of up to 25,000
 unique apexes. Send `POST /internal/v1/record-batches` with a valid bearer token,

@@ -40,7 +40,7 @@ the client disconnects before it receives the response.
 
 Run one Uvicorn worker. The in-process request limits apply per worker. Keep
 `/health` outside public edge limits so an overloaded instance remains
-observable. Threat Hunter should call `http://subfinder-index:8200` over the
+observable. uMzingeli should call `http://subfinder-index:8200` over the
 private data network with its service token; it must not loop through the
 public edge, where public DoS protection sheds excess traffic.
 
