@@ -42,7 +42,7 @@
     }
   ],
   "vars": {
-    "CZDS_ONLY_ZONE": "top",
+    "CZDS_ONLY_ZONE": "info",
     "CZDS_CONTAINER_ZONES": "com,biz,net,org,xyz,top,info,shop,online,store,vip,site,app,bond,pro",
     "CZDS_STAGE_ONLY": "true",
     "CZDS_DELTA_RECORDS": "20000",
