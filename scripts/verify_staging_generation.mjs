@@ -4,6 +4,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { resolve } from "node:path";
+import { retryR2Read } from "./retry_r2_read.mjs";
 
 const generation = process.argv[2];
 const metadataOnly = process.argv[3] === "--metadata-only";
@@ -51,7 +52,7 @@ function hashObject(key, expectedBytes, expectedHash) {
     let errors = "";
     child.stdout.on("data", (chunk) => { size += chunk.length; digest.update(chunk); });
     child.stderr.on("data", (chunk) => { errors = (errors + chunk).slice(-2000); });
-    child.on("error", reject);
+    child.on("error", (error) => reject(new Error(`R2 read failed for ${key}: ${error.message}`)));
     child.on("close", (code) => {
       if (code !== 0) return reject(new Error(`R2 read failed for ${key}: ${errors.trim()}`));
       if (size !== expectedBytes || digest.digest("hex") !== expectedHash) {
@@ -132,7 +133,7 @@ let verifiedBytes = 0;
 async function workerLoop() {
   while (cursor < files.length) {
     const [key, bytes, hash] = files[cursor++];
-    const size = await hashObject(key, bytes, hash);
+    const size = await retryR2Read(() => hashObject(key, bytes, hash));
     verifiedBytes += size;
   }
 }
