@@ -2,26 +2,25 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
-const STAGING_ORIGIN = "https://subfinder.pundit.workers.dev";
 const PRODUCTION_ORIGIN = "https://subfinder.syncpundit.io";
 const APEXES = ["cloudflare.com", "example.com", "syncpundit.io"];
 const MISSING_APEX = "subfinder-cutover-absent-20260929.com";
 
 function options(argv) {
-  const result = { base: STAGING_ORIGIN };
+  const result = { base: PRODUCTION_ORIGIN };
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
     const value = argv[index + 1];
     if (!value || !["--base", "--sqlite", "--expect-generation"].includes(key)) {
-      throw new Error("Usage: verify-cutover.js --sqlite CATALOG [--base STAGING_OR_PRODUCTION_URL] [--expect-generation ID]");
+      throw new Error("Usage: verify-cutover.js --sqlite CATALOG [--base PRODUCTION_URL] [--expect-generation ID]");
     }
     result[key.slice(2).replaceAll("-", "_")] = value;
   }
   if (!result.sqlite) throw new Error("--sqlite is required for source parity");
   const origin = new URL(result.base);
-  if (![STAGING_ORIGIN, PRODUCTION_ORIGIN].includes(origin.origin) ||
+  if (origin.origin !== PRODUCTION_ORIGIN ||
       origin.pathname !== "/" || origin.search || origin.hash) {
-    throw new Error("This harness only accepts the staging or production Worker origin");
+    throw new Error("This harness only accepts the production hostname");
   }
   return { ...result, origin };
 }
@@ -166,8 +165,7 @@ async function main() {
   });
   assert.equal(wrongToken.response.status, 401);
   checks.negative_cases = "passed";
-  const token = process.env.SUBFINDER_CUTOVER_TOKEN ||
-    (origin.origin === STAGING_ORIGIN ? process.env.SUBFINDER_STAGE_TOKEN : undefined);
+  const token = process.env.SUBFINDER_CUTOVER_TOKEN;
   if (token) {
     const authorized = await get(origin, "/internal/v1/record-batches/nonexistent", {
       headers: { authorization: `Bearer ${token}` },

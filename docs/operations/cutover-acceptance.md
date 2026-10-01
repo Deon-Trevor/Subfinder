@@ -1,30 +1,25 @@
 # Cutover acceptance checks
 
-Run these checks against the Workers preview before changing DNS, then against
-`subfinder.syncpundit.io` after attaching the custom domain. The harness
-accepts only those two exact origins. It reads the local SQLite catalog but does not write
+Run these checks against `subfinder.syncpundit.io` after attaching the custom
+domain. The production Workers preview is disabled. The harness accepts only
+the production hostname. It reads the local SQLite catalog but does not write
 to SQLite, R2, D1, Queues, or a batch job.
 
 From `cloudflare/index-worker`:
 
 ```sh
-SUBFINDER_STAGE_TOKEN="$(security find-generic-password \
-  -s subfinder-stage-threat-hunter -a threat-hunter -w)" \
 npm run verify:cutover -- \
   --sqlite /Users/pancake/Documents/subfinder-migration-backup/20260927T050403Z/catalog.sqlite3 \
   --expect-generation EXPECTED_GENERATION
 ```
 
-After the production hostname is attached, repeat the same command with
-`--base https://subfinder.syncpundit.io`. If a valid production client token
-is available, pass it as `SUBFINDER_CUTOVER_TOKEN`; do not use the staging token
-for the production check.
+If a valid production client token is available, pass it as
+`SUBFINDER_CUTOVER_TOKEN`; do not use the staging token for this check.
 
 Use the generation ID approved for cutover, not the seed ID by habit. If the
 expected generation is omitted, the harness reports that gate as
-`not_evaluated`. Omit `SUBFINDER_STAGE_TOKEN` when the staging token is not
-available; the valid-token gate will then also report `not_evaluated`. The
-token value is never printed.
+`not_evaluated`. Without `SUBFINDER_CUTOVER_TOKEN`, the valid-token gate also
+reports `not_evaluated`. The token value is never printed.
 
 The harness checks health, readiness, root statistics, the home-page docs
 link, the Pages proxy, exact-apex search pagination, records/search agreement,
