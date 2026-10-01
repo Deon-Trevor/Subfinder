@@ -33,7 +33,7 @@
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" onload="this.rel='stylesheet'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap"></noscript>
 
-<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="app.css?v=20261001">
 <script src="app.js" defer></script>
 
 <script type="application/ld+json">
@@ -153,7 +153,7 @@
 
       <aside class="stance">
         <h2 class="eyebrow">Where the names come from</h2>
-        <p class="stance-intro">Twelve adapters feed the index, in three families.</p>
+        <p class="stance-intro">The index combines twelve adapters in three families.</p>
         <div class="stance-list">
           <div class="stance-row is-primary">
             <span class="stance-label mono">certificate transparency</span>
@@ -196,14 +196,14 @@
         <p class="wire-note" id="stat-apexes-note">distinct registrable domains</p>
       </div>
       <div class="wire-cell">
-        <p class="wire-label">CT logs feeding it</p>
+        <p class="wire-label">CT logs represented</p>
         <p class="wire-value mono" id="stat-sources">--</p>
         <p class="wire-note" id="stat-sources-note">counted from ingest evidence</p>
       </div>
       <div class="wire-cell">
-        <p class="wire-label">Last write to the index</p>
+        <p class="wire-label">Last source ingest</p>
         <p class="wire-value mono" id="stat-ingest">--</p>
-        <p class="wire-note" id="stat-ingest-note">from the ingest run log</p>
+        <p class="wire-note" id="stat-ingest-note">recorded in the catalog</p>
       </div>
     </div>
   </section>
@@ -305,7 +305,7 @@ curl -s "<span data-origin>$SUBFINDER</span>/v1/search?apex=example.com&amp;form
       </div>
       <div>
         <p class="eyebrow">What the index is built from</p>
-        <p>The Chrome and Apple log lists name the logs worth reading. A poller walks <code class="mono">ct/v1/get-entries</code> on every usable log in both programs, and the Geomys archive backfills logs that have since retired. Zone data from IANA, CISA, and the registries that publish openly, plus Common Crawl, fill in domains that certificates alone would miss.</p>
+        <p>The Chrome and Apple log lists identify CT logs the ingestion pipeline can read through <code class="mono">ct/v1/get-entries</code>. The Geomys archive covers retired logs. Zone data from IANA, CISA, and registries that publish openly, plus Common Crawl, add domains that certificates alone can miss. Searches read only data already committed to the index.</p>
         <p>Each name keeps three fields. Hostname, apex, and the earliest date any source saw it. No certificate bodies, no serial numbers, no issuer chains.</p>
       </div>
     </div>

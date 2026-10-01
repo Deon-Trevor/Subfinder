@@ -119,13 +119,24 @@ async function loadJob(env, jobId) {
 }
 
 
+function deltaNamespace(env) {
+  const value = env.URLSCAN_DELTA_NAMESPACE;
+  if (value === undefined) return null;
+  if (typeof value !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value)) {
+    throw new Error("URLScan delta namespace is invalid");
+  }
+  return value;
+}
+
+
 async function notifyDelta(env, jobId, objectKey) {
   if (env.COMPACTION_QUEUE === undefined) {
     throw new Error("COMPACTION_QUEUE is not configured");
   }
+  const namespace = deltaNamespace(env);
   await env.COMPACTION_QUEUE.send({
     schema_version: DELTA_READY_SCHEMA_VERSION,
-    delta_id: jobId,
+    delta_id: namespace === null ? jobId : await sha256(`${namespace}\n${jobId}`),
     source_kind: "urlscan",
     object_key: objectKey,
   });
@@ -408,7 +419,8 @@ export async function processUrlscanJob(env, body) {
   const pageSize = Math.min(1000, positiveInteger(env.URLSCAN_PAGE_SIZE, 1000));
   const payload = await fetchPage(env, job.apex, job.cursor, pageSize);
   const page = recordsFromUrlscan(payload, job.apex, pageSize);
-  const objectKey = `ingest/urlscan/${job.apex}/${jobId}.json.gz`;
+  const namespace = deltaNamespace(env);
+  const objectKey = `ingest/urlscan/${namespace === null ? "" : `${namespace}/`}${job.apex}/${jobId}.json.gz`;
   await env.CATALOG.put(objectKey, await gzipJson({
     schema_version: DELTA_SCHEMA_VERSION,
     source: "urlscan",

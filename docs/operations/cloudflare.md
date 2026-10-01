@@ -39,6 +39,42 @@ Use the [cutover acceptance checks](/operations/cutover-acceptance) to verify
 the live staging read paths against the local catalog. They do not change the
 production hostname or submit a live batch.
 
+### Interim production cutover
+
+`cloudflare/index-worker/wrangler.jsonc` prepares the `subfinder` Worker for
+`subfinder.syncpundit.io`. It keeps the Workers preview hostname and reads the
+currently active `subfinder-catalog-stage` root while staged `.com` compaction
+continues. This is a partial catalog, not a copy to an isolated production
+bucket. The custom domain is only live after an operator deploys the config and
+confirms Cloudflare has attached the hostname. An existing proxied DNS record
+may need attention first; do not delete it without identifying its target.
+
+The public read Worker binds to `subfinder-urlscan-prod`, while
+`subfinder-index-stage` keeps `subfinder-urlscan-stage`. The production URLScan
+Worker has its own D1 control database, job Queue, and dead-letter Queue. Its
+Cron is disabled. On-demand jobs use a `prod` delta namespace so they cannot
+overwrite staged URLScan objects or reuse staged ledger IDs. During this interim
+cutover, completed deltas go into the shared staging R2 bucket and staging
+compaction Queue because that is the catalog the public read Worker serves.
+They are not immediately searchable: the generation must still be mapped,
+reduced, verified, and activated. Do not promise immediate enrichment results.
+
+The production URLScan API key belongs in the Worker secret
+`URLSCAN_API_KEY`, not in Wrangler config. The initial on-demand bounds are
+100 provider pages per UTC day, at most 20 priority pages, page size 100, and
+one Queue consumer. No scheduled source is enabled. Before attaching the
+hostname, verify both Queue backlogs and dead-letter Queues, the active root,
+the Pages `/docs/` proxy, search and MCP on the exact hostname, and whether
+old preview URLScan job IDs still need status access. The Pages project is
+Direct Upload: building or merging `main` does not publish docs.
+
+After the reviewed code is on `main`, deploy the URLScan service before the
+public read Worker, then set its `URLSCAN_API_KEY` secret through Wrangler's
+secret prompt. Confirm the secret is listed without printing its value. Apply
+D1 migrations if the production control database is new. Deploy the read
+Worker only after the service binding target exists. Do not enable a URLScan
+Cron or the compaction Cron as part of the hostname cutover.
+
 Set `CLIENT_TOKENS` as a Worker secret. It is a JSON array of client IDs, SHA-256 token digests, and optional limits. Raw tokens do not belong in Wrangler configuration or source control.
 
 ```json

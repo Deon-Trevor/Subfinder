@@ -176,6 +176,34 @@ test("scheduler and consumer persist a page, quota charge, cursor, and delta-rea
 });
 
 
+test("production URLScan namespace cannot overwrite staging delta keys or IDs", async () => {
+  const jobId = "a".repeat(64);
+  await database.prepare(
+    `INSERT INTO urlscan_sources(apex, cursor, enabled, next_run_at, updated_at)
+     VALUES ('example.com', NULL, 0, '2026-09-27T03:00:00Z', '2026-09-27T03:00:00Z')`,
+  ).run();
+  await database.prepare(
+    `INSERT INTO urlscan_jobs(job_id, apex, cursor, state, created_at, updated_at)
+     VALUES (?, 'example.com', NULL, 'queued', '2026-09-27T03:00:00Z', '2026-09-27T03:00:00Z')`,
+  ).bind(jobId).run();
+  const deltas = [];
+  const env = {
+    CONTROL: database,
+    CATALOG: bucket,
+    URLSCAN_API_KEY: "secret",
+    URLSCAN_DELTA_NAMESPACE: "prod",
+    COMPACTION_QUEUE: { send: async (message) => deltas.push(message) },
+    URLSCAN_FETCHER: { fetch: async () => Response.json(responsePayload(1)) },
+  };
+  const result = await processUrlscanJob(env, { schema_version: "subfinder.urlscan-job.v1", job_id: jobId });
+  assert.equal(result.objectKey, `ingest/urlscan/prod/example.com/${jobId}.json.gz`);
+  assert.notEqual(deltas[0].delta_id, jobId);
+  assert.equal(deltas[0].object_key, result.objectKey);
+  await processUrlscanJob(env, { schema_version: "subfinder.urlscan-job.v1", job_id: jobId });
+  assert.deepEqual(deltas[1], deltas[0]);
+});
+
+
 test("consumer fails closed without the URLSCAN_API_KEY Worker secret", async () => {
   const now = new Date("2026-09-27T03:00:00.000Z");
   await database.prepare(

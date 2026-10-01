@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "subfinder-urlscan-prod",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-27",
+  "workers_dev": false,
+  "preview_urls": false,
+  "triggers": { "crons": [] },
+  "r2_buckets": [
+    { "binding": "CATALOG", "bucket_name": "subfinder-catalog-stage" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "CONTROL",
+      "database_name": "subfinder-urlscan-prod-control",
+      "database_id": "7928a8cc-40c3-4ac2-83d9-1eb927f7be07",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "URLSCAN_QUEUE", "queue": "subfinder-urlscan-prod" },
+      { "binding": "COMPACTION_QUEUE", "queue": "subfinder-compaction-stage" }
+    ],
+    "consumers": [
+      {
+        "queue": "subfinder-urlscan-prod",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "subfinder-urlscan-prod-dead",
+        "max_concurrency": 1
+      }
+    ]
+  },
+  "vars": {
+    "URLSCAN_DELTA_NAMESPACE": "prod",
+    "URLSCAN_BREADTH_DAILY_LIMIT": "100",
+    "URLSCAN_PRIORITY_DAILY_LIMIT": "20",
+    "URLSCAN_PAGE_SIZE": "100",
+    "URLSCAN_REFRESH_SECONDS": "86400",
+    "URLSCAN_SOURCE_LIMIT": "1"
+  }
+}

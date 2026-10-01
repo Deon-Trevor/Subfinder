@@ -490,6 +490,38 @@ test("MCP exposes only search and shares the HTTP allowance", async () => {
 });
 
 
+test("MCP accepts the preview and production hosts but rejects an unlisted host", async () => {
+  const worker = createMiniflare(workerRoot, {
+    envOverrides: {
+      MCP_ALLOWED_HOSTS: "127.0.0.1,subfinder.pundit.workers.dev,subfinder.syncpundit.io",
+    },
+  });
+  try {
+    for (const hostname of ["subfinder.pundit.workers.dev", "subfinder.syncpundit.io"]) {
+      const client = new Client({ name: "host-allowlist-test", version: "1.0.0" });
+      try {
+        const transport = new StreamableHTTPClientTransport(
+          new URL(`https://${hostname}/mcp`),
+          { fetch: (input, init) => worker.dispatchFetch(input, init) },
+        );
+        await client.connect(transport);
+        assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name), ["search"]);
+      } finally {
+        await client.close();
+      }
+    }
+    const unlisted = await worker.dispatchFetch("https://evil.test/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(unlisted.status, 400);
+  } finally {
+    await worker.dispose();
+  }
+});
+
+
 test("MCP rejects untrusted hosts and origins before protocol handling", async () => {
   const worker = createMiniflare(workerRoot);
   try {

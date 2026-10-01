@@ -364,11 +364,10 @@ button { cursor: pointer; }
 .ticker.is-down .ticker-value { color: var(--rose); }
 
 @media (max-width: 560px) {
-  .ticker-label { display: none; }
+  .ticker { display: none; }
 }
 
 @media (max-width: 360px) {
-  .ticker { display: none; }
   .topbar-inner:has(.topsearch:not([hidden])) { flex-wrap: wrap; }
   .topsearch:not([hidden]) { order: 4; flex: 1 0 100%; }
 }

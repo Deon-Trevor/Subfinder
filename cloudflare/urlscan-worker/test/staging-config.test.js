@@ -7,6 +7,9 @@ import { test } from "node:test";
 const config = JSON.parse(readFileSync(
   resolve(import.meta.dirname, "../wrangler.staging.jsonc"), "utf8",
 ));
+const production = JSON.parse(readFileSync(
+  resolve(import.meta.dirname, "../wrangler.production.jsonc"), "utf8",
+));
 
 
 test("URLScan staging uses its own control and job queue without a schedule", () => {
@@ -35,4 +38,28 @@ test("URLScan staging has a small quota and no committed provider credential", (
   assert.equal(config.vars.URLSCAN_PAGE_SIZE, "100");
   assert.equal(config.vars.URLSCAN_SOURCE_LIMIT, "1");
   assert.equal(Object.hasOwn(config.vars, "URLSCAN_API_KEY"), false);
+});
+
+
+test("URLScan production isolates jobs and delta identity while sharing the interim catalog", () => {
+  assert.equal(production.name, "subfinder-urlscan-prod");
+  assert.equal(production.workers_dev, false);
+  assert.equal(production.preview_urls, false);
+  assert.deepEqual(production.triggers.crons, []);
+  assert.deepEqual(production.r2_buckets, [
+    { binding: "CATALOG", bucket_name: "subfinder-catalog-stage" },
+  ]);
+  assert.equal(production.d1_databases[0].database_name, "subfinder-urlscan-prod-control");
+  assert.match(production.d1_databases[0].database_id, /^[a-f0-9-]{36}$/);
+  assert.deepEqual(production.queues.producers, [
+    { binding: "URLSCAN_QUEUE", queue: "subfinder-urlscan-prod" },
+    { binding: "COMPACTION_QUEUE", queue: "subfinder-compaction-stage" },
+  ]);
+  assert.equal(production.queues.consumers[0].queue, "subfinder-urlscan-prod");
+  assert.equal(production.queues.consumers[0].dead_letter_queue, "subfinder-urlscan-prod-dead");
+  assert.equal(production.queues.consumers[0].max_concurrency, 1);
+  assert.equal(production.vars.URLSCAN_DELTA_NAMESPACE, "prod");
+  assert.equal(production.vars.URLSCAN_PRIORITY_DAILY_LIMIT, "20");
+  assert.equal(production.vars.URLSCAN_PAGE_SIZE, "100");
+  assert.equal(Object.hasOwn(production.vars, "URLSCAN_API_KEY"), false);
 });
