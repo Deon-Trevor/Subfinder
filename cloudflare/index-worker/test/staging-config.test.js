@@ -12,7 +12,7 @@ test("staging read Worker cannot point at production or expose a candidate early
   assert.equal(staging.r2_buckets[0].bucket_name, "subfinder-catalog-stage");
   assert.equal(production.r2_buckets[0].bucket_name, "subfinder-catalog-stage");
   assert.equal(production.name, "subfinder");
-  assert.equal(production.workers_dev, true);
+  assert.equal(production.workers_dev, false);
   assert.deepEqual(production.routes, [
     { pattern: "subfinder.syncpundit.io", custom_domain: true },
   ]);
@@ -23,10 +23,8 @@ test("staging read Worker cannot point at production or expose a candidate early
     { binding: "URLSCAN_INGEST", service: "subfinder-urlscan-stage" },
   ]);
   assert.equal(production.vars.DOCS_ORIGIN, "https://subfinder-docs.pages.dev");
-  assert.deepEqual(
-    production.vars.MCP_ALLOWED_HOSTS.split(","),
-    ["subfinder.pundit.workers.dev", "subfinder.syncpundit.io"],
-  );
+  assert.equal(production.vars.MCP_ALLOWED_HOSTS, "subfinder.syncpundit.io");
+  assert.equal(production.vars.CLIENT_IP_HEADER_HOSTNAME, "subfinder.syncpundit.io");
   assert.deepEqual(
     production.assets.run_worker_first.slice(-2),
     ["/docs", "/docs/*"],

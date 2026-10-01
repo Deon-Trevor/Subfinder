@@ -77,7 +77,14 @@ export async function clientIdentity(request, env) {
       }
     }
   }
-  const address = request.headers.get("CF-Connecting-IP") || env.LOCAL_CLIENT_IP;
+  // The production zone removes standard visitor-IP headers. Its hostname-scoped
+  // transform overwrites this custom header with Cloudflare's ip.src.
+  const transformedAddress =
+    env.CLIENT_IP_HEADER_HOSTNAME &&
+    new URL(request.url).hostname === env.CLIENT_IP_HEADER_HOSTNAME
+      ? request.headers.get("X-Subfinder-Client-IP")
+      : null;
+  const address = request.headers.get("CF-Connecting-IP") || transformedAddress || env.LOCAL_CLIENT_IP;
   if (!address) throw new Error("client IP is unavailable");
   return {
     authenticated: false,

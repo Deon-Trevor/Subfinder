@@ -1,7 +1,9 @@
 # Compact the staging `.com` deltas
 
 This procedure changes only `subfinder-catalog-stage` and the staging generation
-ledger. It does not change `subfinder.syncpundit.io`.
+ledger. During the interim production cutover, `subfinder.syncpundit.io` reads
+the same active root, so activating a verified staging generation also changes
+the production search catalog.
 
 The staging compaction Worker consumes Queue messages but has no Cron trigger.
 Use the local admin configuration to advance one generation at a time. Its R2
@@ -13,7 +15,7 @@ Queue messages with `scripts/dispatch_staging_compaction.mjs`.
 From the repository root, inspect the active preview generation:
 
 ```sh
-curl -fsS https://subfinder.pundit.workers.dev/ready
+curl -fsS https://subfinder-index-stage.pundit.workers.dev/ready
 ```
 
 Check the staging generation and delta states:

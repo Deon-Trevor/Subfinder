@@ -6,14 +6,12 @@ The [documentation site](/) is a third, static deployment on Cloudflare
 Pages. The read Worker serves it at `/docs/`. The Pages project has no R2, D1,
 Queue, or secret binding. Building it does not publish a catalog generation.
 
-`subfinder.pundit.workers.dev` now runs `index-worker` with the static UI,
-HTTP API, MCP, the active staging R2 seed, and the Pages proxy. The earlier
+`subfinder.syncpundit.io` runs `index-worker` with the static UI, HTTP API,
+MCP, the active staging R2 catalog, and the Pages proxy. The earlier
 `static-worker` configuration remains in the repository as an assets-only
 fallback. Do not deploy it over the live read Worker.
-The Workers preview and direct Pages site send `X-Robots-Tag: noindex`. The
-Worker's static rule is scoped to `subfinder.pundit.workers.dev`, and its docs
-proxy strips the Pages rule on other hosts. This keeps a future production
-hostname indexable without changing the preview site.
+The direct Pages site sends `X-Robots-Tag: noindex`; the read Worker's docs
+proxy strips that header on the production hostname.
 
 ## Read worker
 
@@ -22,12 +20,9 @@ hostname indexable without changing the preview site.
 `cloudflare/index-worker/wrangler.staging.jsonc` deploys the same API code at
 `subfinder-index-stage.pundit.workers.dev` with the private
 `subfinder-catalog-stage` R2 bucket. It has no static asset binding or custom
-domain. Both staging read Workers use the same active R2 root. On
-2026-09-29 at 16:01 UTC, `/ready` on the public preview reported generation
-`766d9f3c333a28f7eaeabfc42b859eecb081c2c0d839053df50297e48e0df16b`.
-The next 500-delta generation was mapped, not active. Check `/ready` and the
-staging generation ledger before acting; this snapshot will age. Neither
-Worker changes `subfinder.syncpundit.io`.
+domain. Production temporarily reads the same active R2 root, but staging
+generation activation remains a separate operation. Check `/ready` and the
+staging generation ledger before acting.
 
 The preview `CLIENT_TOKENS` secret uses a separate token from production.
 On the Mac used for staging, its raw value is stored in the keychain item
@@ -41,13 +36,19 @@ production hostname or submit a live batch.
 
 ### Interim production cutover
 
-`cloudflare/index-worker/wrangler.jsonc` prepares the `subfinder` Worker for
-`subfinder.syncpundit.io`. It keeps the Workers preview hostname and reads the
-currently active `subfinder-catalog-stage` root while staged `.com` compaction
-continues. This is a partial catalog, not a copy to an isolated production
-bucket. The custom domain is only live after an operator deploys the config and
-confirms Cloudflare has attached the hostname. An existing proxied DNS record
-may need attention first; do not delete it without identifying its target.
+`cloudflare/index-worker/wrangler.jsonc` deploys the `subfinder` Worker at
+`subfinder.syncpundit.io`. It reads the currently active
+`subfinder-catalog-stage` root while staged `.com` compaction continues. This
+is a partial catalog, not a copy to an isolated production bucket. The
+Workers preview hostname is disabled for this deployment.
+
+The `syncpundit.io` zone enables the Managed Transform "Remove visitor IP
+headers". Public searches need a client IP for per-client quotas, so a
+request-header transform scoped to `subfinder.syncpundit.io` overwrites
+`X-Subfinder-Client-IP` with Cloudflare's `ip.src`. The Worker trusts this
+custom header only on that exact hostname and fails closed if neither it nor
+`CF-Connecting-IP` is present. Keep the zone-wide privacy transform enabled;
+do not replace the scoped rule with an untrusted forwarded header.
 
 The public read Worker binds to `subfinder-urlscan-prod`, while
 `subfinder-index-stage` keeps `subfinder-urlscan-stage`. The production URLScan
@@ -62,18 +63,17 @@ reduced, verified, and activated. Do not promise immediate enrichment results.
 The production URLScan API key belongs in the Worker secret
 `URLSCAN_API_KEY`, not in Wrangler config. The initial on-demand bounds are
 100 provider pages per UTC day, at most 20 priority pages, page size 100, and
-one Queue consumer. No scheduled source is enabled. Before attaching the
-hostname, verify both Queue backlogs and dead-letter Queues, the active root,
-the Pages `/docs/` proxy, search and MCP on the exact hostname, and whether
-old preview URLScan job IDs still need status access. The Pages project is
+one Queue consumer. No scheduled source is enabled. For each deployment,
+verify both Queue backlogs and dead-letter Queues, the active root, the Pages
+`/docs/` proxy, search and MCP on the exact hostname, and whether old preview
+URLScan job IDs still need status access. The Pages project is
 Direct Upload: building or merging `main` does not publish docs.
 
-After the reviewed code is on `main`, deploy the URLScan service before the
-public read Worker, then set its `URLSCAN_API_KEY` secret through Wrangler's
-secret prompt. Confirm the secret is listed without printing its value. Apply
-D1 migrations if the production control database is new. Deploy the read
-Worker only after the service binding target exists. Do not enable a URLScan
-Cron or the compaction Cron as part of the hostname cutover.
+The URLScan service must be deployed before the public read Worker and have
+its `URLSCAN_API_KEY` secret. Confirm the secret is listed without printing
+its value. Apply D1 migrations if the production control database is new.
+Do not enable a URLScan Cron or the compaction Cron as part of the hostname
+cutover.
 
 Set `CLIENT_TOKENS` as a Worker secret. It is a JSON array of client IDs, SHA-256 token digests, and optional limits. Raw tokens do not belong in Wrangler configuration or source control.
 
