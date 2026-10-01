@@ -27,6 +27,11 @@ The read Worker serves only an **active** catalog root. A mapped or reduced
 delta is not searchable until its candidate generation has been verified and
 activated. The docs Pages project needs no R2, D1, Queue, or secret binding.
 
+The repository does not ship the maintainer's zone files or index data. A new
+operator starts with an empty database, collects only sources and zones they
+are authorized to use, and builds their own first catalog. Until that first
+generation is active, an empty or unready search service is expected.
+
 ## Configure your resources
 
 1. Create an R2 catalog bucket, a generation-ledger D1 database, a compaction

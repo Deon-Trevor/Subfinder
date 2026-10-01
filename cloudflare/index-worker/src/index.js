@@ -150,6 +150,16 @@ export async function docsPage(request, env, url, upstreamFetch = fetch) {
   if (url.pathname === "/docs") {
     return Response.redirect(`${url.origin}/docs/${url.search}`, 308);
   }
+  const publicOperations = new Set(["compose", "cloudflare"]);
+  const page = /^\/docs\/operations\/([^/.]+)(?:\.html|\/)?$/.exec(url.pathname);
+  const asset = /^\/docs\/assets\/operations_([^/.]+)\.md\./.exec(url.pathname);
+  const operation = page?.[1] ?? asset?.[1];
+  if (operation && !publicOperations.has(operation)) {
+    return new Response("Not found", {
+      status: 404,
+      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+    });
+  }
   const upstream = new URL(env.DOCS_ORIGIN);
   upstream.pathname = url.pathname.slice("/docs".length);
   upstream.search = url.search;

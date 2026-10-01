@@ -393,6 +393,40 @@ test("docs proxy keeps the worker path and does not send credentials upstream", 
     { DOCS_ORIGIN: origin }, new URL("https://subfinder.pundit.workers.dev/docs"));
   assert.equal(slash.status, 308);
   assert.equal(slash.headers.get("location"), "https://subfinder.pundit.workers.dev/docs/");
+
+  for (const path of [
+    "/docs/operations/cloudflare",
+    "/docs/operations/cloudflare.html",
+    "/docs/operations/compose",
+    "/docs/operations/compose.html",
+    "/docs/assets/operations_cloudflare.md.ABC12345.js",
+    "/docs/assets/operations_compose.md.ABC12345.js",
+  ]) {
+    const request = new Request(`https://subfinder.syncpundit.io${path}`);
+    const allowed = await docsPage(request, { DOCS_ORIGIN: origin },
+      new URL(request.url), async () => new Response("public docs"));
+    assert.equal(allowed.status, 200, path);
+  }
+  for (const operation of [
+    "source-refresh",
+    "staging-reconciliation",
+    "staging-compaction",
+    "staging-cost",
+    "next-czds-batch",
+    "czds-stage-sweep",
+    "cutover-acceptance",
+  ]) for (const path of [
+    `/docs/operations/${operation}`,
+    `/docs/operations/${operation}/`,
+    `/docs/operations/${operation}.html`,
+    `/docs/assets/operations_${operation}.md.ABC12345.lean.js`,
+  ]) {
+    const request = new Request(`https://subfinder.syncpundit.io${path}`);
+    const blocked = await docsPage(request, { DOCS_ORIGIN: origin },
+      new URL(request.url), async () => { throw new Error("blocked docs reached Pages"); });
+    assert.equal(blocked.status, 404, path);
+    assert.equal(blocked.headers.get("cache-control"), "no-store");
+  }
 });
 
 
