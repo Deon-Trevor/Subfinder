@@ -31,8 +31,8 @@ digest is stored in each preview Worker secret. Do not put the raw token in
 Wrangler configuration.
 
 Use the [cutover acceptance checks](/operations/cutover-acceptance) to verify
-the live staging read paths against the local catalog. They do not change the
-production hostname or submit a live batch.
+the production read paths against the local catalog. They do not submit a
+live batch.
 
 ### Interim production cutover
 
@@ -297,9 +297,10 @@ deltas and 175,195,918 records. The later
 [full reconciliation](/operations/staging-reconciliation) found bare
 public-suffix names in 219 chunks. Recovery retained 175,195,530 valid
 records across all 8,760 effective chunks. Both staging Queues were empty
-before compaction began on 2026-09-29. The first 500-delta generation is now
-active on the preview. The remaining `.com` deltas are not yet all in the
-active catalog. A mapped generation does not serve searches until it is
+before compaction began on 2026-09-29. Verified 500-delta generations are
+active in the shared staging root, which also serves the interim production
+hostname. The remaining `.com` deltas are not yet all in the active catalog.
+A mapped generation does not serve searches until it is
 reduced, verified, and activated.
 
 For the next staging batch, `CZDS_STAGE_ONLY=true` stops each successful
@@ -354,8 +355,8 @@ Queue backlogs reconcile.
 A local pilot reduced one partition from a real `.com` delta against the seed,
 then activated and rolled back the candidate in disposable storage. It did not
 process the full delta or backlog. The staging run processes 500 deltas per
-generation and leaves Cron disabled. Do not switch the production hostname
-until the operator approves the cutover.
+generation and leaves Cron disabled. Do not change the production Worker route
+as part of a staging compaction run.
 
 ## Generation reduction and publication
 

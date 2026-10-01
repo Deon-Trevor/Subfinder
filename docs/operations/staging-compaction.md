@@ -12,7 +12,7 @@ Queue messages with `scripts/dispatch_staging_compaction.mjs`.
 
 ## Check the current state
 
-From the repository root, inspect the active preview generation:
+From the repository root, inspect the active staging generation:
 
 ```sh
 curl -fsS https://subfinder-index-stage.pundit.workers.dev/ready
@@ -103,4 +103,4 @@ starting another generation. The protected rollback route is available through
 
 Repeat this sequence until no `.com` deltas remain `registered`. Each new
 generation uses the currently active generation as its base. Keep the staging
-Cron disabled. Do not switch the production hostname as part of this run.
+Cron disabled. Do not change the production Worker route as part of this run.
