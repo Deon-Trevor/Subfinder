@@ -6,7 +6,7 @@
     "dev": "vitepress dev .",
     "build": "vitepress build .",
     "preview": "vitepress preview .",
-    "check": "node scripts/check-docs.mjs && vitepress build ."
+    "check": "node scripts/check-docs.mjs && vitepress build . && node scripts/check-public-build.mjs"
   },
   "devDependencies": {
     "vitepress": "1.6.4"

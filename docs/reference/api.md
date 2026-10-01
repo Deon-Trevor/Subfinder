@@ -1,7 +1,7 @@
 # API reference
 
 These are the Compose service's public and private HTTP interfaces. The
-[Cloudflare migration guide](/operations/cloudflare) describes the separate
+[Cloudflare deployment guide](/operations/cloudflare) describes the separate
 read Worker and its deployment controls.
 
 ## Routes

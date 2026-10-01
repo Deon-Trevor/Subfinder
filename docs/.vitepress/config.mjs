@@ -5,7 +5,16 @@ export default defineConfig({
   title: 'Subfinder',
   description: 'Passive subdomain index documentation',
   cleanUrls: true,
-  srcExclude: ['README.md'],
+  srcExclude: [
+    'README.md',
+    'operations/source-refresh.md',
+    'operations/staging-reconciliation.md',
+    'operations/staging-compaction.md',
+    'operations/staging-cost.md',
+    'operations/next-czds-batch.md',
+    'operations/czds-stage-sweep.md',
+    'operations/cutover-acceptance.md'
+  ],
   head: [
     ['link', { rel: 'icon', href: '/docs/mark.svg', type: 'image/svg+xml' }],
     ['meta', { name: 'theme-color', content: '#101a26' }]
@@ -33,22 +42,15 @@ export default defineConfig({
         items: [
           { text: 'API and MCP', link: '/reference/api' },
           { text: 'Source catalog', link: '/reference/sources' },
-          { text: 'Ingest source data', link: '/how-to/ingestion' }
+          { text: 'Ingest source data', link: '/how-to/ingestion' },
+          { text: 'Web interface', link: '/explanation/web-interface' }
         ]
       },
       {
-        text: 'Operate Subfinder',
+        text: 'Deploy Subfinder',
         items: [
           { text: 'Compose service', link: '/operations/compose' },
-          { text: 'Cloudflare migration', link: '/operations/cloudflare' },
-          { text: 'Cloudflare source refresh', link: '/operations/source-refresh' },
-          { text: 'Staging reconciliation', link: '/operations/staging-reconciliation' },
-          { text: 'Staging compaction', link: '/operations/staging-compaction' },
-          { text: 'Staging throughput and cost', link: '/operations/staging-cost' },
-          { text: 'Next CZDS batch', link: '/operations/next-czds-batch' },
-          { text: 'Stage remaining CZDS zones', link: '/operations/czds-stage-sweep' },
-          { text: 'Cutover acceptance', link: '/operations/cutover-acceptance' },
-          { text: 'Web interface', link: '/explanation/web-interface' }
+          { text: 'Cloudflare deployment', link: '/operations/cloudflare' }
         ]
       }
     ],

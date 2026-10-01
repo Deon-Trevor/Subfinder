@@ -12,20 +12,13 @@ const pages = [
   'how-to/ingestion.md',
   'operations/compose.md',
   'operations/cloudflare.md',
-  'operations/source-refresh.md',
-  'operations/staging-reconciliation.md',
-  'operations/staging-compaction.md',
-  'operations/staging-cost.md',
-  'operations/next-czds-batch.md',
-  'operations/czds-stage-sweep.md',
-  'operations/cutover-acceptance.md',
   'explanation/web-interface.md'
 ]
 const requiredFacts = new Map([
   ['reference/api.md', ['POST /internal/v1/record-batches', 'POST /mcp', 'X-Next-Cursor']],
   ['operations/compose.md', ['CTLOGS_PUBLIC_INFLIGHT_LIMIT', 'CTLOGS_FORWARDED_ALLOW_IPS']],
   ['how-to/ingestion.md', ['CTLOGS_CZDS_MAX_ZONES', 'CTLOGS_URLSCAN_APEXES']],
-  ['operations/cloudflare.md', ['catalog/root.json', 'PUBLISH_TOKEN', 'CZDS_PASSWORD']]
+  ['operations/cloudflare.md', ['catalog/root.json', 'PUBLISH_TOKEN', 'CZDS_PASSWORD', 'search.example.net']]
 ])
 const errors = []
 

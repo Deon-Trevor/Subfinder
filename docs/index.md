@@ -26,7 +26,7 @@ features:
     link: /reference/sources
     linkText: View sources
   - title: Run it your way
-    details: Operate the Compose service or follow the separate Cloudflare migration architecture and publication controls.
+    details: Start a new Compose index or configure your own Cloudflare resources and publication controls.
     link: /operations/compose
     linkText: Read operations
 ---
@@ -36,4 +36,4 @@ features:
 - **New operator:** [start the Compose service](/getting-started) and check the [operating limits](/operations/compose).
 - **API consumer:** use the [search, records, batch, and MCP contracts](/reference/api).
 - **Ingestion maintainer:** review the [source catalog](/reference/sources) and [ingestion commands](/how-to/ingestion).
-- **Cloudflare migration:** follow the [Worker and catalog generation guide](/operations/cloudflare). Its staging and production steps are distinct.
+- **Cloudflare operator:** follow the [Worker and catalog generation guide](/operations/cloudflare) to start with your own empty resources.

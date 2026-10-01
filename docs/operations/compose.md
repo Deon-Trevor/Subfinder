@@ -5,7 +5,7 @@ The [getting-started guide](/getting-started) covers initial setup.
 
 ## Bound request load
 
-The Compose edge admits an initial global burst of 80 public requests, then
+The provided Compose edge admits an initial global burst of 80 public requests, then
 limits sustained traffic to 10 requests per second. It also applies an
 80-request per-client burst with a 10 request-per-second sustained rate and
 bounds active proxied requests to 96 globally and 80 per client. Excess edge
@@ -27,9 +27,9 @@ time.
 
 Set `CTLOGS_PUBLIC_INFLIGHT_LIMIT` and `CTLOGS_SERVICE_INFLIGHT_LIMIT` to
 change the two limits. The default catalog concurrency is one. Local burst
-tests show that 70 reads take about 55 ms sequentially and about 379 ms with
-eight reader threads. Keep `CTLOGS_CATALOG_CONCURRENCY=1` unless a benchmark
-on the deployment host proves that a different value is faster.
+tests are not a substitute for measuring your own host. Keep
+`CTLOGS_CATALOG_CONCURRENCY=1` unless a benchmark on your deployment proves
+that a different value is faster.
 
 Concurrent quota checks wait 2 ms so the control database can commit them in
 one ordered transaction. `CTLOGS_CONTROL_BATCH_WINDOW_SECONDS` changes that
@@ -40,9 +40,9 @@ the client disconnects before it receives the response.
 
 Run one Uvicorn worker. The in-process request limits apply per worker. Keep
 `/health` outside public edge limits so an overloaded instance remains
-observable. uMzingeli should call `http://subfinder-index:8200` over the
-private data network with its service token; it must not loop through the
-public edge, where public DoS protection sheds excess traffic.
+observable. Trusted peer services should use the private data network and a
+service token instead of looping through the public edge, where overload
+protection may shed traffic.
 
 ## Configure trusted client addresses
 

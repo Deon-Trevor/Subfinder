@@ -27,14 +27,14 @@ literally. For local development, see the [getting-started guide](docs/getting-s
 - [API reference](docs/reference/api.md), including MCP and uMzingeli batches
 - [Compose operations](docs/operations/compose.md), including quotas and proxy trust
 - [Ingestion guide](docs/how-to/ingestion.md) and [source catalog](docs/reference/sources.md)
-- [Cloudflare migration](docs/operations/cloudflare.md)
+- [Cloudflare deployment](docs/operations/cloudflare.md)
 - [Web interface design](docs/explanation/web-interface.md)
 
 The documentation site has its own Cloudflare Pages build. See
 [docs/README.md](docs/README.md) for local preview and Pages settings.
 The public service is [subfinder.syncpundit.io](https://subfinder.syncpundit.io/),
 with [documentation at `/docs/`](https://subfinder.syncpundit.io/docs/).
-The Workers hostname is a deployment preview, not the public API address.
+Use the public domain in client configuration, not an underlying Worker address.
 
 uMzingeli consumes the same versioned records and durable-batch API from either
 runtime. Local Compose uses `http://subfinder-index:8200` on the private data
@@ -46,5 +46,5 @@ Existing `.env` values override those defaults, even after an image rebuild.
 
 - `src/ctlogs/`: API, index, schedulers, and source adapters.
 - `web/`: static search interface.
-- `cloudflare/`: Workers and generation pipeline for the Cloudflare migration.
+- `cloudflare/`: Workers and generation pipeline for Cloudflare deployments.
 - `tests/`: service and deployment contract tests.
