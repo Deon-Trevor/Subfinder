@@ -8,6 +8,6 @@
     "verify": "node scripts/verify-assets.mjs"
   },
   "devDependencies": {
-    "wrangler": "^4.141.0"
+    "wrangler": "^4.146.0"
   }
 }
