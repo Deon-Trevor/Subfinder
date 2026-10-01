@@ -81,6 +81,7 @@ before(async () => {
   for (const name of [
     "0001_generation_ledger.sql",
     "0002_seed_publication.sql",
+    "0004_expand_source_kinds.sql",
   ]) {
     const migration = readFileSync(resolve(workerRoot, "migrations", name), "utf8");
     for (const statement of migration.split(";").map((value) => value.trim()).filter(Boolean)) {
