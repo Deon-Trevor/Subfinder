@@ -13,11 +13,13 @@ repository root. Compose and Cloudflare are separate deployments.
 
 ## Run with Docker (recommended)
 
-Build and run with Compose. A one-shot migration prepares the catalog and small
-control database before the read-only API, recurring scheduler, and dedicated
-enrichment worker start. The two writers serialize every catalog mutation with
-one cross-process lock. The published loopback port belongs to a bounded NGINX
-edge; the API itself is reachable only from Docker networks.
+Build and run with Compose. On a new installation, the one-shot database step
+creates the catalog and control schema before the read-only API, recurring
+scheduler, and dedicated enrichment worker start. The index begins empty.
+Configure your own approved zones and sources; the hosted catalog and its
+history are not copied into your instance. The two writers serialize catalog
+mutations with one cross-process lock. The published loopback port belongs to
+a bounded NGINX edge; the API itself is reachable only from Docker networks.
 
 Copy `.env.example` to the single untracked `.env` deployment file and fill in
 only the credentials and overrides this deployment uses. Compose passes
@@ -30,7 +32,7 @@ injects the whole file into a container.
 
 ```bash
 cp .env.example .env
-docker network create syncpundit-data-plane
+docker network create subfinder-data-plane
 docker compose up -d --build
 ```
 
@@ -39,7 +41,7 @@ catalog lives in `ctlogs-data`; quotas and the deduplicated refresh queue live
 separately in `ctlogs-control`.
 Compose publishes the edge on port 8200 on host loopback only, for the host
 NGINX. It attaches the API container alone to the external
-`syncpundit-data-plane` network, under the `subfinder-index` alias. Create that
+`subfinder-data-plane` network, under the `subfinder-index` alias. Create that
 network once before the first deployment.
 The API opens the catalog read-only. Migration, the recurring scheduler, and
 the single enrichment worker are the only Compose services that can mutate
@@ -47,17 +49,15 @@ it; every runtime write uses the same cross-process catalog lock.
 `CTLOGS_DATA_VOLUME`, `CTLOGS_CONTROL_VOLUME`, and `CTLOGS_DATA_NETWORK` in
 `.env` name the owner of each shared volume and network.
 
-The first deployment must stop every old API and scheduler container before
-starting the new set. Old processes must not overlap the replacement. `docker
-compose down` preserves named volumes unless `--volumes` is supplied. The
-migration copies any legacy searched-apex queue entries out of the catalog and
-into the control database before services start.
+For later upgrades, stop old API and scheduler containers before starting
+replacements. Old and new writers must not overlap. `docker compose down`
+preserves named volumes unless `--volumes` is supplied.
 
 Healthcheck: `curl -fsS http://127.0.0.1:8200/health`
 
 ```bash
-curl "http://127.0.0.1:8200/v1/search?apex=syncpundit.io"
-curl "http://127.0.0.1:8200/v1/search?apex=syncpundit.io&format=json"
+curl "http://127.0.0.1:8200/v1/search?apex=example.com"
+curl "http://127.0.0.1:8200/v1/search?apex=example.com&format=json"
 ```
 
 ## Run locally

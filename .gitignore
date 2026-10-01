@@ -7,6 +7,7 @@ cloudflare/static-worker/dist/
 .env
 .env.*
 !.env.example
+.dev.vars*
 .firecrawl/
 .pytest_cache/
 __pycache__/
@@ -19,3 +20,28 @@ data/
 .DS_Store
 .codex/
 main.py
+
+# Operator-specific Cloudflare deployments and local audit material.
+cloudflare/*/wrangler.jsonc
+cloudflare/*/wrangler.staging*.jsonc
+cloudflare/*/wrangler.production.jsonc
+cloudflare/*/wrangler.local*.jsonc
+.audit/
+docs/operations/internal/
+scripts/czds_*batch*.json
+scripts/czds_*
+scripts/test_czds_*
+scripts/*staging*
+scripts/*staged*
+scripts/dispatch_staging_*
+scripts/schedule_staging_*
+scripts/plan_czds_stage_batch.mjs
+scripts/run_czds_stage_sweep.mjs
+scripts/select_czds_small_batch.mjs
+cloudflare/*/test/staging-config.test.js
+cloudflare/index-worker/scripts/benchmark-live-batch.js
+cloudflare/index-worker/scripts/verify-cutover.js
+cloudflare/index-worker/scripts/verify-staging-preseed.js
+cloudflare/index-worker/scripts/verify-threat-hunter.js
+cloudflare/compaction-worker/migrations/private/
+web/_headers

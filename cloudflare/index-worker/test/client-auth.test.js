@@ -11,7 +11,7 @@ test("production accepts only the hostname-scoped transformed IP header", async 
   const identity = await clientIdentity(production, env);
   assert.equal(identity.subject, "ip:192.0.2.10");
 
-  const preview = new Request("https://subfinder.pundit.workers.dev/v1/search", { headers });
+  const preview = new Request("https://preview.example.net/v1/search", { headers });
   await assert.rejects(clientIdentity(preview, env), /client IP is unavailable/);
   await assert.rejects(clientIdentity(production, {}), /client IP is unavailable/);
 });

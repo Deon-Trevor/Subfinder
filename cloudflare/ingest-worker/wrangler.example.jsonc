@@ -1,35 +1,35 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "subfinder-ingest",
+  "name": "example-direct-ct-ingest",
   "main": "src/index.js",
   "compatibility_date": "2026-09-27",
-  "triggers": { "crons": ["*/5 * * * *"] },
+  "triggers": { "crons": [] },
   "r2_buckets": [
     {
       "binding": "CATALOG",
-      "bucket_name": "subfinder-index-spike"
+      "bucket_name": "example-catalog"
     }
   ],
   "d1_databases": [
     {
       "binding": "CONTROL",
-      "database_name": "subfinder-ingest-control",
+      "database_name": "example-direct-ct-control",
       "database_id": "REPLACE_WITH_D1_DATABASE_ID",
       "migrations_dir": "migrations"
     }
   ],
   "queues": {
     "producers": [
-      { "binding": "INGEST_QUEUE", "queue": "subfinder-direct-ct" },
-      { "binding": "COMPACTION_QUEUE", "queue": "subfinder-compaction" }
+      { "binding": "INGEST_QUEUE", "queue": "example-direct-ct-jobs" },
+      { "binding": "COMPACTION_QUEUE", "queue": "example-compaction-jobs" }
     ],
     "consumers": [
       {
-        "queue": "subfinder-direct-ct",
+        "queue": "example-direct-ct-jobs",
         "max_batch_size": 5,
         "max_batch_timeout": 5,
         "max_retries": 5,
-        "dead_letter_queue": "subfinder-direct-ct-dead"
+        "dead_letter_queue": "example-direct-ct-dlq"
       }
     ]
   },

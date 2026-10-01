@@ -1,32 +1,32 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "subfinder-urlscan-ingest",
+  "name": "example-urlscan-ingest",
   "main": "src/index.js",
   "compatibility_date": "2026-09-27",
-  "triggers": { "crons": ["* * * * *"] },
+  "triggers": { "crons": [] },
   "r2_buckets": [
-    { "binding": "CATALOG", "bucket_name": "subfinder-index-spike" }
+    { "binding": "CATALOG", "bucket_name": "example-catalog" }
   ],
   "d1_databases": [
     {
       "binding": "CONTROL",
-      "database_name": "subfinder-urlscan-control",
+      "database_name": "example-urlscan-control",
       "database_id": "REPLACE_WITH_D1_DATABASE_ID",
       "migrations_dir": "migrations"
     }
   ],
   "queues": {
     "producers": [
-      { "binding": "URLSCAN_QUEUE", "queue": "subfinder-urlscan" },
-      { "binding": "COMPACTION_QUEUE", "queue": "subfinder-compaction" }
+      { "binding": "URLSCAN_QUEUE", "queue": "example-urlscan-jobs" },
+      { "binding": "COMPACTION_QUEUE", "queue": "example-compaction-jobs" }
     ],
     "consumers": [
       {
-        "queue": "subfinder-urlscan",
+        "queue": "example-urlscan-jobs",
         "max_batch_size": 5,
         "max_batch_timeout": 5,
         "max_retries": 5,
-        "dead_letter_queue": "subfinder-urlscan-dead"
+        "dead_letter_queue": "example-urlscan-dlq"
       }
     ]
   },

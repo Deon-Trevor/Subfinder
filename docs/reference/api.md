@@ -1,7 +1,7 @@
 # API reference
 
 These are the Compose service's public and private HTTP interfaces. The
-[Cloudflare migration guide](/operations/cloudflare) describes the separate
+[Cloudflare deployment guide](/operations/cloudflare) describes the separate
 read Worker and its deployment controls.
 
 ## Routes
@@ -112,11 +112,11 @@ contains at most 100 unique apexes and 5,000 hostnames by default. Set
 `CTLOGS_BATCH_MAX_APEXES` and `CTLOGS_BATCH_MAX_RECORDS` to lower deployment
 limits. Oversized requests return `413` and must be split.
 
-## Durable uMzingeli batches {#durable-threat-hunter-batches}
+## Durable record batches {#durable-record-batches}
 
-uMzingeli uses the durable queue rather than hold a request open. The Python
-service and Cloudflare read Worker implement the same admission and replay
-contract:
+Use the durable queue when a consumer needs many apexes without holding a
+request open. The Python service and Cloudflare read Worker implement the same
+admission and replay contract:
 
 ```http
 POST /internal/v1/record-batches
@@ -139,10 +139,10 @@ One normal-hunt job accepts at most 25,000 unique apexes by default. The token
 allowance defaults to 250,000 apex units per UTC day, enough for ten full-sized
 normal hunts, while workers claim up to 100 apexes per slice.
 
-These bounds are independent of uMzingeli's 1,000 completed-apex delivery bound
-and 1,000-candidate source result budget. Its `SUBFINDER_BATCH_MAX_APEXES` must
-not exceed the serving instance's admission bound. Stale local `.env` values
-can lower admission or token quota despite newer Compose defaults.
+Consumer-side delivery and result limits are independent of admission here.
+Keep the consumer's requested batch size within the serving instance's bound.
+Existing local `.env` values can lower admission or token quota despite newer
+Compose defaults.
 
 Two durable `batch-worker` replicas consume bounded slices by default. A worker
 isolates a large apex and reports it in the chunk's `errors` collection rather
@@ -152,7 +152,7 @@ globally and per service token; an idempotent retry of the same normalized
 request does not consume quota twice.
 
 For another Compose project, attach only its API or worker that needs these
-facts to `syncpundit-data-plane` and call
+facts to `subfinder-data-plane` and call
 `http://subfinder-index:8200/v1/records?apex=example.com`. Do not mount the
 Subfinder SQLite volume into another application. Subfinder owns neutral index
 facts and provenance; classifications, scores, and application-specific
