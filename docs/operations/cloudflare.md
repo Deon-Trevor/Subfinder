@@ -36,16 +36,18 @@ generation is active, an empty or unready search service is expected.
 
 1. Create an R2 catalog bucket, a generation-ledger D1 database, a compaction
    Queue, and its dead-letter Queue in your Cloudflare account.
-2. Use the `wrangler.example.jsonc` files in the optional Worker directories
-   as binding references. The read Worker has no generic checked-in template:
-   create its configuration with your own hostname, catalog bucket, Pages
-   origin, Durable Object, and optional service bindings. Never deploy a
-   checked-in environment configuration unchanged.
+2. Copy each Worker's `wrangler.example.jsonc` to an ignored
+   `wrangler.local.jsonc` in the same directory. Replace every example name,
+   hostname, and database ID with resources from your account. Keep the
+   configured files in your own private version control. Cloudflare does not
+   store a recoverable copy of your deployment procedure.
 3. Apply the migrations in the relevant Worker's `migrations/` directory to
    its own D1 database. Do this before sending jobs to a Queue.
-4. Leave Cron lists empty for the initial deployment. Deploy the ingestion
-   Workers and compaction Worker only after their bindings and Queue consumers
-   point to the same catalog and generation ledger.
+4. Leave Cron lists empty for the initial deployment. Check that each optional
+   ingestion Worker and the compaction Worker bind the same catalog bucket and
+   compaction Queue. Check that each Queue consumer reads the Queue named by
+   its producer. The read Worker needs the same catalog bucket, but no
+   generation-ledger D1 binding.
 5. Set `PUBLISH_TOKEN` as a compaction Worker secret. Set `CLIENT_TOKENS` as a
    read Worker secret if clients need authenticated quotas or batch APIs.
    Never commit raw tokens or provider credentials.
@@ -56,6 +58,32 @@ If you enable the optional URLScan Worker, set `URLSCAN_API_KEY` as its Worker
 secret. If you enable CZDS, set `CZDS_USERNAME` and `CZDS_PASSWORD` as Worker
 secrets. Do not put these values in Wrangler configuration, D1 rows, Queue
 messages, or documentation.
+
+Check the binding names together before deploying. From the repository root,
+run this command after creating the two required local configs:
+
+```sh
+node scripts/check_cloudflare_bindings.mjs \
+  --read cloudflare/index-worker/wrangler.local.jsonc \
+  --compaction cloudflare/compaction-worker/wrangler.local.jsonc
+```
+
+Add `--direct-ct`, `--urlscan`, or `--czds` with the matching local config path
+for each optional Worker that you deploy. The check requires one catalog bucket
+and one compaction Queue across the selected Workers. It also checks the read
+Worker's docs origin, hostname, and catalog root. Run the checker with
+`--examples` to check the shipped templates.
+
+From each Worker directory, inspect the binding table before a live deploy:
+
+```sh
+npx wrangler deploy --dry-run --config wrangler.local.jsonc
+```
+
+If the binding table matches your resources, run `npm run deploy:configured`.
+Both commands read the local source and `wrangler.local.jsonc`. They do not
+pull either one from an existing Cloudflare Worker. The example files leave
+all source and compaction Crons disabled.
 
 ## Publish the first catalog
 
@@ -82,6 +110,19 @@ Build the docs from `docs/` with `npm run check`, then upload
 `.vitepress/dist` to your Pages project. Configure the read Worker's docs
 origin to match that project. The Pages project is a static asset origin; it
 must not receive catalog bindings or secrets.
+
+Pages receives the built site, not the Markdown source or an operator's
+runbooks. R2 holds catalog objects, and D1 holds control state. Keep source
+code, schema migrations, configured Wrangler files, and recovery procedures
+in versioned storage that you control. Back up the data you need to restore
+separately. A deployed Worker and its bindings are not a substitute for those
+copies. `.gitignore` prevents new local files from being tracked; it does not
+remove files from existing Git history.
+
+If you expose a preview hostname, keep any hostname-specific `web/_headers`
+file in your private deployment material. The public example does not assume
+a preview hostname. Check the generated asset headers on both the preview and
+public hostnames before announcing the site.
 
 If your zone removes visitor IP headers, configure a request-header transform
 for **only** the read Worker's hostname to overwrite a dedicated trusted

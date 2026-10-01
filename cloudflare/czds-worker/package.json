@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "deploy": "wrangler deploy"
+    "deploy:configured": "wrangler deploy --config wrangler.local.jsonc",
+    "deploy:staging": "wrangler deploy --config wrangler.staging.jsonc"
   },
   "devDependencies": {
     "esbuild": "0.28.1",

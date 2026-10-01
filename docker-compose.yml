@@ -247,5 +247,5 @@ volumes:
 
 networks:
   data-plane:
-    name: ${CTLOGS_DATA_NETWORK:-syncpundit-data-plane}
+    name: ${CTLOGS_DATA_NETWORK:-subfinder-data-plane}
     external: true

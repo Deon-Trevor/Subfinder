@@ -172,7 +172,7 @@ export async function docsPage(request, env, url, upstreamFetch = fetch) {
   const returnedHeaders = new Headers(response.headers);
   returnedHeaders.delete("set-cookie");
   returnedHeaders.delete("x-robots-tag");
-  if (url.hostname === "subfinder.pundit.workers.dev") {
+  if (env.CLIENT_IP_HEADER_HOSTNAME && url.hostname !== env.CLIENT_IP_HEADER_HOSTNAME) {
     returnedHeaders.set("x-robots-tag", "noindex");
   }
   const versionedAsset = /^\/docs\/assets\/.*\.[A-Za-z0-9_-]{8,}\.(?:lean\.)?(?:js|css|woff2?)$/;

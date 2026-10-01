@@ -7,13 +7,7 @@ export default defineConfig({
   cleanUrls: true,
   srcExclude: [
     'README.md',
-    'operations/source-refresh.md',
-    'operations/staging-reconciliation.md',
-    'operations/staging-compaction.md',
-    'operations/staging-cost.md',
-    'operations/next-czds-batch.md',
-    'operations/czds-stage-sweep.md',
-    'operations/cutover-acceptance.md'
+    'operations/internal/**'
   ],
   head: [
     ['link', { rel: 'icon', href: '/docs/mark.svg', type: 'image/svg+xml' }],

@@ -15,7 +15,7 @@ function statements(file) {
 }
 
 
-test("source-kind migration preserves existing generation references", async () => {
+test("fresh ledger accepts supported sources and generation references", async () => {
   const miniflare = new Miniflare({
     workers: [{ config: {
       name: "subfinder-migration-test",
@@ -50,7 +50,6 @@ test("source-kind migration preserves existing generation references", async () 
        object_sha256, object_bytes, record_count, created_at)
        VALUES (?, ?, '0', 'fragments/existing.json.gz', ?, 1, 1, ?)`,
     ).bind(generationId, deltaId, "d".repeat(64), now).run();
-    await db.batch(statements("0003_public_bulk_source.sql").map((sql) => db.prepare(sql)));
     const existing = await db.prepare(
       "SELECT source_kind, generation_id FROM catalog_deltas WHERE delta_id = ?",
     ).bind(deltaId).first();

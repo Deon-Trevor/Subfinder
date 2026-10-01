@@ -14,30 +14,25 @@ const publicPages = [
   'operations/cloudflare.html',
   'explanation/web-interface.html'
 ]
-const internalPages = [
-  'operations/source-refresh',
-  'operations/staging-reconciliation',
-  'operations/staging-compaction',
-  'operations/staging-cost',
-  'operations/next-czds-batch',
-  'operations/czds-stage-sweep',
-  'operations/cutover-acceptance'
-]
+const publicOperations = new Set(['compose', 'cloudflare'])
 const privateMarkers = [
-  'subfinder-index-stage.pundit.workers.dev',
-  'subfinder-catalog-stage',
-  'subfinder-urlscan-prod',
-  '0003_public_bulk_source.sql',
-  'subfinder-migration-backup'
+  /subfinder-[a-z-]+-stage\b/,
+  /subfinder-[a-z-]+-prod\b/,
+  /migration-backup/,
+  /\b000\d+_[a-z_]+\.sql\b/,
+  /\/Users\/[^/]+\//
 ]
 const errors = []
 
 for (const page of publicPages) {
   if (!existsSync(resolve(dist, page))) errors.push(`missing public page ${page}`)
 }
-for (const page of internalPages) {
-  if (existsSync(resolve(dist, `${page}.html`))) {
-    errors.push(`internal page published: ${page}`)
+const operationsDir = resolve(dist, 'operations')
+if (existsSync(operationsDir)) {
+  for (const entry of readdirSync(operationsDir)) {
+    if (!entry.endsWith('.html') || !publicOperations.has(entry.slice(0, -5))) {
+      errors.push(`unexpected operations page: ${entry}`)
+    }
   }
 }
 
@@ -48,8 +43,13 @@ function checkTree(directory) {
       checkTree(path)
     } else if (['.html', '.js', '.json'].includes(extname(entry.name))) {
       const contents = readFileSync(path, 'utf8')
-      for (const marker of [...internalPages, ...privateMarkers]) {
-        if (contents.includes(marker)) errors.push(`${path}: published ${marker}`)
+      for (const marker of privateMarkers) {
+        if (marker.test(contents)) errors.push(`${path}: published ${marker}`)
+      }
+      for (const match of contents.matchAll(/operations\/([a-z][a-z0-9-]+)/g)) {
+        if (!publicOperations.has(match[1])) {
+          errors.push(`${path}: linked unpublished operations page ${match[1]}`)
+        }
       }
     }
   }
@@ -62,5 +62,5 @@ if (errors.length) {
   for (const error of errors) process.stderr.write(`${error}\n`)
   process.exitCode = 1
 } else {
-  process.stdout.write(`Checked ${publicPages.length} public pages and excluded ${internalPages.length} internal pages.\n`)
+  process.stdout.write(`Checked ${publicPages.length} public pages and excluded private operations pages.\n`)
 }

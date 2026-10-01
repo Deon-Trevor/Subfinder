@@ -1,9 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "subfinder-czds-ingest",
+  "name": "example-czds-ingest",
   "main": "src/index.js",
   "compatibility_date": "2026-09-27",
-  "triggers": { "crons": ["0 2 * * *"] },
+  "triggers": { "crons": [] },
   "containers": [
     { "class_name": "CzdsParser", "image": "../Dockerfile.czds",
       "max_instances": 2, "instance_type": "standard-2" }
@@ -15,24 +15,24 @@
     { "tag": "v1-czds-parser", "new_sqlite_classes": ["CzdsParser"] }
   ],
   "r2_buckets": [
-    { "binding": "CATALOG", "bucket_name": "subfinder-index-spike" }
+    { "binding": "CATALOG", "bucket_name": "example-catalog" }
   ],
   "d1_databases": [
     {
       "binding": "CONTROL",
-      "database_name": "subfinder-czds-control",
+      "database_name": "example-czds-control",
       "database_id": "REPLACE_WITH_D1_DATABASE_ID",
       "migrations_dir": "migrations"
     }
   ],
   "queues": {
     "producers": [
-      { "binding": "COMPACTION_QUEUE", "queue": "subfinder-compaction" }
+      { "binding": "COMPACTION_QUEUE", "queue": "example-compaction-jobs" }
     ]
   },
   "workflows": [
     {
-      "name": "subfinder-czds-ingestion",
+      "name": "example-czds-ingestion",
       "binding": "CZDS_WORKFLOW",
       "class_name": "CzdsIngestionWorkflow"
     }

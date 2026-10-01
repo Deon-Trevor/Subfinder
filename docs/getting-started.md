@@ -32,7 +32,7 @@ injects the whole file into a container.
 
 ```bash
 cp .env.example .env
-docker network create syncpundit-data-plane
+docker network create subfinder-data-plane
 docker compose up -d --build
 ```
 
@@ -41,7 +41,7 @@ catalog lives in `ctlogs-data`; quotas and the deduplicated refresh queue live
 separately in `ctlogs-control`.
 Compose publishes the edge on port 8200 on host loopback only, for the host
 NGINX. It attaches the API container alone to the external
-`syncpundit-data-plane` network, under the `subfinder-index` alias. Create that
+`subfinder-data-plane` network, under the `subfinder-index` alias. Create that
 network once before the first deployment.
 The API opens the catalog read-only. Migration, the recurring scheduler, and
 the single enrichment worker are the only Compose services that can mutate

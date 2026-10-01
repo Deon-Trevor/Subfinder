@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/prepare-assets.mjs",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy:configured": "npm run build && wrangler deploy --config wrangler.local.jsonc",
     "verify": "node scripts/verify-assets.mjs"
   },
   "devDependencies": {

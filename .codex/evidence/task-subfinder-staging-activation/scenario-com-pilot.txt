@@ -1,9 +1,0 @@
-Bounded .com compaction pilot, 2026-09-28 UTC
-
-The optional 20,000-record stress test passed in local Miniflare: map 4274 ms, all 256 partitions, one reduced partition with 70 records in 75 ms. MAX_REDUCE_RECORDS=1 failed closed before the same partition succeeded at the configured bound.
-
-One actual staging .com delta was downloaded to a temporary local directory. The Cloudflare CLI returned decoded JSON, despite the .json.gz object key. Its JSON had 20,000 records across 256 hash partitions. The bounded local pilot used 55 real records from partition b4 and the 8,743,307-byte b4 bundle plus its seed index. It mapped one fragment, reduced the partition, published a candidate, verified a real CZDS provenance row, activated the candidate, and rolled back to seed-20260927. The isolated test finished in 5.64 seconds and did not write to staging R2 or D1.
-
-The source delta's downloaded JSON SHA-256 was f84f70af863a5a0cf6e7e8bbd0c1dad77a6ab61a5986e78ab319861a807da5d0. This digest is not the R2 object's compressed-byte digest. The temporary 2 MB downloaded copy was removed after the passing pilot. No staging deltas were deleted.
-
-The staging Queue consumer remains disconnected. This pilot does not measure the cost or correctness of all 8,760 deltas, 256 partitions per generation, or remote Worker resource use. That gate remains partial.

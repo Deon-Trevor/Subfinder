@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS catalog_deltas (
   delta_id TEXT PRIMARY KEY,
-  source_kind TEXT NOT NULL CHECK (source_kind IN ('direct-ct', 'urlscan', 'czds')),
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('direct-ct', 'static-ct', 'urlscan', 'czds', 'public-bulk')),
   object_key TEXT NOT NULL UNIQUE,
   object_sha256 TEXT NOT NULL,
   object_bytes INTEGER NOT NULL CHECK (object_bytes > 0),

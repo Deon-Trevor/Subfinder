@@ -349,11 +349,13 @@ test("non-API GET and HEAD requests fall through to the static asset binding", a
 
 test("docs proxy keeps the worker path and does not send credentials upstream", async () => {
   const origin = "https://subfinder-docs.pages.dev";
-  const request = new Request("https://subfinder.pundit.workers.dev/docs/reference/api?x=1", {
+  const request = new Request("https://preview.example.net/docs/reference/api?x=1", {
     headers: { authorization: "Bearer private", cookie: "session=private", accept: "text/html" },
   });
   let destination;
-  const response = await docsPage(request, { DOCS_ORIGIN: origin }, new URL(request.url),
+  const response = await docsPage(request,
+    { DOCS_ORIGIN: origin, CLIENT_IP_HEADER_HOSTNAME: "subfinder.syncpundit.io" },
+    new URL(request.url),
     async (url, options) => {
       destination = url.toString();
       assert.equal(options.headers.get("authorization"), null);
@@ -368,31 +370,33 @@ test("docs proxy keeps the worker path and does not send credentials upstream", 
   assert.equal(response.headers.get("x-robots-tag"), "noindex");
 
   const assetRequest = new Request(
-    "https://subfinder.pundit.workers.dev/docs/assets/style.ABC12345.css",
+    "https://preview.example.net/docs/assets/style.ABC12345.css",
   );
-  const asset = await docsPage(assetRequest, { DOCS_ORIGIN: origin },
+  const asset = await docsPage(assetRequest,
+    { DOCS_ORIGIN: origin, CLIENT_IP_HEADER_HOSTNAME: "subfinder.syncpundit.io" },
     new URL(assetRequest.url), async () => new Response("css"));
   assert.equal(asset.headers.get("cache-control"),
     "public, max-age=31536000, immutable");
   assert.equal(asset.headers.get("x-robots-tag"), "noindex");
   const unversionedRequest = new Request(
-    "https://subfinder.pundit.workers.dev/docs/assets/custom.css",
+    "https://preview.example.net/docs/assets/custom.css",
   );
   const unversioned = await docsPage(unversionedRequest, { DOCS_ORIGIN: origin },
     new URL(unversionedRequest.url), async () => new Response("css"));
   assert.equal(unversioned.headers.get("cache-control"), null);
 
   const productionRequest = new Request("https://subfinder.syncpundit.io/docs/");
-  const production = await docsPage(productionRequest, { DOCS_ORIGIN: origin },
+  const production = await docsPage(productionRequest,
+    { DOCS_ORIGIN: origin, CLIENT_IP_HEADER_HOSTNAME: "subfinder.syncpundit.io" },
     new URL(productionRequest.url), async () => new Response("docs", {
       headers: { "x-robots-tag": "noindex" },
     }));
   assert.equal(production.headers.get("x-robots-tag"), null);
 
-  const slash = await docsPage(new Request("https://subfinder.pundit.workers.dev/docs"),
-    { DOCS_ORIGIN: origin }, new URL("https://subfinder.pundit.workers.dev/docs"));
+  const slash = await docsPage(new Request("https://preview.example.net/docs"),
+    { DOCS_ORIGIN: origin }, new URL("https://preview.example.net/docs"));
   assert.equal(slash.status, 308);
-  assert.equal(slash.headers.get("location"), "https://subfinder.pundit.workers.dev/docs/");
+  assert.equal(slash.headers.get("location"), "https://preview.example.net/docs/");
 
   for (const path of [
     "/docs/operations/cloudflare",
@@ -527,11 +531,11 @@ test("MCP exposes only search and shares the HTTP allowance", async () => {
 test("MCP accepts the preview and production hosts but rejects an unlisted host", async () => {
   const worker = createMiniflare(workerRoot, {
     envOverrides: {
-      MCP_ALLOWED_HOSTS: "127.0.0.1,subfinder.pundit.workers.dev,subfinder.syncpundit.io",
+      MCP_ALLOWED_HOSTS: "127.0.0.1,preview.example.net,subfinder.syncpundit.io",
     },
   });
   try {
-    for (const hostname of ["subfinder.pundit.workers.dev", "subfinder.syncpundit.io"]) {
+    for (const hostname of ["preview.example.net", "subfinder.syncpundit.io"]) {
       const client = new Client({ name: "host-allowlist-test", version: "1.0.0" });
       try {
         const transport = new StreamableHTTPClientTransport(
