@@ -1,6 +1,6 @@
 # Documentation site
 
-The site in this directory is a separate static Cloudflare Pages project. The read Worker serves it at `https://subfinder.pundit.workers.dev/docs/` by proxying `/docs/*` to the Pages project. It does not share the read Worker's asset bundle.
+The site in this directory is a separate static Cloudflare Pages project. The read Worker serves it at `https://subfinder.syncpundit.io/docs/` by proxying `/docs/*` to the Pages project. It does not share the read Worker's asset bundle.
 
 ## Preview locally
 

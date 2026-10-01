@@ -63,7 +63,7 @@ probes the apex. Jobs are bounded globally and per requester, consume one
 normal search allowance unit only when first admitted, and hide their status
 from other requester identities.
 
-On `subfinder.pundit.workers.dev`, the Cloudflare Worker offers only the
+On `subfinder.syncpundit.io`, the Cloudflare Worker offers only the
 `urlscan` action. It reports `local_zone` as unavailable because the Worker
 has no local zone file. An admitted request uses one normal search allowance
 unit and reads at most one URLScan page. The provider read writes an immutable

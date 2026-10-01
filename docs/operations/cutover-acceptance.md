@@ -1,8 +1,8 @@
 # Cutover acceptance checks
 
-Run these checks against `subfinder.pundit.workers.dev` before proposing a
-production hostname change. The harness refuses any other origin, including
-`subfinder.syncpundit.io`. It reads the local SQLite catalog but does not write
+Run these checks against the Workers preview before changing DNS, then against
+`subfinder.syncpundit.io` after attaching the custom domain. The harness
+accepts only those two exact origins. It reads the local SQLite catalog but does not write
 to SQLite, R2, D1, Queues, or a batch job.
 
 From `cloudflare/index-worker`:
@@ -14,6 +14,11 @@ npm run verify:cutover -- \
   --sqlite /Users/pancake/Documents/subfinder-migration-backup/20260927T050403Z/catalog.sqlite3 \
   --expect-generation EXPECTED_GENERATION
 ```
+
+After the production hostname is attached, repeat the same command with
+`--base https://subfinder.syncpundit.io`. If a valid production client token
+is available, pass it as `SUBFINDER_CUTOVER_TOKEN`; do not use the staging token
+for the production check.
 
 Use the generation ID approved for cutover, not the seed ID by habit. If the
 expected generation is omitted, the harness reports that gate as
@@ -48,7 +53,9 @@ admission default and replay path without submitting a live staging job.
 
 That local result is not evidence of live Queue throughput or a completed
 production-scale batch. Keep those gates separate in the cutover review.
-Also require the [staging compaction checks](/operations/staging-compaction),
+For a full-catalog release, also require the
+[staging compaction checks](/operations/staging-compaction),
 [reconciliation](/operations/staging-reconciliation), and a reviewed
-[cost scorecard](/operations/staging-cost) before proposing activation or
-production cutover. This page authorizes neither action.
+[cost scorecard](/operations/staging-cost). The temporary production cutover
+uses the verified active staging root while later `.com` deltas continue.
+These checks do not activate a generation or enable source schedules.

@@ -1,7 +1,15 @@
 # Get started
 
-Run these commands from the repository root. The Compose deployment and the
-Cloudflare migration are separate paths.
+Use the hosted passive index without installing anything:
+
+```bash
+curl "https://subfinder.syncpundit.io/v1/search?apex=example.com"
+curl "https://subfinder.syncpundit.io/v1/search?apex=example.com&format=json"
+```
+
+The hosted catalog is being expanded. A missing hostname is not proof that it
+does not exist. To run your own service, use the Compose path below from the
+repository root. Compose and Cloudflare are separate deployments.
 
 ## Run with Docker (recommended)
 
